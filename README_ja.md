@@ -8,11 +8,11 @@
    </tr>
 </table>
 
-`UNL.nvim` (Unreal Neovim Library) は、Neovim上でUnreal Engine開発を強化するためのプラグイン群（`UEP.nvim`, `UCM.nvim`, `UBT.nvim`等）のための、共通化された共有ライブラリです。
+`UNL.nvim` (Unreal Neovim Library) は、Neovim上でUnreal Engine開発を強化するためのプラグイン群（[`UEP.nvim`](https://github.com/taku25/UEP.nvim), [`UCM.nvim`](https://github.com/taku25/UCM.nvim), [`UBT.nvim`](https://github.com/taku25/UBT.nvim)等）のための、共通化された共有ライブラリです。
 
 このライブラリは、プラグイン開発者がUnreal Engienのプラグインを作る上で無駄なコードを書く手間を省き、Plugin特有のロジック開発に集中できるように設計されています。通常、エンドユーザーが直接インストールや設定を行うことはなく、他のプラグインの依存関係として自動的に管理されます。
 
-[English](https://www.google.com/search?q=./README.md) | [日本語 (Japanese)](https://www.google.com/search?q=./README_ja.md)
+[English](README.md) | [日本語 (Japanese)](README_ja.md)
 
 -----
 
