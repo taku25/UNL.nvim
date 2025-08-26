@@ -5,6 +5,10 @@ local M = {
       mode = "auto",
       prefer = { "telescope", "fzf_lua", "native", "dummy" },
     },
+    filer = {
+      mode = "auto",
+      prefer = { "nvim-tree", "neo-tree", "native", "dummy"  },
+    },
     progress = {
       mode = "auto",
       enable = true,

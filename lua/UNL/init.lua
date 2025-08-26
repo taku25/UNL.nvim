@@ -4,6 +4,7 @@ local unl_defaults = require("UNL.config.defaults")
 -- サブシステムは、ここではrequireするだけ
 local backend_progress = require("UNL.backend.progress")
 local backend_picker = require("UNL.backend.picker")
+local backend_filer = require("UNL.backend.filer")
 
 local M = {}
 
@@ -20,7 +21,7 @@ function M.setup(user_config)
   -- 完全に準備ができた設定を読み込める
   backend_progress._load_providers()
   backend_picker.load_providers()
-
+  backend_filer.load_providers() -- これを追加
   -- 3. ★★★ 全ての準備が終わった最後に、ログを出力する ★★★
   local log = unl_log.get("UNL")
   if log then
