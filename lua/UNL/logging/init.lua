@@ -36,4 +36,12 @@ function M.get(name)
   return logger
 end
 
+function M.add_writer(name, writer)
+  if not writer then return end
+  return manager:add_writer(name, writer)
+end
+
+function M.dispatch_event(name, event_name, payload)
+  manager:dispatch_event(name, event_name, payload)
+end
 return M

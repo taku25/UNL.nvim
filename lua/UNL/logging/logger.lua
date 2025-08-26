@@ -52,6 +52,7 @@ local function create_logger_instance(spec)
     end
   end
   local L = {}
+  L._spec = spec
   function L.perf(category, fmt, ...)
     local cfg = spec.config_getter()
     compile_perf(cfg, perf_cache)
@@ -101,11 +102,37 @@ function Manager:create(name, spec)
   self._loggers[name] = create_logger_instance(spec)
   return self._loggers[name]
 end
+
 function Manager:get(name)
   return self._loggers[name]
 end
 
+function Manager:add_writer(name, writer)
+  local logger = self:get(name)
+  if not logger then
+    return false, "Logger not found: " .. tostring(name)
+  end
+  table.insert(logger._spec.writers, writer)
+  return true
+end
+
 function Manager:_reset()
   self._loggers = {}
+end
+
+function Manager:dispatch_event(name, event_name, payload)
+  local logger = self:get(name)
+  if not (logger and logger._spec and logger._spec.writers) then
+    return
+  end
+  
+  -- 登録されている全てのwriterをループ
+  for _, writer in ipairs(logger._spec.writers) do
+    -- もしwriterがそのイベント名の関数を持っていれば、それを呼び出す
+    if type(writer[event_name]) == "function" then
+      -- pcallで安全に実行
+      pcall(writer[event_name], writer, payload)
+    end
+  end
 end
 return Manager:new()
