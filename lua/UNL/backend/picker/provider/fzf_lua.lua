@@ -1,3 +1,5 @@
+-- lua/UNL/backend/picker/provider/fzf_lua.lua
+
 local M = { name = "fzf-lua" }
 
 function M.available()
@@ -5,61 +7,53 @@ function M.available()
 end
 
 function M.run(spec)
-  local fzf = require("fzf-lua")
-  local kind = spec.kind
+  local fzf_lua = require("fzf-lua")
+  local log = require("UNL.logging").get("UNL")
+  spec = spec or {}
 
-  local entries = {}
-  local entry_to_value = {}
-
-  for _, entry in ipairs(spec.items) do
-    local display = (spec.format and spec.format(entry)) or entry.label
-    local value = entry.value
-    local filename_for_preview = (type(value) == "table") and value.filename or (type(value) == "string" and value or nil)
-    local line = display
-    if filename_for_preview then
-      line = line .. "\t" .. filename_for_preview
-    end
-    table.insert(entries, line)
-    entry_to_value[line] = value
-  end
-
-  local enable_preview = true
-  if spec.preview_enabled == false then
-    enable_preview = false
-  elseif spec.preview_enabled == true then
-    enable_preview = true
-  else
-    if kind:match("project") and not kind:match("file") then
-      enable_preview = false
-    end
-  end
-
-  local opts = {
-    prompt = spec.title or "Select Item",
+  local fzf_opts = {
+    prompt = spec.title or "Select Item> ",
+    cwd = spec.cwd or vim.loop.cwd(),
     actions = {
       ["default"] = function(selected)
-        local val = entry_to_value[selected[1]]
-        if val and spec.on_submit then
-          spec.on_submit(val)
+        if spec.on_submit then
+          local result = selected and #selected > 0 and selected[1] or nil
+          if result and spec.items and type(spec.items[1]) == "table" then
+            for _, item in ipairs(spec.items) do
+              if item.label == result then
+                result = item.value
+                break
+              end
+            end
+          end
+          vim.schedule(function() spec.on_submit(result) end)
+        end
+      end,
+      ["ctrl-c"] = function()
+        if spec.on_cancel then
+          vim.schedule(function() spec.on_cancel() end)
         end
       end,
     },
   }
 
-  if enable_preview then
-    opts.previewer = function(item)
-      local filename = item:match("\t(.+)$")
-      if filename then
-        return "cat " .. vim.fn.shellescape(filename)
-      end
-      return ""
+  if spec.items then
+    -- Case 1: items (テーブル) が渡された場合
+    local display_items = {}
+    for _, item in ipairs(spec.items) do
+      table.insert(display_items, item.label or tostring(item))
     end
-  else
-    opts.previewer = false
-  end
+    fzf_lua.fzf_exec(display_items, fzf_opts)
 
-  -- ここを修正: fzf.fzf_exec で呼ぶ
-  fzf.fzf_exec(entries, opts)
+  elseif spec.exec_cmd then
+    -- Case 2: exec_cmd (直接コマンド) が渡された場合
+    local cmd_string = type(spec.exec_cmd) == "table" and table.concat(spec.exec_cmd, " ") or spec.exec_cmd
+    fzf_lua.fzf_exec(cmd_string, fzf_opts)
+    
+  else
+    log.warn("fzf-lua provider: No items or exec_cmd provided.")
+    return
+  end
 end
 
 return M
