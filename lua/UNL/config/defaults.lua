@@ -3,7 +3,7 @@ local M = {
   ui = {
     picker = {
       mode = "auto",
-      prefer = { "telescope", "fzf_lua", "native", "dummy" },
+      prefer = { "telescope", "fzf-lua", "native", "dummy" },
     },
     filer = {
       mode = "auto",

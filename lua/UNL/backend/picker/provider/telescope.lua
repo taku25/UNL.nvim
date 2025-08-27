@@ -1,87 +1,103 @@
--- lua/UNL/backend/picker/provider/telescope.lua
+-- lua/UNL/backend/picker/provider/fzf_lua.lua (正しいAPI参照版)
 
-local M = { name = "telescope" }
+local M = { name = "fzf-lua" }
 
 function M.available()
-  return pcall(require, "telescope")
+  return pcall(require, "fzf-lua")
 end
 
 function M.run(spec)
-  local actions = require("telescope.actions")
-  local action_state = require("telescope.actions.state")
-  local previewers = require("telescope.previewers")
-  local finders = require("telescope.finders")
-  local pickers = require("telescope.pickers")
-  local sorters = require("telescope.sorters")
+  local fzf_lua = require("fzf-lua")
+  local fzf_actions = require("fzf-lua.actions")
   local log = require("UNL.logging").get("UNL")
-
+  -- ★★★ ここが修正点: 正しいモジュールを require する ★★★
+  local fzf_previewers = require("fzf-lua.previewers")
   spec = spec or {}
-  local kind = spec.kind
-  local finder
+
+  local display_items = {}
+  local display_to_processed_item = {}
 
   if spec.items then
-    -- Case 1: items (テーブル) が渡された場合
-    finder = finders.new_table({
-      results = spec.items,
-      entry_maker = function(entry)
-        local filename_for_preview = (type(entry.value) == "table") and entry.value.filename or (type(entry.value) == "string" and entry.value or nil)
-        return {
-          value = entry.value,
-          display = (spec.format and spec.format(entry)) or entry.label or tostring(entry),
-          ordinal = entry.label or tostring(entry),
-          filename = filename_for_preview,
-        }
-      end,
-    })
-  elseif spec.exec_cmd then
-    -- Case 2: exec_cmd (直接コマンド) が渡された場合
-    local cmd = type(spec.exec_cmd) == "string" and vim.split(spec.exec_cmd, " ") or spec.exec_cmd
-    finder = finders.new_oneshot_job(cmd, {
-      entry_maker = function(line)
-        return { value = line, display = line, ordinal = line, filename = line }
-      end,
-    })
-  else
-    log.warn("Telescope provider: No items or exec_cmd provided.")
-    return
-  end
+    local entry_maker_to_use = spec.entry_maker or function(item)
+      -- デフォルト entry_maker
+      local display_text, item_value
+      if type(item) == "table" then
+        item_value = item.value or item.name or tostring(item)
+        display_text = item.display or item.label or item.name or tostring(item.value or "[Table Entry]")
+      else
+        item_value = item
+        display_text = tostring(item)
+      end
+      return {
+        value = item_value,
+        display = display_text,
+        filename = (type(item_value) == 'table' and (item_value.filename or item_value.file_path)) or (type(item) == 'string' and item or nil),
+        lnum = (type(item_value) == 'table' and item_value.lnum),
+        col = (type(item_value) == 'table' and item_value.col),
+      }
+    end
 
-  local picker_opts = {
-    prompt_title = spec.title or "Select Item",
-    finder = finder,
-    sorter = sorters.get_generic_fuzzy_sorter({}),
-    cwd = spec.cwd or vim.loop.cwd(),
-    attach_mappings = function(prompt_bufnr, map)
-      actions.select_default:replace(function()
-        local selection = action_state.get_selected_entry()
-        actions.close(prompt_bufnr)
-        if spec.on_submit then
-          vim.schedule(function()
-            spec.on_submit(selection and selection.value or nil)
-          end)
-        end
-      end)
-      return true
-    end,
-  }
-
-  -- プレビューロジック
-  local enable_preview = true
-  if spec.preview_enabled == false then
-    enable_preview = false
-  elseif spec.preview_enabled == true then
-    enable_preview = true
-  else
-    if kind and kind:match("project") and not kind:match("file") then
-      enable_preview = false
+    for _, item in ipairs(spec.items) do
+      local processed = entry_maker_to_use(item)
+      local display_key = processed.display or ""
+      table.insert(display_items, display_key)
+      display_to_processed_item[display_key] = processed
     end
   end
 
-  if enable_preview then
-    picker_opts.previewer = previewers.vim_buffer_cat.new({ title = "Preview" })
+  local fzf_opts = {
+    prompt = spec.title or "Select Item> ",
+    cwd = spec.cwd or vim.loop.cwd(),
+    actions = {
+      ["default"] = function(selected_list, fzf_opts_runtime)
+        local display_key = selected_list and #selected_list > 0 and selected_list[1] or nil
+        if not display_key then return end
+        local item = display_to_processed_item[display_key]
+        if not item then return end
+        
+        if spec.on_submit then
+          vim.schedule(function() spec.on_submit(item.value) end)
+          return
+        end
+
+        if item.filename and type(item.filename) == "string" then
+          local location_str = item.filename
+          if item.lnum then location_str = location_str .. ":" .. item.lnum end
+          if item.col then location_str = location_str .. ":" .. item.col end
+          fzf_actions.resume_term()
+          fzf_actions.file_edit({ location_str }, fzf_opts_runtime)
+        end
+      end,
+      ["ctrl-c"] = function()
+        if spec.on_cancel then
+          vim.schedule(function() spec.on_cancel() end)
+        end
+      end,
+    },
+    previewer = {
+      -- ★★★ ここが修正点: 正しい runner 関数への参照 ★★★
+      runner = fzf_previewers.buffer_or_file_runner,
+      get_content = function(selected_line)
+        local item = display_to_processed_item[selected_line]
+        if item and item.filename and type(item.filename) == 'string' then
+          return item.filename, item.lnum
+        end
+        return nil
+      end
+    }
+  }
+
+  if spec.preview_enabled == false then
+    fzf_opts.previewer = nil
   end
 
-  pickers.new(picker_opts):find()
+  if #display_items > 0 then
+    fzf_lua.fzf_exec(display_items, fzf_opts)
+  elseif spec.exec_cmd then
+    fzf_lua.fzf_exec(spec.exec_cmd, fzf_opts)
+  else
+    log.warn("fzf-lua provider: No items or exec_cmd provided.")
+  end
 end
 
 return M
