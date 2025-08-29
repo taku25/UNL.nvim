@@ -46,7 +46,36 @@ local M = {
  ---
   -- プラグインのセットアップが完了したことを通知するイベント。
   -- @param plugin_info table: { name = "plugin_name" } がペイロードとして渡される。
-  ON_PLUGIN_AFTER_SETUP = "unl:on_plugin_after_setup",}
+  ON_PLUGIN_AFTER_SETUP = "unl:on_plugin_after_setup",
+
+
+
+  -- UnrealのbuildStepが完了したときに呼ばれる
+  -- @param plugin_info table: { name = "plugin_name" } がペイロードとして渡される。
+  ON_AFTER_BUILD = "unl:on_after_build",
+
+  -- Unrealのgenerateclangdatabaseが完了したときに呼ばれる
+  ON_AFTER_GENERATE_COMPILE_DATABASE = "unl:on_generate_compile_database",
+
+  -- Unrealのgenerate projectが完了したときに呼ばれる
+  ON_AFTER_GENERATE_PROEJCT = "unl:on_after_generate_proejct",
+
+  -- Unrealの静的解析が完了したときに呼ばれる
+  ON_AFTER_LINT = "unl:on_after_lint",
+
+
+  -- Delete で実際にファイルが削除されたときに呼ばれる
+  ON_AFTER_DELETE_CLASS_FILE = "unl:on_after_delete_class_file",
+
+  --新しいクラスファイルが削除されたときに呼ばれる
+  ON_AFTER_NEW_CLASS_FILE = "unl:on_after_new_class_file",
+
+  --クラスファイルが移動されたときに呼ばれる
+  ON_AFTER_MOVE_CLASS_FILE = "unl:on_after_move_class_file",
+
+  --クラスがリネイムされたときに呼ばれる
+  ON_AFTER_RENAME_CLASS_FILE = "unl:on_after_rename_class_file",
+}
 
 -- このテーブルを凍結して、意図しない変更を防ぐ
 return M
