@@ -107,7 +107,7 @@ end
 
 M.events = events
 M.registry = registry
-M._load_providers = load_providers
+M.load_providers = load_providers
 M._reset_providers = reset_providers
 
 return M
