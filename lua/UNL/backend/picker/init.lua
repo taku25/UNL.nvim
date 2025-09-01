@@ -38,6 +38,8 @@ end
 -- @param spec table ピッカーの仕様 { title, items, on_submit, ... }
 --
 function M.pick(spec)
+
+  M.load_providers()
   -- 渡されたロガーがあればそれを使う。なければ"UNL"のロガーをデフォルトで使う
   local log = require("UNL.logging").get(spec.logger_name or "UNL")
   local conf = spec.conf.ui.picker or unl_config.get("UNL").ui.picker

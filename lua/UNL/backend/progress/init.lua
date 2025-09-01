@@ -31,11 +31,12 @@ local function reset_providers()
   loaded = false 
 end
 
-load_providers()
 
 local M = {}
 
 function M.create_for_refresh(conf, opts)
+
+  load_providers()
   opts = opts or {}
   local ui_conf = conf.ui.progress or {}
 

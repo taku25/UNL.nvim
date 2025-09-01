@@ -39,6 +39,7 @@ end
 -- 汎用ファイラーを開く
 -- @param spec table ファイラーの仕様 { roots, prefer, ... }
 function M.open(spec)
+  M.load_providers()
   spec = spec or {}
   local log = require("UNL.logging").get(spec.logger_name or "UNL")
   
