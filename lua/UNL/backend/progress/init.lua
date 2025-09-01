@@ -3,6 +3,7 @@ local events   = require("UNL.backend.progress.events")
 
 local provider_modules = {
   "UNL.backend.progress.provider.fidget",
+  "UNL.backend.progress.provider.generic_status",
   "UNL.backend.progress.provider.window",
   "UNL.backend.progress.provider.notify",
   "UNL.backend.progress.provider.dummy",

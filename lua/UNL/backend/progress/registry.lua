@@ -55,7 +55,7 @@ local function auto_chain_for_refresh()
   if custom_auto_chain_refresh then
     return custom_auto_chain_refresh
   end
-  return { "fidget", "window", "notify", "dummy" }
+  return { "fidget", "generic_status", "window", "notify", "dummy" }
 end
 
 local function capabilities_match(spec, require_all, require_any)
@@ -98,12 +98,11 @@ function M.resolve(opts)
 
 
   local chain = {}
-  if type(opts.prefer) == "table" and #opts.prefer > 0 then
-    chain = vim.deepcopy(opts.prefer)
-  elseif mode == "auto" then
-    chain = auto_chain_for_refresh()
-  elseif mode ~= "none" then
+  if mode ~= "auto" and mode ~= "none" then
     chain = { mode }
+  else
+    chain = (type(opts.prefer) == "table" and #opts.prefer > 0 and vim.deepcopy(opts.prefer))
+            or auto_chain_for_refresh()
   end
 
   local require_all = opts.require_capabilities

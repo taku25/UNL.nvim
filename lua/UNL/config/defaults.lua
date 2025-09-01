@@ -12,7 +12,7 @@ local M = {
     progress = {
       mode = "auto",
       enable = true,
-      prefer = { "fidget", "window", "notify", "dummy" },
+      prefer = { "fidget", "generic_status", "window", "notify", "dummy" },
       allow_regression = false,
     },
   },
