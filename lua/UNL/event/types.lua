@@ -29,6 +29,8 @@ local M = {
   -- ファイルキャッシュ (files.json) の保存が完了したときに発行されます。
   ON_AFTER_FILE_CACHE_SAVE = "unl:on_after_file_cache_save",
 
+  ON_AFTER_CHANGE_DIRECTORY = "unl:on_after_change_directory",
+ ON_AFTER_DELETE_PROJECT_REGISTRY = "nul:on_after_delete_project_registry",
   ----------------------------------------------------------------------
   -- UCM.nvim (コードジェネレーターなど) が発行する可能性のあるイベント
   ----------------------------------------------------------------------
@@ -75,6 +77,9 @@ local M = {
 
   --クラスがリネイムされたときに呼ばれる
   ON_AFTER_RENAME_CLASS_FILE = "unl:on_after_rename_class_file",
+
+ --- ★ この新しいイベントを定義
+  ON_REQUEST_UPROJECT_TREE_VIEW = "nil:on_request_uproject_tree_view",
 }
 
 -- このテーブルを凍結して、意図しない変更を防ぐ
