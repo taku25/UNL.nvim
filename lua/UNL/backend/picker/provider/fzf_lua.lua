@@ -48,6 +48,7 @@ function M.run(spec)
   local fzf_opts = {
     prompt = spec.title or "Select Item> ",
     cwd = spec.cwd or vim.loop.cwd(),
+    multi = spec.multi_select or false, -- multi_selectフラグに応じて複数選択モードを有効化
     actions = {
       ["default"] = function(selected_list, fzf_opts_runtime)
         local display_key = selected_list and #selected_list > 0 and selected_list[1] or nil
