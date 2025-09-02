@@ -38,15 +38,15 @@ local M = {}
 --------------------------------------------------
 -- Logging helpers
 --------------------------------------------------
-local function trace(opts, msg)
-  local l = opts and opts.logger
-  if l and l.trace then l.trace(msg) end
-end
-
-local function warn(opts, msg)
-  local l = opts and opts.logger
-  if l and l.warn then l.warn(msg) end
-end
+-- local function trace(opts, msg)
+--   local l = opts and opts.logger
+--   if l and l.trace then l.trace(msg) end
+-- end
+--
+-- local function warn(opts, msg)
+--   local l = opts and opts.logger
+--   if l and l.warn then l.warn(msg) end
+-- end
 
 --------------------------------------------------
 -- Enumerate .uproject files in a directory
@@ -109,77 +109,105 @@ end
 --------------------------------------------------
 -- Checker passed to ancestor.find_up_forward
 --------------------------------------------------
-local function make_checker(opts)
-  return function(dir)
-    local pattern = opts.accept_pattern or "%.uproject$"
-    local candidates = list_uprojects(dir, opts, pattern)
-    if #candidates == 0 then
-      return nil
-    end
-    local picked = pick_candidate(candidates, opts.select_strategy)
-    if picked then
-      if opts.debug then
-        trace(opts, ("[project] matched %s (%d candidates) in %s"):format(picked, #candidates, dir))
-      end
-      return dir
-    end
-    return nil
-  end
-end
+-- local function make_checker(opts)
+--   return function(dir)
+--     local pattern = opts.accept_pattern or "%.uproject$"
+--     local candidates = list_uprojects(dir, opts, pattern)
+--     if #candidates == 0 then
+--       return nil
+--     end
+--     local picked = pick_candidate(candidates, opts.select_strategy)
+--     if picked then
+--       if opts.debug then
+--         trace(opts, ("[project] matched %s (%d candidates) in %s"):format(picked, #candidates, dir))
+--       end
+--       return dir
+--     end
+--     return nil
+--   end
+-- end
 
 --------------------------------------------------
 -- Core locate function
 --------------------------------------------------
+-- local function locate(start_path, opts)
+--   opts = opts or {}
+--   
+--   
+--   -- Step 1: 渡されたパスを、まず絶対パスに変換する
+--   -- これにより、以降の処理はすべてフルパスを基準に行われる
+--   local absolute_start_path = Path.normalize(vim.fn.fnamemodify(start_path or "", ":p"))
+--
+--   -- Step 2: 検索を開始すべき「ディレクトリ」を決定する
+--   local search_dir
+--   if vim.fn.isdirectory(absolute_start_path) == 1 then
+--     search_dir = absolute_start_path
+--   else
+--     search_dir = vim.fn.fnamemodify(absolute_start_path, ":h")
+--   end
+--
+--   local checker = make_checker(opts)
+--   local root
+--
+--   if vim.fn.isdirectory(search_dir) == 1 then
+--     root = checker(search_dir)
+--   end
+--   
+--   if not root then
+--     root = ancestor.find_up(search_dir, checker, {
+--       max_depth = opts.max_depth,
+--       logger = opts.logger,
+--       debug = opts.debug,
+--       debug_files = opts.debug_files,
+--       debug_files_limit = opts.debug_files_limit,
+--       on_search_path = opts.on_search_path,
+--     })
+--   end
+--
+--   if not root then
+--     return nil
+--   end
+--
+--   local pattern = opts.accept_pattern or "%.uproject$"
+--   local candidates = list_uprojects(root, opts, pattern)
+--   local picked = pick_candidate(candidates, opts.select_strategy)
+--   if not picked then
+--     warn(opts, "[project] uproject file disappeared after detection: " .. root)
+--     return nil
+--   end
+--   
+--   local full_path = Path.normalize(vim.fs.joinpath(root, picked))
+--   return { root = Path.normalize(root), uproject = full_path }
+-- end
+
+local function make_project_checker(opts)
+  return function(dir)
+    local candidates = list_uprojects(dir, opts)
+    if #candidates > 0 then
+      return dir -- 候補が1つでもあれば、そのディレクトリがプロジェクトルート
+    end
+    return nil
+  end
+end
+
+-- Core locate function
 local function locate(start_path, opts)
   opts = opts or {}
   
+  -- 新しい汎用探索関数を呼び出す
+  local project_checker = make_project_checker(opts)
+  local root = ancestor.find_with_checker(start_path, project_checker, opts)
+
+  if not root then return nil end
   
-  -- Step 1: 渡されたパスを、まず絶対パスに変換する
-  -- これにより、以降の処理はすべてフルパスを基準に行われる
-  local absolute_start_path = Path.normalize(vim.fn.fnamemodify(start_path or "", ":p"))
-
-  -- Step 2: 検索を開始すべき「ディレクトリ」を決定する
-  local search_dir
-  if vim.fn.isdirectory(absolute_start_path) == 1 then
-    search_dir = absolute_start_path
-  else
-    search_dir = vim.fn.fnamemodify(absolute_start_path, ":h")
-  end
-
-  local checker = make_checker(opts)
-  local root
-
-  if vim.fn.isdirectory(search_dir) == 1 then
-    root = checker(search_dir)
-  end
-  
-  if not root then
-    root = ancestor.find_up(search_dir, checker, {
-      max_depth = opts.max_depth,
-      logger = opts.logger,
-      debug = opts.debug,
-      debug_files = opts.debug_files,
-      debug_files_limit = opts.debug_files_limit,
-      on_search_path = opts.on_search_path,
-    })
-  end
-
-  if not root then
-    return nil
-  end
-
-  local pattern = opts.accept_pattern or "%.uproject$"
-  local candidates = list_uprojects(root, opts, pattern)
+  -- 見つかったルート内で、どの.uprojectファイルを使うか決定する
+  local candidates = list_uprojects(root, opts)
   local picked = pick_candidate(candidates, opts.select_strategy)
-  if not picked then
-    warn(opts, "[project] uproject file disappeared after detection: " .. root)
-    return nil
-  end
+  if not picked then return nil end
   
   local full_path = Path.normalize(vim.fs.joinpath(root, picked))
   return { root = Path.normalize(root), uproject = full_path }
 end
-
 --------------------------------------------------
 -- Public API
 --------------------------------------------------

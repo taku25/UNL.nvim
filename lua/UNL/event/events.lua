@@ -15,16 +15,27 @@ function M.subscribe(event_name, callback)
   table.insert(subscribers[event_name], callback)
 end
 
----
+
 -- イベントを発行（通知）する
--- @param event_name string 発行するイベントの名前
--- @param ... any コールバック関数に渡す可変長引数
+-- コールバックは、次のUIティックで安全に実行される
+-- @param event_name string
+-- @param ... any
 function M.publish(event_name, ...)
-  if subscribers[event_name] then
-    for _, callback in ipairs(subscribers[event_name]) do
-      -- pcall でラップして、一つのコールバックのエラーが他に影響しないようにする
-      pcall(callback, ...)
-    end
+  if subscribers[event_name] and #subscribers[event_name] > 0 then
+    -- 引数をキャプチャするために、ローカル変数に一旦保存する
+    local args = { ... }
+    
+    vim.schedule(function()
+      -- vim.scheduleの時点でもう一度チェックするのが安全
+      if not subscribers[event_name] then return end
+
+      for _, callback_function in ipairs(subscribers[event_name]) do
+        -- ★★★ 修正箇所 ★★★
+        -- callback_function は関数そのもの
+        -- pcall(callback_function, unpack(args))
+        callback_function(unpack(args))
+      end
+    end)
   end
 end
 

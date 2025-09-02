@@ -41,14 +41,46 @@ local M = {}
 --------------------------------------------------
 local function log_trace(opts, msg)
   local l = opts and opts.logger
-  if l and l.trace then l.trace(msg) end
+  if l and l.trace then
+    l.trace(msg)
+  end
 end
 
 local function log_warn(opts, msg)
   local l = opts and opts.logger
-  if l and l.warn then l.warn(msg) end
+  if l and l.warn then
+    l.warn(msg) end
 end
 
+
+function M.find_with_checker(start_path, checker, opts)
+  opts = opts or {}
+  
+  -- 1. 開始パスを絶対パスに正規化
+  local absolute_start_path = Path.normalize(vim.fn.fnamemodify(start_path or "", ":p"))
+
+  -- 2. 探索を開始すべきディレクトリを決定
+  local search_dir
+  local ok, stat = pcall(vim.loop.fs_stat, absolute_start_path)
+  if ok and stat and stat.type == "file" then
+    search_dir = vim.fs.dirname(absolute_start_path)
+  else
+    search_dir = absolute_start_path
+  end
+  
+  -- 3. まず開始ディレクトリ自体をチェック
+  local result
+  if vim.fn.isdirectory(search_dir) == 1 then
+    result = checker(search_dir)
+  end
+  
+  -- 4. 見つからなければ、親を辿って探す
+  if not result then
+    result = ascend(search_dir, checker, opts)
+  end
+
+  return result
+end
 --------------------------------------------------
 -- File listing (files only)
 --------------------------------------------------
