@@ -15,7 +15,6 @@ function M.open(spec)
   local error_msg = "UEP: No supported filer plugin (e.g., neo-tree.nvim) found."
   
   log.error(error_msg)
-  vim.notify(error_msg, vim.log.levels.WARN)
 end
 
 M.run = M.open

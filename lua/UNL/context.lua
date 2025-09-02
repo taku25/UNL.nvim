@@ -27,6 +27,7 @@ local function ensure_key_store(ns_tbl, key)
 end
 
 local function emit(self, ns, event, payload)
+  local log = require("UNL.logging").get("UNL")
   for id, sub in pairs(self._subs) do
     if sub.ns == ns and (sub.event == event or sub.event == "any") then
       local ok, err = pcall(sub.cb, {
@@ -37,7 +38,7 @@ local function emit(self, ns, event, payload)
       })
       if not ok then
         vim.schedule(function()
-          vim.notify(("UNL.context subscriber error: %s"):format(err), vim.log.levels.ERROR)
+          log.error(("UNL.context subscriber error: %s"):format(err))
         end)
       end
     end
