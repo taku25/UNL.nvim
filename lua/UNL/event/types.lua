@@ -80,6 +80,10 @@ local M = {
 
  --- ★ この新しいイベントを定義
   ON_REQUEST_UPROJECT_TREE_VIEW = "nil:on_request_uproject_tree_view",
+
+
+  ON_AFTER_LOG_VIEWER_START = "nil:on_after_log_viewer_start",
+  ON_AFTER_LOG_VIEWER_STOP = "nil:on_after_log_viewer_stop",
 }
 
 -- このテーブルを凍結して、意図しない変更を防ぐ
