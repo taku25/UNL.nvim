@@ -19,24 +19,23 @@ function M.run(spec)
 
   if spec.items then
     local entry_maker_to_use = spec.entry_maker or function(item)
-      -- デフォルト entry_maker
-      local display_text, item_value
-      if type(item) == "table" then
-        item_value = item.value or item.name or tostring(item)
-        display_text = item.display or item.label or item.name or tostring(item.value or "[Table Entry]")
+      local value, display, filename, lnum, col
+      if type(item) == 'table' then
+        value = item.value or item
+        display = item.display or item.label or item.name or tostring(value)
+        filename = item.filename or item.file_path
+        lnum = item.lnum
+        col = item.col
       else
-        item_value = item
-        display_text = tostring(item)
+        value = item
+        display = tostring(item)
+        filename = tostring(item)
       end
-      return {
-        value = item_value,
-        display = display_text,
-        filename = (type(item_value) == 'table' and (item_value.filename or item_value.file_path)) or (type(item) == 'string' and item or nil),
-        lnum = (type(item_value) == 'table' and item_value.lnum),
-        col = (type(item_value) == 'table' and item_value.col),
-      }
+      if type(value) == 'table' and string.match(display, "^table: 0x") then
+        display = value.display or value.label or value.name or display
+      end
+      return { value = value, display = display, filename = filename, lnum = lnum, col = col }
     end
-
     for _, item in ipairs(spec.items) do
       local processed = entry_maker_to_use(item)
       local display_key = processed.display or ""
@@ -48,35 +47,31 @@ function M.run(spec)
   local fzf_opts = {
     prompt = spec.title or "Select Item> ",
     cwd = spec.cwd or vim.loop.cwd(),
-    multi = spec.multi_select or false, -- multi_selectフラグに応じて複数選択モードを有効化
+    multi = spec.multi_select or false,
     actions = {
-      ["default"] = function(selected_list, fzf_opts_runtime)
-        local display_key = selected_list and #selected_list > 0 and selected_list[1] or nil
-        if not display_key then return end
-        local item = display_to_processed_item[display_key]
-        if not item then return end
+      ["default"] = function(selected_list)
+        if not selected_list then selected_list = {} end
         
-        if spec.on_submit then
-          vim.schedule(function() spec.on_submit(item.value) end)
-          return
+        local results = {}
+        for _, display_key in ipairs(selected_list) do
+          local item = display_to_processed_item[display_key]
+          if item then table.insert(results, item.value) end
         end
 
-        if item.filename and type(item.filename) == "string" then
-          local location_str = item.filename
-          if item.lnum then location_str = location_str .. ":" .. item.lnum end
-          if item.col then location_str = location_str .. ":" .. item.col end
-          fzf_actions.resume_term()
-          fzf_actions.file_edit({ location_str }, fzf_opts_runtime)
+        if spec.on_submit then
+          -- ★★★ ここがTelescopeと挙動を完全に統一する、最終的なロジックです ★★★
+          if spec.multi_select then
+            -- 複数選択モードの場合、常にテーブルを返す
+            vim.schedule(function() spec.on_submit(results) end)
+          else
+            -- 単一選択モードの場合、最初の要素かnilを返す
+            vim.schedule(function() spec.on_submit(#results > 0 and results[1] or nil) end)
+          end
         end
       end,
-      ["ctrl-c"] = function()
-        if spec.on_cancel then
-          vim.schedule(function() spec.on_cancel() end)
-        end
-      end,
+      ["ctrl-c"] = function() if spec.on_cancel then vim.schedule(spec.on_cancel) end end,
     },
   }
-
   -- ★★★ あなたのアプローチと逆引きマップを融合した、正しいプレビューワーの実装 ★★★
   if spec.preview_enabled ~= false then
     local GenericFzfPreviewer = builtin.buffer_or_file:extend()
