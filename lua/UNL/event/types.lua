@@ -30,7 +30,8 @@ local M = {
   ON_AFTER_FILE_CACHE_SAVE = "unl:on_after_file_cache_save",
 
   ON_AFTER_CHANGE_DIRECTORY = "unl:on_after_change_directory",
- ON_AFTER_DELETE_PROJECT_REGISTRY = "nul:on_after_delete_project_registry",
+
+  ON_AFTER_DELETE_PROJECT_REGISTRY = "nul:on_after_delete_project_registry",
   ----------------------------------------------------------------------
   -- UCM.nvim (コードジェネレーターなど) が発行する可能性のあるイベント
   ----------------------------------------------------------------------
@@ -58,6 +59,9 @@ local M = {
 
   -- Unrealのgenerateclangdatabaseが完了したときに呼ばれる
   ON_AFTER_GENERATE_COMPILE_DATABASE = "unl:on_generate_compile_database",
+
+  -- Unrealのgenerateheaderが完了したときに呼ばれる
+  ON_AFTER_GENERATE_HEADER = "unl:on_generate_header",
 
   -- Unrealのgenerate projectが完了したときに呼ばれる
   ON_AFTER_GENERATE_PROEJCT = "unl:on_after_generate_proejct",
