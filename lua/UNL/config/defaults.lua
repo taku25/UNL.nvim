@@ -29,5 +29,9 @@ local M = {
     search_stop_at_home = true,
     follow_symlink = true,
   },
+  remote = {
+    host = "127.0.0.1",
+    port = 30010,
+  },
 }
 return M

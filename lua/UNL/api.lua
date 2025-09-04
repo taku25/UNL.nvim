@@ -1,4 +1,5 @@
 local unl_finder = require("UNL.finder")
+local unl_remote_kismet = require("UNL.remote.kismet")
 local M = {}
 
 
@@ -30,6 +31,10 @@ end
 
 function M.find_engine(project_file_path, opts)
   return unl_finder.engine.find_engine_root(project_file_path, opts)
+end
+
+function M.kismet_command(opts)
+  return unl_remote_kismet.execute(opts)
 end
 
 return M
