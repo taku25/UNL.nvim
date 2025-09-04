@@ -13,7 +13,7 @@ function M.run(spec)
   local finders = require("telescope.finders")
   local pickers = require("telescope.pickers")
   local sorters = require("telescope.sorters")
-  local log = require("UNL.logging").get("UNL")
+  local log = require("UNL.logging").get(spec.logger_name or "UNL")
 
   spec = spec or {}
   local display_to_value = {}

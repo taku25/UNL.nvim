@@ -5,6 +5,10 @@ local M = {
       mode = "auto",
       prefer = { "telescope", "fzf-lua", "native", "dummy" },
     },
+    grep_picker = {
+      mode = "auto",
+      prefer = { "telescope", "fzf-lua" }
+    },
     filer = {
       mode = "auto",
       prefer = { "nvim-tree", "neo-tree", "native", "dummy"  },
@@ -16,6 +20,7 @@ local M = {
       allow_regression = false,
     },
   },
+
   logging = {
     level = "info",
     echo = { level = "warn" },
