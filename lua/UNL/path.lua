@@ -35,7 +35,7 @@ end
 -- 絶対パスを “安全な” ベースファイル名 (拡張子抜き) に変換
 function M.path_to_cache_filename(p)
   local normalized_path = M.normalize(p)
-  local safe_string = fn.substitute(normalized_path, '[\\/:]', '_', 'g')
+  local safe_string = vim.fn.substitute(normalized_path, '[\\/:]', '_', 'g')
   return safe_string  -- 拡張子はここでは付けない
 end
 
