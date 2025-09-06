@@ -33,8 +33,19 @@ function M.find_engine(project_file_path, opts)
   return unl_finder.engine.find_engine_root(project_file_path, opts)
 end
 
+function M.find_insights(file_path, opts)
+  return unl_finder.insights.find(file_path, opts)
+end
+
 function M.kismet_command(opts)
   return unl_remote_kismet.execute(opts)
+end
+
+
+-- UNLの統合デバッグログビューワーの表示/非表示を切り替える
+function M.toggle_debug_log()
+  local unl_debug_log = require("UNL.backend.buf.debug_log")
+  unl_debug_log.toggle()
 end
 
 return M

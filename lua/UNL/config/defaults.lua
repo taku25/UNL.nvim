@@ -19,6 +19,10 @@ local M = {
       prefer = { "fidget", "generic_status", "window", "notify", "dummy" },
       allow_regression = false,
     },
+    debug_log = {
+      position = "right",
+      size = 0.4, -- 画面右側に40%の幅
+    }, 
   },
 
   logging = {
@@ -27,7 +31,9 @@ local M = {
     notify = { level = "error", prefix = "[UNL]" },
     file = { enable = true, max_kb = 512, rotate = 3, filename = "unl.log" },
     perf = { enabled = false, patterns = { "^refresh" }, level = "trace" },
+    debug = { enable = true, },
   },
+
   cache = { dirname = "UNL_cache" },
   project = {
     localrc_filename = ".unlrc.json",

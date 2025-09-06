@@ -10,10 +10,10 @@ function M.new()
     local ncfg = cfg.logging and cfg.logging.notify or {}
     local thr = level.parse(ncfg.level)
     if not level.visible(msg_level, thr) then return end
-    local prefix = ncfg.prefix or ""
-    if prefix ~= "" then
-      message = ("%s %s"):format(prefix, message)
-    end
+    -- local prefix = ncfg.prefix or ""
+    -- if prefix ~= "" then
+    --   message = ("%s"):format(prefix, message)
+    -- end
     vim.notify(message, msg_level)
   end
   return self
