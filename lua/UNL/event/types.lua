@@ -52,7 +52,12 @@ local M = {
   ON_PLUGIN_AFTER_SETUP = "unl:on_plugin_after_setup",
 
 
+  ON_BEFORE_PROGRESS_WRITE = "unl:on_before_progress_write",
+  ON_AFTER_PROGRESS_WRITE = "unl:on_after_progress_write",
+  -- UnrealのbuildStepが完了したときに呼ばれる
+  -- @param plugin_info table: { name = "plugin_name" } がペイロードとして渡される。
 
+  ON_BEFORE_BUILD = "unl:on_before_build",
   -- UnrealのbuildStepが完了したときに呼ばれる
   -- @param plugin_info table: { name = "plugin_name" } がペイロードとして渡される。
   ON_AFTER_BUILD = "unl:on_after_build",
