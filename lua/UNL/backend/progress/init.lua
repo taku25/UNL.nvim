@@ -51,7 +51,7 @@ function M.create_for_refresh(conf, opts)
 
   local inst = spec and spec.create and spec.create{
     enabled     = not (ui_conf.enable == false),
-    weights     = ui_conf.weights,
+    weights     = opts.weights or ui_conf.weights,
     title       = opts.title or ui_conf.title or "UEP Refresh",
     client_name = opts.client_name or "UNL",
     throttle_ms = ui_conf.throttle_ms,

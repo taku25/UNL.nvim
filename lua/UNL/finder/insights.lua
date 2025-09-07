@@ -54,7 +54,7 @@ function M.find(start_path, opts)
   local executable_name = get_insights_executable_name()
 
   -- 2. それらを使って、OSに応じた正しいパスを組み立てる
-  local insights_path = path.join(engine_root, "Binaries", platform_dir, executable_name)
+  local insights_path = path.join(engine_root, "Engine", "Binaries", platform_dir, executable_name)
 
 
   if vim.fn.executable(insights_path) ~= 1 then
