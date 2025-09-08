@@ -88,11 +88,13 @@ local M = {
   ON_AFTER_RENAME_CLASS_FILE = "unl:on_after_rename_class_file",
 
  --- ★ この新しいイベントを定義
-  ON_REQUEST_UPROJECT_TREE_VIEW = "nil:on_request_uproject_tree_view",
+  ON_REQUEST_UPROJECT_TREE_VIEW = "unl:on_request_uproject_tree_view",
 
 
-  ON_AFTER_LOG_VIEWER_START = "nil:on_after_log_viewer_start",
-  ON_AFTER_LOG_VIEWER_STOP = "nil:on_after_log_viewer_stop",
+  ON_AFTER_LOG_VIEWER_START = "unl:on_after_log_viewer_start",
+  ON_AFTER_LOG_VIEWER_STOP = "unl:on_after_log_viewer_stop",
+
+  ON_REQUEST_TRACE_CALLEES_VIEW = "unl:on_request_trace_callees_view",
 }
 
 -- このテーブルを凍結して、意図しない変更を防ぐ
