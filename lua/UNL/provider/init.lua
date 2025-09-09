@@ -4,7 +4,6 @@
 
 local registry = require("UNL.provider.registry")
 local config = require("UNL.config")
-local log = require("UNL.logging").get("UNL.provider")
 
 local M = {}
 
@@ -22,12 +21,17 @@ end
 -- @param opts table: プロバイダーの `request` メソッドに渡す引数
 -- @return boolean, any: `ok, result` を返す。プロバイダーが見つからない場合は `false, "No provider found"`
 function M.request(capability, opts)
+  -- opts から logger_name を取得し、呼び出し元のロガーを取得する。
+  -- もし指定がなければ、"UNL.provider" のロガーにフォールバックする。
+  local log = require("UNL.logging").get(opts.logger_name or "UNL")
+
+
   log.debug("Request received for capability '%s'", capability)
   local conf = config.get("UNL") -- "UNL"名前空間の設定を取得
   local provider = registry.resolve(capability, conf)
 
   if not (provider and provider.impl and type(provider.impl.request) == "function") then
-    log.warn("No provider with a 'request' method found for capability '%s'", capability)
+    log.debug("No provider with a 'request' method found for capability '%s'", capability)
     return false, "No provider found for " .. capability
   end
 
@@ -48,6 +52,7 @@ end
 -- @param capability string: 通知する対象の機能 (例: "project.file_changed")
 -- @param opts table: 各プロバイダーの `notify` メソッドに渡す引数
 function M.notify(capability, opts)
+  local log = require("UNL.logging").get(opts.logger_name or "UNL")
   log.debug("Notification received for capability '%s'", capability)
   local providers = registry.get_all(capability)
 
