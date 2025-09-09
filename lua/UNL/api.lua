@@ -48,4 +48,10 @@ function M.toggle_debug_log()
   unl_debug_log.toggle()
 end
 
+
+-- @usage `require("UNL.api").provider.register(...)`
+-- @usage `local ok, result = require("UNL.api").provider.request(...)`
+-- @usage `require("UNL.api").provider.notify(...)`
+M.provider = require("UNL.provider")
+
 return M
