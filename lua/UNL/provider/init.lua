@@ -21,6 +21,8 @@ end
 -- @param opts table: プロバイダーの `request` メソッドに渡す引数
 -- @return boolean, any: `ok, result` を返す。プロバイダーが見つからない場合は `false, "No provider found"`
 function M.request(capability, opts)
+  opts = opts or {}
+
   -- opts から logger_name を取得し、呼び出し元のロガーを取得する。
   -- もし指定がなければ、"UNL.provider" のロガーにフォールバックする。
   local log = require("UNL.logging").get(opts.logger_name or "UNL")
@@ -52,6 +54,7 @@ end
 -- @param capability string: 通知する対象の機能 (例: "project.file_changed")
 -- @param opts table: 各プロバイダーの `notify` メソッドに渡す引数
 function M.notify(capability, opts)
+  opts = opts or {}
   local log = require("UNL.logging").get(opts.logger_name or "UNL")
   log.debug("Notification received for capability '%s'", capability)
   local providers = registry.get_all(capability)
