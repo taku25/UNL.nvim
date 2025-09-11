@@ -9,6 +9,10 @@ local M = {
       mode = "auto",
       prefer = { "telescope", "fzf-lua" }
     },
+    find_picker = {
+      mode = "auto",
+      prefer = { "telescope", "fzf-lua" }
+    },
     filer = {
       mode = "auto",
       prefer = { "nvim-tree", "neo-tree", "native", "dummy"  },
