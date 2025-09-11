@@ -33,7 +33,7 @@ function M.pick(spec)
     registry = registry,
     conf = conf,
     spec = spec,
-    logger_name = spec.logger_name or "UNL.picker",
+    logger_name = spec.logger_name,
   })
 end
 

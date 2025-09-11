@@ -34,7 +34,7 @@ function M.pick(spec)
     registry = registry,
     conf = conf, -- <<< prefer_chain の代わりに conf を渡す
     spec = spec,
-    logger_name = spec.logger_name or "UNL.find_picker",
+    logger_name = spec.logger_name,
   })
 end
 

@@ -55,7 +55,7 @@ function M.run(spec)
 
   log.trace("fzf-lua live_grep_native additional_args: %s", final_additional_args)
 
-  fzf.live_grep_native({
+  fzf_lua.live_grep_native({
     -- ★★★ あなたが発見した、真の解決策 ★★★
     additional_args = final_additional_args,
     prompt = spec.title or "Live Grep>",

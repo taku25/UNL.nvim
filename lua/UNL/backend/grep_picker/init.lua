@@ -1,9 +1,9 @@
--- lua/UNL/backend/picker/init.lua
+-- lua/UNL/backend/grep_picker/init.lua
 
 local registry = require("UNL.backend.grep_picker.registry")
 local unl_config = require("UNL.config")
+local unl_picker_factory = require("UNL.backend.factory.picker")
 
--- プロバイダモジュールをロードしてレジストリに登録する
 local provider_modules = {
   "UNL.backend.grep_picker.provider.telescope",
   "UNL.backend.grep_picker.provider.fzf_lua",
@@ -11,54 +11,31 @@ local provider_modules = {
 }
 
 local M = {}
-
 local loaded = false
--- ★★★ 初期化処理を、外部から呼び出せる関数にラップする ★★★
-function M.load_providers()
+
+function M.load_providers(spec)
   if loaded then return end
-  
-  -- loggerは、この関数が呼ばれる時には確実に初期化されている
-  local log = require("UNL.logging").get("UNL")
-
-  for _, mod_name in ipairs(provider_modules) do
-    local ok, provider = pcall(require, mod_name)
-    if ok and provider.name then
-      registry.register(provider)
-    else
-      log.debug("Failed to load picker provider: %s", mod_name)
-    end
-  end
+  unl_picker_factory.load_providers(registry, provider_modules, spec)
   loaded = true
-  return true
 end
----
--- 汎用ピッカーを実行する
--- @param kind string データの種類 (例: "project", "file_location")
--- @param spec table ピッカーの仕様 { title, items, on_submit, ... }
---
+
 function M.pick(spec)
-
-  M.load_providers()
-  -- 渡されたロガーがあればそれを使う。なければ"UNL"のロガーをデフォルトで使う
-  local log = require("UNL.logging").get(spec.logger_name or "UNL")
-  local conf = spec.conf.ui.grep_picker or unl_config.get("UNL").ui.grep_picker
-
-  local provider, provider_name = registry.resolve(conf, { kind = spec.kind })
-  -- print(spec)
+  M.load_providers(spec)
   
-  if provider then
-    log.info("Grep Picker: Using provider '%s' for kind '%s'", provider_name, spec.kind)
-    local ok, err = pcall(provider.run, spec) -- specをそのまま渡す
-    if not ok then
-      log.error("Grep Picker provider '%s' failed: %s", provider_name, tostring(err))
-      registry.get("dummy").run(spec)
-    end
-  else
-    log.error("Grep Picker: No available provider found.")
-  end
+  -- 1. grep_picker用の設定を取得
+  local conf = spec.conf.ui.grep_picker or unl_config.get("UNL").ui.grep_picker
+  
+  -- 2. factoryに設定オブジェクトをそのまま渡す
+  unl_picker_factory.run_with_fallback({
+    picker_type_name = "Grep Picker", -- ログ用の名前
+    registry = registry,
+    conf = conf,
+    spec = spec,
+    logger_name = spec.logger_name or "UNL.grep_picker",
+  })
 end
 
--- テスト用のヘルパー
+-- (追加) テストや他のモジュールからレジストリにアクセスできるように
 M._registry = registry
 
 return M
