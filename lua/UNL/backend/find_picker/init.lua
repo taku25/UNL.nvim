@@ -2,6 +2,7 @@
 
 local registry = require("UNL.backend.find_picker.registry")
 local unl_config = require("UNL.config")
+local unl_picker_factory = require("UNL.backend.factory.picker")
 
 local provider_modules = {
   "UNL.backend.find_picker.provider.telescope",
@@ -12,53 +13,29 @@ local provider_modules = {
 local M = {}
 local loaded = false
 
-function M.load_providers()
+function M.load_providers(spec)
   if loaded then return end
-  local log = require("UNL.logging").get("UNL")
-  for _, mod_name in ipairs(provider_modules) do
-    local ok, provider = pcall(require, mod_name)
-    if ok and provider.name then
-      registry.register(provider)
-    else
-      log.debug("Failed to load find_picker provider: %s", mod_name)
-    end
-  end
+  unl_picker_factory.load_providers(registry, provider_modules, spec)
   loaded = true
 end
 
 function M.pick(spec)
-  M.load_providers()
+  M.load_providers(spec)
   
-  local log = require("UNL.logging").get(spec.logger_name or "UNL")
+  -- 1. 設定を取得する (これは変更なし)
+  local conf = spec.conf.ui.find_picker or unl_config.get("UNL").ui.find_picker
   
-  -- ▼▼▼ ここからが変更箇所 ▼▼▼
+  -- 2. (削除) prefer_chain をここで計算する必要はなくなった
+  -- local prefer_chain = conf.prefer or { "telescope", "fzf-lua" }
 
-  -- 1. UCMなど、呼び出し元のプラグインのコンフィグを取得
-  local caller_conf = spec.conf or {}
-  
-  -- 2. find_picker用の設定を探す。なければUNLのデフォルト設定にフォールバック
-  local find_picker_conf
-  if caller_conf.ui and caller_conf.ui.find_picker then
-    find_picker_conf = caller_conf.ui.find_picker
-  else
-    find_picker_conf = unl_config.get("UNL").ui.find_picker
-  end
-
-  -- 3. 取得した設定を使って、プロバイダーを解決する
-  local provider, provider_name = registry.resolve(find_picker_conf)
-  
-  -- ▲▲▲ ここまでが変更箇所 ▲▲▲
-  
-  if provider then
-    log.info("Find Picker: Using provider '%s'", provider_name)
-    local ok, err = pcall(provider.run, spec)
-    if not ok then
-      log.error("Find Picker provider '%s' failed: %s", provider_name, tostring(err))
-      registry.get("dummy").run(spec)
-    end
-  else
-    log.error("Find Picker: No available provider found.")
-  end
+  -- 3. (変更) factory には conf オブジェクトをそのまま渡す
+  unl_picker_factory.run_with_fallback({
+    picker_type_name = "Find Picker",
+    registry = registry,
+    conf = conf, -- <<< prefer_chain の代わりに conf を渡す
+    spec = spec,
+    logger_name = spec.logger_name or "UNL.find_picker",
+  })
 end
 
 return M
