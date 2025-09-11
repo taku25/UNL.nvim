@@ -25,6 +25,26 @@ local M = {
     }, 
   },
 
+  safe_open = {
+    -- A list of buffer types to avoid.
+    -- See `:help buftype` for more options.
+    prevent_in_buftypes = {
+      "nofile",
+      "quickfix",
+      "help",
+      "terminal",
+      "prompt",
+    },
+    -- A list of file types to avoid.
+    prevent_in_filetypes = {
+      "neo-tree",
+      "NvimTree",
+      "TelescopePrompt",
+      "fugitive",
+      "lazy",
+    },
+  },
+
   logging = {
     level = "info",
     echo = { level = "warn" },
