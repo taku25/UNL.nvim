@@ -29,6 +29,11 @@ local M = {
   -- ファイルキャッシュ (files.json) の保存が完了したときに発行されます。
   ON_AFTER_FILE_CACHE_SAVE = "unl:on_after_file_cache_save",
 
+
+  ---
+  -- ファイルキャッシュ (files.json) の保存が完了したときに発行されます。
+  ON_AFTER_UEP_LIGHTWEIGHT_REFRESH = "unl:on_after_uep_lightweight_refresh",
+
   ON_AFTER_CHANGE_DIRECTORY = "unl:on_after_change_directory",
 
   ON_AFTER_DELETE_PROJECT_REGISTRY = "nul:on_after_delete_project_registry",
@@ -36,7 +41,6 @@ local M = {
   -- UCM.nvim (コードジェネレーターなど) が発行する可能性のあるイベント
   ----------------------------------------------------------------------
 
-  ---
   -- 新しいソースファイルが作成されたときに発行されます。
   -- @param file_path string: 作成されたファイルのフルパスがペイロードとして渡されます。
   ON_SOURCE_FILE_CREATED = "unl:on_source_file_created",
