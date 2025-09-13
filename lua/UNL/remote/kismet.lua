@@ -1,46 +1,32 @@
--- UNL.nvim/lua/unl/remote/kismet.lua
---
--- Unreal Engine Remote Control APIと通信するための低レベルライブラリモジュール。
--- 呼び出し元で接続情報が指定されなかった場合、UNLのデフォルト設定にフォールバックする。
+-- UNL.nvim/lua/unl/remote/kismet.lua (Fire and Forget版)
 
--- config.get()ではなく、直接defaultsをrequireすることで、循環参照のリスクを完全に避ける
--- このファイルはconfigモジュールから利用される可能性はないが、安全なパターンとして推奨される
-local unl_defaults = require("UNL.config.defaults")
+local unl_config = require("UNL.config")
 
 local M = {}
 
---- UEにコンソールコマンドをリモートで送信する
---
--- @param opts table | 以下のキーを持つテーブル:
---   - command (string, 必須): 実行したいコンソールコマンド。
---   - host (string, オプション): 接続先のホスト名。未指定の場合はUNLのデフォルト設定が使われる。
---   - port (number, オプション): 接続先のポート番号。未指定の場合はUNLのデフォルト設定が使われる。
---   - on_success (function, オプション): 成功時に呼び出されるコールバック。
---   - on_error (function, オプション): 失敗時に呼び出されるコールバック。
 function M.execute(opts)
   opts = opts or {}
   local on_success = opts.on_success or function() end
   local on_error = opts.on_error or function() end
+
+  local conf = unl_config.get("UNL")
+  -- 接続のタイムアウトは短い方が良い（例: 2秒）
+  local timeout_ms = (conf and conf.remote and conf.remote.timeout) or 2000
 
   if not opts.command or type(opts.command) ~= "string" or opts.command == "" then
     on_error("[UNL Remote] Invalid or empty command provided.")
     return
   end
 
-  -- ★★★ ここがハイブリッドアプローチの心臓部 ★★★
-  -- 1. optsに直接指定された値を最優先する
-  -- 2. 指定されていなければ、UNLのデフォルト設定から取得する
-  local host = opts.host or unl_defaults.remote.host
-  local port = opts.port or unl_defaults.remote.port
+  local host = opts.host or (conf and conf.remote and conf.remote.host)
+  local port = opts.port or (conf and conf.remote and conf.remote.port)
 
+  -- ... (HTTPリクエストの準備は変更なし) ...
   local escaped_command = opts.command:gsub("\\", "\\\\"):gsub("\"", "\\\"")
-
   local object_path = "/Script/Engine.Default__KismetSystemLibrary"
   local function_name = "ExecuteConsoleCommand"
-
   local json_template = [[{"objectPath":"%s","functionName":"%s","parameters":{"WorldContextObject":null,"Command":"%s"},"generateTransaction":true}]]
   local json_body = string.format(json_template, object_path, function_name, escaped_command)
-
   local http_path = "/remote/object/call"
   local http_request_lines = {
     "PUT " .. http_path .. " HTTP/1.1", "Host: " .. host,
@@ -50,49 +36,56 @@ function M.execute(opts)
   local http_request = table.concat(http_request_lines, "\r\n")
 
   local client = vim.loop.new_tcp()
+  local timer = vim.loop.new_timer()
+  local callback_called = false
+
+  local function cleanup(err_msg, success_msg)
+    if callback_called then return end
+    callback_called = true
+
+    if timer then
+      timer:stop()
+      timer:close()
+      timer = nil
+    end
+
+    if client then
+      client:close()
+      client = nil
+    end
+
+    if err_msg then
+      on_error(err_msg)
+    else
+      -- 成功メッセージはオプション
+      on_success(success_msg)
+    end
+  end
+
+  timer:start(timeout_ms, 0, function()
+    cleanup(string.format("[UNL Remote] Connection/Write timed out after %dms.", timeout_ms))
+  end)
 
   client:connect(host, port, function(connect_err)
     if connect_err then
-      on_error(string.format("[UNL Remote] Connection failed to %s:%d.", host, port))
-      client:close()
-      return
+      return cleanup(string.format("[UNL Remote] Connection failed to %s:%d.", host, port))
     end
-
-    local response_body_chunks = {} -- ★ 文字列結合ではなくテーブルに溜め込む
-    client:read_start(function(read_err, data)
-      if read_err then
-        on_error("[UNL Remote] Error while reading response: " .. tostring(read_err))
-        client:close()
-        return
-      end
-
-      -- サーバーが接続を閉じた (通信完了)
-      if not data then
-        -- ★★★ ここが最重要修正点 ★★★
-        -- すべてのチャンクを結合して、最終的な応答を組み立てる
-        local final_response = table.concat(response_body_chunks)
-        
-        -- 最終的な応答を評価する
-        if final_response:find("HTTP/1.1 200 OK") then
-          on_success(final_response)
-        else
-          on_error("[UNL Remote] Request failed with response:\n" .. final_response)
-        end
-        
-        client:close() -- 最後にクローズ
-        return
-      end
-      
-      -- データチャンクをテーブルに追加
-      table.insert(response_body_chunks, data)
-    end)
-
+    
+    -- ★★★ ここからがFire and Forgetの核心 ★★★
+    
+    -- UEに応答を要求せず、データの書き込みだけを行う
     client:write(http_request, function(write_err)
       if write_err then
-        on_error("[UNL Remote] Error sending request: " .. tostring(write_err))
-        client:close()
+        -- 書き込みに失敗した場合のみエラーとする
+        return cleanup("[UNL Remote] Error sending request: " .. tostring(write_err))
       end
+      
+      -- ★★★ 書き込みが成功した時点で、処理は成功とみなす ★★★
+      -- UEからの応答は待たずに、即座に成功コールバックを呼び出し、接続を閉じる
+      return cleanup(nil, "[UNL Remote] Command sent successfully (Fire and Forget).")
     end)
+
+    -- client:read_start(...) の部分は完全に削除する
   end)
 end
 
