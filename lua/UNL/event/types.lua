@@ -99,6 +99,9 @@ local M = {
   ON_AFTER_LOG_VIEWER_STOP = "unl:on_after_log_viewer_stop",
 
   ON_REQUEST_TRACE_CALLEES_VIEW = "unl:on_request_trace_callees_view",
+
+  
+  ON_AFTER_MODIFY_DIRECTORY = "unl:on_after_modify_directory",
 }
 
 -- このテーブルを凍結して、意図しない変更を防ぐ
