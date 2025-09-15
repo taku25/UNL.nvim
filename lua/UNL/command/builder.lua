@@ -56,31 +56,62 @@ function M.create(spec)
 
     -- 2f. ハンドラに渡す `opts` テーブルを準備
     local opts = { has_bang = has_bang }
-    local user_args = {}
-    for i = 2, #args.fargs do
-      table.insert(user_args, args.fargs[i])
-    end
+    -- ▼▼▼ ここからが修正箇所です ▼▼▼
 
-    -- 2g. 定義に基づいて引数をパース
-    if command_def.args then
-      for i, arg_def in ipairs(command_def.args) do
-        local value = user_args[i]
-        if value == nil then
-          if arg_def.required then
-            get_logger().error("Missing required argument: '%s'. Usage: %s", arg_def.name, command_def.usage or "")
-            return
-          end
-          if type(arg_def.default) == "function" then
-            value = arg_def.default()
-          else
-            value = arg_def.default
-          end
-        end
-        opts[arg_def.name] = value
+    -- 2g. ユーザー引数を「位置引数」と「フラグ引数」に分類する
+    local positional_args = {}
+    local flag_args = {}
+    for i = 2, #args.fargs do
+      local arg = args.fargs[i]
+      if arg:sub(1, 2) == "--" then
+        table.insert(flag_args, arg)
+      else
+        table.insert(positional_args, arg)
       end
     end
+
+    -- 2h. 定義に基づいて引数をパース
+    if command_def.args then
+      local positional_idx = 1
+      for _, arg_def in ipairs(command_def.args) do
+        -- specの引数名が "_flag" で終わる場合、フラグとして扱う
+        if arg_def.name:match("_flag$") then
+          local found = false
+          -- 登録されているフラグ引数の中から一致するものを探す
+          for _, flag in ipairs(flag_args) do
+            -- ここでは単純な完全一致のみを考慮する
+            -- 例: --all-deps, --no-deps
+            opts[arg_def.name] = flag
+            found = true
+            break -- 複数フラグがあっても最初のものを使う
+          end
+          if not found and arg_def.required then
+            get_logger().error("Missing required flag for argument: '%s'", arg_def.name)
+            return
+          end
+        else
+          -- フラグでなければ、位置引数として扱う
+          local value = positional_args[positional_idx]
+          if value == nil then
+            if arg_def.required then
+              get_logger().error("Missing required argument: '%s'. Usage: %s", arg_def.name, command_def.desc or "")
+              return
+            end
+            if type(arg_def.default) == "function" then
+              value = arg_def.default()
+            else
+              value = arg_def.default
+            end
+          end
+          opts[arg_def.name] = value
+          positional_idx = positional_idx + 1
+        end
+      end
+    end
+
+    -- ▲▲▲ ここまでが修正箇所です ▲▲▲
     
-    -- 2h. 最終的なハンドラを実行
+    -- 2i. 最終的なハンドラを実行
     command_def.handler(opts)
   end
 
