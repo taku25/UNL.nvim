@@ -13,6 +13,10 @@ local M = {
       mode = "auto",
       prefer = { "telescope", "fzf-lua" }
     },
+    dynamic_picker = {
+      mode = "auto",
+      prefer = { "telescope", "fzf-lua" }
+    },
     filer = {
       mode = "auto",
       prefer = { "nvim-tree", "neo-tree", "native", "dummy"  },
