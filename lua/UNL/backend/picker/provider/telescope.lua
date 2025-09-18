@@ -7,6 +7,9 @@ function M.available()
 end
 
 function M.run(spec)
+  spec = spec or {}
+  
+  -- 必要なTelescopeモジュールを読み込む
   local actions = require("telescope.actions")
   local action_state = require("telescope.actions.state")
   local previewers = require("telescope.previewers")
@@ -15,40 +18,81 @@ function M.run(spec)
   local sorters = require("telescope.sorters")
   local log = require("UNL.logging").get(spec.logger_name or "UNL")
 
-  spec = spec or {}
-  local display_to_value = {}
+  -- ★★★ DEV ICONS SUPPORT ★★★
+  -- 1. 必要なモジュールを安全に読み込む
+  local entry_display = require("telescope.pickers.entry_display")
+  local devicons_ok, devicons = pcall(require, "nvim-web-devicons")
 
+  -- 2. deviconを有効にするかどうかのフラグを決定
+  local use_devicons = spec.devicons_enabled and devicons_ok
+
+  -- 3. deviconが有効な場合、カスタムdisplayerを作成
+  local displayer, make_display
+  if use_devicons then
+    displayer = entry_display.create({
+      separator = " ",
+      items = {
+        { width = 2 },         -- アイコン用のスペース
+        { remaining = true },  -- 残りのテキスト用のスペース
+      },
+    })
+
+    make_display = function(entry)
+      -- entry_makerから渡された情報を使って、表示チャンクを作成
+      return displayer({
+        { entry.icon, entry.icon_hl }, -- { "アイコン文字", "ハイライトグループ" }
+        entry.display_text,
+      })
+    end
+  end
+  -- ★★★ DEV ICONS SUPPORTここまで ★★★
+
+  local finder
   if spec.items then
     finder = finders.new_table({
       results = spec.items,
-      -- ★★★ ここが、文字列とテーブルの両方を完璧に扱う、最終的なentry_makerです ★★★
       entry_maker = function(entry)
-        local value, display
+        -- STEP A: 従来のロジックで、value, display, filenameを特定
+        local value, display, filename
         if type(entry) == 'table' then
           value = entry.value or entry
-          -- テーブルの場合は、一般的なキーを順番に試す
           display = entry.display or entry.label or entry.name or tostring(value)
+          filename = entry.filename or (type(value) == 'table' and value.filename)
         else
-          -- 文字列や数値の場合は、そのまま使う
           value = entry
           display = tostring(entry)
+          filename = tostring(entry) -- 文字列の場合は、それ自体がファイル名であると仮定
         end
-        
-        -- もしdisplayがまだテーブルのメモリアドレスだったら、最後の悪あがきをする
         if type(value) == 'table' and string.match(display, "^table: 0x") then
           display = value.display or value.label or value.name or display
         end
 
-        display_to_value[display] = value
-        return { value = value, display = display, ordinal = display, filename = (type(value) == "table" and value.filename) or (type(value) == "string" and value or nil) }
+        local result = {
+          value = value,
+          display = display,
+          ordinal = display,
+          filename = filename,
+        }
+        
+        -- ★★★ DEV ICONS SUPPORT ★★★
+        -- STEP B: deviconが有効な場合、アイコン情報をresultテーブルに追加
+        if use_devicons and filename and type(filename) == 'string' then
+          local extension = vim.fn.fnamemodify(filename, ":e")
+          local icon, icon_hl = devicons.get_icon(filename, extension)
+          
+          result.display = make_display -- 表示関数を上書き
+          result.icon = icon or ""
+          result.icon_hl = icon_hl or "Normal"
+          result.display_text = display -- 元の表示テキストを保持
+        end
+        -- ★★★ DEV ICONS SUPPORTここまで ★★★
+
+        return result
       end,
     })
-  elseif spec.exec_cmd then
-    finder = finders.new_oneshot_job(vim.split(spec.exec_cmd, " "), {
-      entry_maker = function(line) return { value = line, display = line, ordinal = line, filename = line } end,
-    })
   else
-    log.warn("Telescope provider: No items or exec_cmd provided."); return
+    log.warn("Telescope provider (static): No 'items' provided.")
+    return
   end
 
   local picker_opts = {
@@ -57,38 +101,45 @@ function M.run(spec)
     sorter = sorters.get_generic_fuzzy_sorter({}),
     cwd = spec.cwd or vim.loop.cwd(),
     attach_mappings = function(prompt_bufnr, map)
+      -- 以前の複雑なon_submitロジックを、よりシンプルで堅牢なものに修正
       actions.select_default:replace(function()
         local picker = action_state.get_current_picker(prompt_bufnr)
         actions.close(prompt_bufnr)
-        local function get_value_from_entry(entry)
-          if entry and entry.value then return entry.value end
-          if entry and entry.display and display_to_value[entry.display] then return display_to_value[entry.display] end
-          if entry and entry.display then return entry.display end
-          return nil
-        end
+        
+        -- entry.valueに常に正しいデータが入っているので、それを使うだけ
+        local get_value = function(entry) return entry and entry.value or nil end
+
         if spec.multi_select then
-          local selections = picker:get_multi_selection()
-          local single_selection = action_state.get_selected_entry()
-          if #selections > 0 then
-            if spec.on_submit then
-              local results = {}; for _, entry in ipairs(selections) do table.insert(results, get_value_from_entry(entry)) end
-              vim.schedule(function() spec.on_submit(results) end)
-            end
-          elseif single_selection and spec.on_submit then
-            vim.schedule(function() spec.on_submit({ get_value_from_entry(single_selection) }) end)
-          elseif spec.on_submit then
-            vim.schedule(function() spec.on_submit({}) end)
+          local results = {}
+          for _, entry in ipairs(picker:get_multi_selection()) do
+            table.insert(results, get_value(entry))
           end
+          -- 単一選択がマルチ選択にフォールバックした場合も考慮
+          if #results == 0 then
+            local single_entry = action_state.get_selected_entry()
+            if single_entry then table.insert(results, get_value(single_entry)) end
+          end
+          if spec.on_submit then vim.schedule(function() spec.on_submit(results) end) end
         else
           local selection = action_state.get_selected_entry()
-          if spec.on_submit then vim.schedule(function() spec.on_submit(get_value_from_entry(selection)) end) end
+          if spec.on_submit then vim.schedule(function() spec.on_submit(get_value(selection)) end) end
         end
       end)
       return true
     end,
   }
 
-  if spec.preview_enabled ~= false then picker_opts.previewer = previewers.vim_buffer_cat.new({ title = "Preview" }) end
+  -- ★★★ DEV ICONS SUPPORT ★★★
+  -- deviconが有効な場合、pickerにentry_displayを設定
+  if use_devicons then
+    picker_opts.entry_display = make_display
+  end
+  -- ★★★ DEV ICONS SUPPORTここまで ★★★
+
+  if spec.preview_enabled ~= false then 
+    picker_opts.previewer = previewers.vim_buffer_cat.new({ title = "Preview" }) 
+  end
+  
   pickers.new(picker_opts):find()
 end
 
