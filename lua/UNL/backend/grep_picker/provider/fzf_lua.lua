@@ -1,71 +1,65 @@
--- lua/UNL/backend/grep_picker/provider/fzf_lua.lua (完成版)
+-- lua/UNL/backend/grep_picker/provider/fzf_lua.lua
 
 local M = { name = "fzf-lua" }
 
 function M.available()
-  return pcall(require, "fzf-lua")
+  -- このプロバイダーはripgrep(rg)が必須であることを明記
+  return pcall(require, "fzf-lua") and vim.fn.executable("rg") == 1
 end
 
 function M.run(spec)
+  spec = spec or {}
+  
   local fzf_lua = require("fzf-lua")
   local log = require("UNL.logging").get(spec.logger_name or "UNL")
-  if not M.available() then
-    log.error("fzf-lua is not available for live grep.")
+  
+  if not spec.search_paths or #spec.search_paths == 0 then
+    log.warn("fzf-lua: No search_paths provided for grep.")
     return
   end
 
-  spec = spec or {}
+  -- ★ 1. `rg`に渡すオプションを「テーブル」として組み立てる
+  -- これにより、シェルの解釈を100%バイパスできる
+  local rg_opts_table = {
+    "--vimgrep",
+    "--line-number",
+    "--column",
+    "--smart-case",
+    "--no-heading",
+    "--hidden",
+  }
 
-  -- 1. rgコマンドに渡す「追加の」引数を組み立てる
-  local additional_args_parts = {}
-
-  -- 基本的なオプション
-  table.insert(additional_args_parts, "--vimgrep")
-  table.insert(additional_args_parts, "--line-number")
-  table.insert(additional_args_parts, "--column")
-  table.insert(additional_args_parts, "--smart-case")
-  table.insert(additional_args_parts, "--no-heading")
-  table.insert(additional_args_parts, "--hidden")
-
-  -- Configから除外/追加 glob を設定
-  local conf = spec.conf or {}
-  local grep_conf = conf.uep or conf
-  local excludes = grep_conf.excludes_directory or {}
+  -- Excludes (ディレクトリ除外)
+  local excludes = spec.exclude_directories or {}
   for _, dir in ipairs(excludes) do
-    table.insert(additional_args_parts, "--glob")
-    table.insert(additional_args_parts, "!" .. dir)
+    table.insert(rg_opts_table, "--glob"); table.insert(rg_opts_table, "!" .. dir)
   end
 
-  local extensions = grep_conf.files_extensions or {}
+  -- Includes (拡張子指定)
+  local extensions = spec.include_extensions or {}
   if #extensions > 0 then
-    local extension_glob = "*." .. "{" .. table.concat(extensions, ",") .. "}"
-    table.insert(additional_args_parts, "--glob")
-    table.insert(additional_args_parts, extension_glob)
+    for _, ext in ipairs(extensions) do
+      table.insert(rg_opts_table, "-g"); table.insert(rg_opts_table, "*." .. ext)
+    end
   end
+  
+  -- ★ 2. `live_grep_native`ではなく、高レベルな`live_grep`を呼び出す
+  fzf_lua.live_grep({
+    prompt = spec.title or "Live Grep> ",
+    
+    -- ★ 3. 組み立てたオプションを、正しいオプションキーに渡す
+    search_dirs = spec.search_paths,
+    rg_opts = table.concat(rg_opts_table, " "), -- fzf-luaはこの形式を期待している
 
-  -- 検索パスを追加
-  -- rgの構文を確実にするため、オプションの終わりを示す -- を挟む
-  table.insert(additional_args_parts, "--")
-  for _, path in ipairs(spec.search_paths or {}) do
-    table.insert(additional_args_parts, path)
-  end
-
-  -- 最終的な引数文字列を組み立てる
-  local final_additional_args = table.concat(additional_args_parts, " ")
-
-  log.trace("fzf-lua live_grep_native additional_args: %s", final_additional_args)
-
-  fzf_lua.live_grep_native({
-    -- ★★★ あなたが発見した、真の解決策 ★★★
-    additional_args = final_additional_args,
-    prompt = spec.title or "Live Grep>",
     actions = {
       ["default"] = function(selected)
         local entry = selected[1]
         if not entry then return end
-        local file, lnum = entry:match("^([^:]+):(%d+):.*$")
+        
+        local file, lnum, col = entry:match("^([^:]+):(%d+):(%d+):.*$")
+        
         if file and lnum and spec.on_submit then
-          pcall(spec.on_submit, { filename = file, lnum = tonumber(lnum) })
+          pcall(spec.on_submit, { filename = file, lnum = tonumber(lnum), col = tonumber(col) })
         end
       end,
     },
