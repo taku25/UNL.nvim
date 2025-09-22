@@ -136,23 +136,18 @@ local function read_engine_association(project_file_path)
 end
 
 -- Find plugin (scripts) root heuristically
+local plugin_root_path -- このモジュール内でのみ有効なキャッシュ変数
+
 local function find_plugin_root()
-  local src = debug.getinfo(1, "S").source or ""
-  if src:sub(1,1) == "@" then src = src:sub(2) end
-  local dir = fn.fnamemodify(src, ":h")
-  local guard = 10
-  while dir and dir ~= "" and guard > 0 do
-    guard = guard - 1
-    local scripts_dir = join(dir, "scripts")
-    if fn.isdirectory(scripts_dir) == 1 then
-      if fn.filereadable(join(scripts_dir, "find_engine.bat")) == 1
-         or fn.filereadable(join(scripts_dir, "find_engine.sh")) == 1 then
-        return dir
-      end
+  if plugin_root_path then
+    return plugin_root_path
+  end
+
+  for _, path in ipairs(vim.api.nvim_list_runtime_paths()) do
+    if path:match("[/\\]UNL.nvim$") then
+      plugin_root_path = path -- 見つけたらキャッシュに保存
+      return path
     end
-    local parent = fn.fnamemodify(dir, ":h")
-    if parent == dir then break end
-    dir = parent
   end
   return nil
 end
