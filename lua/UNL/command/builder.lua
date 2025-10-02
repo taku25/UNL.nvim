@@ -107,6 +107,12 @@ function M.create(spec)
           positional_idx = positional_idx + 1
         end
       end
+    else
+      local rest_args = {}
+      for i = 2, #args.fargs do
+        table.insert(rest_args, args.fargs[i])
+      end
+      opts.args = rest_args
     end
 
     -- ▲▲▲ ここまでが修正箇所です ▲▲▲
