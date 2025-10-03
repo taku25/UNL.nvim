@@ -41,11 +41,14 @@ function M.kismet_command(opts)
   return unl_remote_kismet.execute(opts)
 end
 
+function M.kismet_command(opts)
+  return unl_remote_kismet.execute(opts)
+end
 
 -- UNLの統合デバッグログビューワーの表示/非表示を切り替える
-function M.toggle_debug_log()
-  local unl_debug_log = require("UNL.backend.buf.debug_log")
-  unl_debug_log.toggle()
+function M.is_process_running(opts)
+  local unl_process_util = require("UNL.process.util")
+  unl_process_util.is_process_running(opts)
 end
 
 
