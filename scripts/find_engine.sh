@@ -1,188 +1,139 @@
-#!/usr/bin/env bash
-# ======================================================================
-# find_engine.sh (guid / version only)
-#
-# Usage:
-#   ./find_engine.sh version 5.6
-#   ./find_engine.sh guid {GUID}
-#
-# STDOUT: 成功時エンジンルートのみ
-# STDERR: エラー/デバッグ (FIND_ENGINE_DEBUG=1)
-#
-# Exit codes:
-#   0 = success
-#   1 = bad args / unknown type
-#   2 = not found
-#   3 = invalid structure (missing Engine/Binaries)
-# ======================================================================
+#!/bin/bash
+# find_engine.sh (guid / version only) – safe debug logging
 
-set -u
+# Set -e to exit immediately if a command exits with a non-zero status.
+# Set -u to treat unset variables as an error.
+set -eu
 
-DBG="${FIND_ENGINE_DEBUG:-}"
-log() {
-  [ "$DBG" = "1" ] && printf '[find_engine] %s\n' "$*" 1>&2
+# Debug logging (FIND_ENGINE_DEBUG=1 in environment to enable)
+DBG_LOG_PREFIX="[find_engine.sh]"
+debug_log() {
+    if [[ "${FIND_ENGINE_DEBUG:-0}" == "1" ]]; then
+        echo "$DBG_LOG_PREFIX DEBUG: $*" >&2
+    fi
+}
+error_log() {
+    echo "$DBG_LOG_PREFIX ERROR: $*" >&2
 }
 
-err() {
-  printf '[find_engine] ERROR: %s\n' "$*" 1>&2
-}
+TYPE="$1"
+VAL="$2"
 
-TYPE="${1:-}"
-VALUE="${2:-}"
-
-if [ -z "$TYPE" ]; then
-  err "missing TYPE"
-  exit 1
+if [[ -z "$TYPE" ]]; then
+    error_log "missing TYPE argument"
+    exit 1
 fi
-if [ -z "$VALUE" ]; then
-  err "missing VALUE"
-  exit 1
+if [[ -z "$VAL" ]]; then
+    error_log "missing VALUE argument"
+    exit 1
 fi
 
-# Allow TYPE=VALUE form
-case "$TYPE" in
-  *=*)
-    lhs="${TYPE%%=*}"
-    rhs="${TYPE#*=}"
-    if [ -z "$VALUE" ]; then
-      TYPE="$lhs"
-      VALUE="$rhs"
-    fi
-    ;;
-esac
+debug_log "TYPE=$TYPE VAL=$VAL"
+
+ENGINE_PATH=""
+OS_NAME=$(uname -s) # e.g., Linux, Darwin
 
 case "$TYPE" in
-  guid|GUID|Guid) TYPE="guid" ;;
-  version|Version|VERSION) TYPE="version" ;;
-  path|PATH)
-    err "path mode not supported in helper (handle absolute paths in Lua)"
-    exit 1
-    ;;
-esac
+    guid)
+        # GUID resolution for Unreal Engine is primarily a Windows registry feature.
+        # On Linux/macOS, Epic Games Launcher typically uses version strings in Install.ini.
+        # Custom builds might use GUIDs, but this helper doesn't support that lookup via Install.ini.
+        error_log "GUID resolution not directly supported by Install.ini on $OS_NAME for Epic Games Launcher builds."
+        exit 1
+        ;;
+    version)
+        debug_log "Attempting to resolve version '$VAL' for OS '$OS_NAME'"
+        VERSION_CLEAN=$(echo "$VAL" | tr '.' '_') # e.g., 5.6 -> UE_5_6 in INI files
 
-log "TYPE=$TYPE VALUE=$VALUE"
+        if [[ "$OS_NAME" == "Linux" ]]; then
+            INI_FILE="$HOME/.config/Epic/UnrealEngine/Install.ini"
+            debug_log "Looking for version '$VAL' in Linux Install.ini at '$INI_FILE'"
 
-ENGINEPATH=""
+            # Try to read from Install.ini
+            if [[ -f "$INI_FILE" ]]; then
+                # FIX: Escape periods in VAL for grep pattern matching INI file format (UE_X.Y=...)
+                ESCAPED_VAL=$(echo "$VAL" | sed 's/\./\\./g')
+                ENGINE_PATH=$(grep -i "^UE_${ESCAPED_VAL}=" "$INI_FILE" | head -n 1 | cut -d'=' -f2-)
+            fi
 
-# --- Helpers ------------------------------------------------------------
+            if [[ -z "$ENGINE_PATH" ]]; then
+                debug_log "Version '$VAL' not found in Install.ini or Install.ini missing. Attempting common fallback paths."
+                # Common fallback paths for Linux
+                for p in \
+                    "$HOME/Epic Games/UE_${VERSION_CLEAN}" \
+                    "/opt/Epic Games/UE_${VERSION_CLEAN}" \
+                    "/usr/local/share/Epic Games/UE_${VERSION_CLEAN}" \
+                    "$HOME/UnrealEngine/UE_${VERSION_CLEAN}" \
+                    "/usr/local/UnrealEngine/UE_${VERSION_CLEAN}" \
+                    ; do
+                    if [[ -d "$p/Engine/Binaries" ]]; then
+                        ENGINE_PATH="$p"
+                        debug_log "Linux Fallback found: $ENGINE_PATH"
+                        break
+                    fi
+                done
+            fi
 
-validate_engine_root() {
-  local p="$1"
-  [ -d "$p/Engine" ] || return 1
-  # Mac/Lnx: Binaries may contain platform subdirs, allow either:
-  if [ -d "$p/Engine/Binaries" ] || [ -d "$p/Engine/Build" ]; then
-    return 0
-  fi
-  return 1
-}
+        elif [[ "$OS_NAME" == "Darwin" ]]; then # macOS
+            INI_FILE="$HOME/Library/Application Support/Epic/UnrealEngine/Install.ini"
+            debug_log "Looking for version '$VAL' in macOS Install.ini at '$INI_FILE'"
 
-resolve_guid() {
-  local guid="$1"
-  # Ensure braces
-  if [[ "$guid" != \{*} ]]; then
-    guid="{$guid}"
-  fi
+            # Try to read from Install.ini
+            if [[ -f "$INI_FILE" ]]; then
+                # FIX: Escape periods in VAL for grep pattern matching INI file format (UE_X.Y=...)
+                ESCAPED_VAL=$(echo "$VAL" | sed 's/\./\\./g')
+                ENGINE_PATH=$(grep -i "^UE_${ESCAPED_VAL}=" "$INI_FILE" | head -n 1 | cut -d'=' -f2-)
+            fi
 
-  # Potential locations of Installations mapping file
-  # (Some variations included for robustness)
-  local files=(
-    "$HOME/Library/Application Support/Epic/UnrealEngine/Installations"
-    "$HOME/Library/Application Support/Epic/Unreal Engine/Installations"
-    "$HOME/Library/Application Support/Epic/UE_Installations" # rare
-    "$XDG_CONFIG_HOME/Epic/UnrealEngine/Installations"
-    "$HOME/.config/Epic/UnrealEngine/Installations"
-  )
+            if [[ -z "$ENGINE_PATH" ]]; then
+                debug_log "Version '$VAL' not found in Install.ini or Install.ini missing. Attempting common fallback paths."
+                # Common fallback paths for macOS
+                for p in \
+                    "/Users/Shared/Epic Games/UE_${VERSION_CLEAN}" \
+                    "$HOME/Epic Games/UE_${VERSION_CLEAN}" \
+                    "$HOME/Documents/Epic Games/UE_${VERSION_CLEAN}" \
+                    ; do
+                    if [[ -d "$p/Engine/Binaries" ]]; then
+                        ENGINE_PATH="$p"
+                        debug_log "macOS Fallback found: $ENGINE_PATH"
+                        break
+                    fi
+                done
+            fi
 
-  for f in "${files[@]}"; do
-    [ -f "$f" ] || continue
-    log "scan file: $f"
-    # Read line by line: {GUID}=/path/to/engine
-    # Avoid IFS splitting inside path: use while read -r whole
-    while IFS= read -r line || [ -n "$line" ]; do
-      # Trim
-      line="${line#"${line%%[![:space:]]*}"}"
-      line="${line%"${line##*[![:space:]]}"}"
-      [ -z "$line" ] && continue
-      case "$line" in
-        \#*) continue ;;
-      esac
-      # Split first '='
-      key="${line%%=*}"
-      val="${line#*=}"
-      key="${key%"${key##*[![:space:]]}"}"
-      key="${key#"${key%%[![:space:]]*}"}"
-      val="${val#"${val%%[![:space:]]*}"}"
-      val="${val%"${val##*[![:space:]]}"}"
-      if [ "$key" = "$guid" ]; then
-        log "GUID match in $f: $val"
-        ENGINEPATH="$val"
-        return 0
-      fi
-    done <"$f"
-  done
-  return 1
-}
+        else
+            error_log "Unsupported operating system: $OS_NAME"
+            exit 1
+        fi
 
-resolve_version() {
-  local ver="$1"
-  # Candidate directories (add or reorder as needed)
-  local candidates=(
-    "/Users/Shared/Epic Games/UE_$ver"
-    "/Users/Shared/EpicGames/UE_$ver"
-    "/Applications/Epic Games/UE_$ver"
-    "/Applications/EpicGames/UE_$ver"
-    "/Users/Shared/UnrealEngine/UE_$ver"
-    "$HOME/UnrealEngine/UE_$ver"
-    "$HOME/Epic/UE_$ver"
-    "/opt/Epic/UE_$ver"
-    "/opt/UnrealEngine/UE_$ver"
-  )
-  for p in "${candidates[@]}"; do
-    if [ -d "$p/Engine/Binaries" ]; then
-      log "version fallback hit: $p"
-      ENGINEPATH="$p"
-      return 0
-    fi
-  done
-  return 1
-}
-
-# --- Dispatch -----------------------------------------------------------
-
-case "$TYPE" in
-  guid)
-    if resolve_guid "$VALUE"; then
-      :
-    else
-      err "engine path not found for GUID"
-      exit 2
-    fi
-    ;;
-  version)
-    if resolve_version "$VALUE"; then
-      :
-    else
-      err "engine path not found for version $VALUE"
-      exit 2
-    fi
-    ;;
-  *)
-    err "unknown TYPE: $TYPE"
-    exit 1
-    ;;
+        if [[ -z "$ENGINE_PATH" ]]; then
+            error_log "Engine path for version '$VAL' not found via Install.ini or common fallbacks on $OS_NAME."
+            exit 1
+        fi
+        ;;
+    path)
+        # Lua side handles absolute path resolution and validation.
+        error_log "path mode not supported in this helper (should be handled by Lua)"
+        exit 1
+        ;;
+    *)
+        error_log "unknown TYPE=$TYPE"
+        exit 1
+        ;;
 esac
 
 # Normalize path (remove trailing slashes)
-# Use parameter expansion repeatedly
-while [ "${ENGINEPATH%/}" != "$ENGINEPATH" ]; do
-  ENGINEPATH="${ENGINEPATH%/}"
-done
+# 'readlink -f' is more robust for resolving symlinks and normalizing, but not universally available (e.g., on older macOS)
+# Using sed for cross-platform compatibility for simple trailing slash removal.
+ENGINE_PATH=$(echo "$ENGINE_PATH" | sed 's:/*$::')
 
-if ! validate_engine_root "$ENGINEPATH"; then
-  err "invalid engine structure: $ENGINEPATH"
-  exit 3
+debug_log "Resolved ENGINE_PATH (raw): $ENGINE_PATH"
+
+# Validate structure (check for Engine/Binaries)
+if [[ ! -d "$ENGINE_PATH/Engine/Binaries" ]]; then
+    error_log "Invalid engine structure: '$ENGINE_PATH' (missing Engine/Binaries)"
+    exit 1
 fi
 
-# Success
-printf '%s\n' "$ENGINEPATH"
+echo "$ENGINE_PATH"
 exit 0
