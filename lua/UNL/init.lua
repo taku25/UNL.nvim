@@ -4,7 +4,7 @@ local unl_defaults = require("UNL.config.defaults")
 
 local M = {}
 
-local initialized = false
+-- local initialized = false
 
 function M.setup(user_config)
   if initialized then return M end -- 複数回呼ばれるのを防ぐ
@@ -21,13 +21,13 @@ function M.setup(user_config)
     log.debug("UNL library setup complete.")
   end
   
-  initialized = true
+  -- initialized = true
   return M
 end
 
 -- ファイルが初めてrequireされた時に、最低限のデフォルト設定で自動的に初期化を行う
-if not initialized then
-  M.setup({})
-end
+-- if not initialized then
+--   M.setup({})
+-- end
 
 return M
