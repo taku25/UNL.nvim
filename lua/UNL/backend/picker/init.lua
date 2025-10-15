@@ -8,6 +8,7 @@ local unl_picker_factory = require("UNL.backend.factory.picker")
 local provider_modules = {
   "UNL.backend.picker.provider.telescope",
   "UNL.backend.picker.provider.fzf_lua",
+  "UNL.backend.picker.provider.snacks",
   "UNL.backend.picker.provider.native",
   "UNL.backend.picker.provider.dummy",
 }

@@ -21,7 +21,7 @@ This library is designed to save plugin developers from writing boilerplate code
   * **Layered Configuration Management**:
       * Provides a hierarchical configuration system that automatically merges plugin defaults, user's global settings, and project-local settings (`.unlrc.json`).
   * **UI Abstraction Backend**:
-      * **Picker**: Automatically detects [Telescope](https://github.com/nvim-telescope/telescope.nvim) and [fzf-lua](https://github.com/ibhagwan/fzf-lua), with support for the native UI as a fallback.
+      * **Picker**: Automatically detects [Telescope](https://github.com/nvim-telescope/telescope.nvim) ,[fzf-lua](https://github.com/ibhagwan/fzf-lua) and [snacks](https://github.com/folke/snacks.nvim), with support for the native UI as a fallback.
       * **Progress**: Transparently handles multiple progress display methods, including [fidget.nvim](https://github.com/j-hui/fidget.nvim), custom windows, and notifications.
       * **Filer**: Automatically detects [neo-tree.nvim](https://github.com/nvim-neo-tree/neo-tree.nvim) and [nvim-tree](https://github.com/nvim-tree/nvim-tree.lua), with support for `netrw` as a fallback.
   * **Declarative Command Builder**:

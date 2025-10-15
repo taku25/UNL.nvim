@@ -21,7 +21,7 @@
   * **レイヤー化された設定管理**:
       * プラグインのデフォルト設定、ユーザーのグローバル設定、プロジェクトローカルの設定 (`.unlrc.json`) を自動的にマージする、階層化された設定システムを提供します。
   * **UI抽象化バックエンド**:
-      * **Picker** (選択UI): [Telescope](https://github.com/nvim-telescope/telescope.nvim)や[fzf-lua](https://github.com/ibhagwan/fzf-lua)を自動検出し、フォールバックとしてネイティブUIもサポートします。
+      * **Picker** (選択UI): [Telescope](https://github.com/nvim-telescope/telescope.nvim),[fzf-lua](https://github.com/ibhagwan/fzf-lua)や[snacks](https://github.com/folke/snacks.nvim)を自動検出し、フォールバックとしてネイティブUIもサポートします。
       * **Progress** (進捗UI): [fidget.nvim](https://github.com/j-hui/fidget.nvim)やカスタムウィンドウ、通知など、複数の進捗表示方法を透過的に扱えます。
       * **Filer** (ファイラーUI): [neo-tree.nvim](https://github.com/nvim-neo-tree/neo-tree.nvim)や[nvim-tree](https://github.com/nvim-tree/nvim-tree.lua)を自動検出し、フォールバックとしてnetrwUIもサポートします。
   * **宣言的なコマンドビルダー**:
