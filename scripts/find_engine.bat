@@ -1,4 +1,5 @@
 @echo off
+chcp 65001 > nul
 setlocal EnableExtensions
 
 REM find_engine.bat (guid / version only) – safe debug logging (no redirection symbols)
