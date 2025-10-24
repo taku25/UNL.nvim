@@ -41,9 +41,6 @@ function M.kismet_command(opts)
   return unl_remote_kismet.execute(opts)
 end
 
-function M.kismet_command(opts)
-  return unl_remote_kismet.execute(opts)
-end
 
 -- UNLの統合デバッグログビューワーの表示/非表示を切り替える
 function M.is_process_running(opts)
