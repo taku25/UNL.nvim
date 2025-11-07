@@ -97,6 +97,10 @@ function M.run(spec)
 
   local picker_opts = {
     prompt_title = spec.title or "Select Item",
+
+    file_ignore_patterns = {},
+    find_files_ignore_patterns = {},
+    hidden = true ,
     finder = finder,
     sorter = sorters.get_generic_fuzzy_sorter({}),
     cwd = spec.cwd or vim.loop.cwd(),
