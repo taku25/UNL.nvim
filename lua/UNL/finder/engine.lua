@@ -188,18 +188,24 @@ end
 
 -- Classify EngineAssociation
 local function classify_association(association)
-  if not association or association == "" then return nil end
+  if not association or association == "" then return "unkown" end
+
+  -- 1. Check for GUID first (most specific)
   if association:match("^%b{}$") and association:match("^{[%x%-]+}$") then
     return "guid"
   end
-  if association:match("^%d+%.%d+$") then
-    return "version"
-  end
+
+  -- 2. Check for an absolute path
   if is_absolute(association) then
     return "path"
   end
-  return "unknown"
+
+  -- 3. If it's not a GUID and not a path, treat it as a
+  --    Build ID / Custom Version string (like "5.3" or "UEQ-5.5.3")
+  --    to be passed to the helper script.
+  return "version"
 end
+
 
 -- Public API
 -- opts = {

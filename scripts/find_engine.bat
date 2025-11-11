@@ -55,8 +55,22 @@ if not defined VER (
 )
 if defined DBG 1>&2 echo [find_engine] Version=%VER%
 
+REM --- ▼▼▼ ここから修正 ▼▼▼ ---
+REM 1. 最初に HKCU\...\Builds をチェック (カスタムビルドID用)
+for /f "tokens=1,2,*" %%A in ('reg query "HKCU\Software\Epic Games\Unreal Engine\Builds" /v "%VER%" 2^>nul') do (
+  if /I "%%A"=="%VER%" set "ENGINEPATH=%%C"
+)
+if defined ENGINEPATH (
+  if defined DBG 1>&2 echo [find_engine] HKCU\Builds hit
+  goto :POST
+)
+
+REM 2. 次に HKLM をチェック (ランチャーの公式インストール用)
 call :TRY_KEY "HKLM\SOFTWARE\EpicGames\Unreal Engine\%VER%" && goto :POST
 call :TRY_KEY "HKLM\SOFTWARE\WOW6432Node\EpicGames\Unreal Engine\%VER%" && goto :POST
+
+REM 3. 最後にハードコードされたパスをフォールバックとしてチェック
+REM --- ▲▲▲ 修正ここまで ▲▲▲ ---
 
 if not defined ENGINEPATH (
   for %%P in (
@@ -66,7 +80,7 @@ if not defined ENGINEPATH (
     "D:\Epic\UE_%VER%"
     "C:\UnrealEngine\UE_%VER%"
     "D:\UnrealEngine\UE_%VER%"
-    "C:\Unreal\UE_%VER%"
+    "C_Unreal\UE_%VER%"
     "D:\Unreal\UE_%VER%"
   ) do (
     if exist "%%~P\Engine\Binaries" (
@@ -106,8 +120,8 @@ for /f "tokens=1,2,*" %%A in ('reg query "%~1" /v InstalledDirectory 2^>nul') do
 if defined DBG (
   if defined ENGINEPATH (
     1>&2 echo [find_engine] Registry hit
-    1>&2 echo [find_engine]   key = "%~1"
-    1>&2 echo [find_engine]   path= "%ENGINEPATH%"
+    1>&2 echo [find_engine]    key = "%~1"
+    1>&2 echo [find_engine]    path= "%ENGINEPATH%"
   ) else (
     1>&2 echo [find_engine] Registry miss "%~1"
   )

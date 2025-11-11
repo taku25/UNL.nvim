@@ -51,9 +51,20 @@ case "$TYPE" in
 
             # Try to read from Install.ini
             if [[ -f "$INI_FILE" ]]; then
-                # FIX: Escape periods in VAL for grep pattern matching INI file format (UE_X.Y=...)
-                ESCAPED_VAL=$(echo "$VAL" | sed 's/\./\\./g')
-                ENGINE_PATH=$(grep -i "^UE_${ESCAPED_VAL}=" "$INI_FILE" | head -n 1 | cut -d'=' -f2-)
+                # --- ▼▼▼ 修正箇所 ▼▼▼ ---
+                # 1. カスタムビルドID (例: "UEQ5.6", "My[Build]") をそのまま探す
+                # grepで特殊文字として扱われないようエスケープ
+                ESCAPED_VAL_CUSTOM=$(echo "$VAL" | sed 's/[]\.^$*\[\\]/\\&/g') # <-- 閉じカッコ]を追加し、]と\もエスケープ
+                debug_log "Checking for custom ID match: ^${ESCAPED_VAL_CUSTOM}="
+                ENGINE_PATH=$(grep -i "^${ESCAPED_VAL_CUSTOM}=" "$INI_FILE" | head -n 1 | cut -d'=' -f2-)
+
+                # 2. 見つからなければ、標準ID (例: "UE_5.6") を探す
+                if [[ -z "$ENGINE_PATH" ]]; then
+                    ESCAPED_VAL_STD=$(echo "$VAL" | sed 's/\./\\./g') # 標準はドットのみエスケープで十分
+                    debug_log "Checking for standard ID match: ^UE_${ESCAPED_VAL_STD}="
+                    ENGINE_PATH=$(grep -i "^UE_${ESCAPED_VAL_STD}=" "$INI_FILE" | head -n 1 | cut -d'=' -f2-)
+                fi
+                # --- ▲▲▲ 修正ここまで ▲▲▲ ---
             fi
 
             if [[ -z "$ENGINE_PATH" ]]; then
@@ -80,9 +91,19 @@ case "$TYPE" in
 
             # Try to read from Install.ini
             if [[ -f "$INI_FILE" ]]; then
-                # FIX: Escape periods in VAL for grep pattern matching INI file format (UE_X.Y=...)
-                ESCAPED_VAL=$(echo "$VAL" | sed 's/\./\\./g')
-                ENGINE_PATH=$(grep -i "^UE_${ESCAPED_VAL}=" "$INI_FILE" | head -n 1 | cut -d'=' -f2-)
+                # --- ▼▼▼ 修正箇所 ▼▼▼ ---
+                # 1. カスタムビルドID (例: "UEQ5.6", "My[Build]") をそのまま探す
+                ESCAPED_VAL_CUSTOM=$(echo "$VAL" | sed 's/[]\.^$*\[\\]/\\&/g') # <-- 閉じカッコ]を追加し、]と\もエスケープ
+                debug_log "Checking for custom ID match: ^${ESCAPED_VAL_CUSTOM}="
+                ENGINE_PATH=$(grep -i "^${ESCAPED_VAL_CUSTOM}=" "$INI_FILE" | head -n 1 | cut -d'=' -f2-)
+
+                # 2. 見つからなければ、標準ID (例: "UE_5.6") を探す
+                if [[ -z "$ENGINE_PATH" ]]; then
+                    ESCAPED_VAL_STD=$(echo "$VAL" | sed 's/\./\\./g') # 標準はドットのみエスケープで十分
+                    debug_log "Checking for standard ID match: ^UE_${ESCAPED_VAL_STD}="
+                    ENGINE_PATH=$(grep -i "^UE_${ESCAPED_VAL_STD}=" "$INI_FILE" | head -n 1 | cut -d'=' -f2-)
+                fi
+                # --- ▲▲▲ 修正ここまで ▲▲▲ ---
             fi
 
             if [[ -z "$ENGINE_PATH" ]]; then
