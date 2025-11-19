@@ -37,6 +37,7 @@ function M.run(spec)
   local picker_opts = {
     prompt_title = spec.title or "Find Results",
     finder = finder,
+    file_ignore_patterns = spec.file_ignore_patterns or {},
     sorter = require("telescope.config").values.generic_sorter(),
     attach_mappings = function(bufnr, map)
       actions.select_default:replace(function()
