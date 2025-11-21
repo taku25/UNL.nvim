@@ -47,6 +47,7 @@ end
 --   - file_path (string): The absolute path of the file to open.
 --   - open_cmd (string): The command to use ("edit", "split", "vsplit").
 --   - plugin_name (string): The name of the calling plugin (e.g., "UCM").
+--   - split_cmd (string, optional): The command to use when creating a new window (default: "vsplit").
 function M.safe(opts)
   opts = opts or {}
   if not (opts.file_path and opts.open_cmd and opts.plugin_name) then
@@ -54,7 +55,6 @@ function M.safe(opts)
     return
   end
   
-  -- (変更) 呼び出し元のプラグインの設定とロガーを取得
   local conf_all = require("UNL.config").get(opts.plugin_name)
   local conf_safe_open = conf_all.safe_open
   local logger = log.get(opts.plugin_name)
@@ -79,8 +79,10 @@ function M.safe(opts)
     vim.api.nvim_set_current_win(target_win_id)
     vim.cmd(opts.open_cmd .. " " .. vim.fn.fnameescape(opts.file_path))
   else
-    logger.debug("No safe window found. Creating a new vsplit.")
-    vim.cmd("vsplit " .. vim.fn.fnameescape(opts.file_path))
+    -- 安全なウィンドウが見つからない場合は新規分割
+    local split_cmd = opts.split_cmd or "vsplit"
+    logger.debug("No safe window found. Creating a new window with: " .. split_cmd)
+    vim.cmd(split_cmd .. " " .. vim.fn.fnameescape(opts.file_path))
   end
 end
 
