@@ -37,7 +37,6 @@ local M = {
     -- A list of buffer types to avoid.
     -- See `:help buftype` for more options.
     prevent_in_buftypes = {
-      "nofile",
       "quickfix",
       "help",
       "terminal",

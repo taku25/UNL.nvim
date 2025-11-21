@@ -26,7 +26,7 @@ function M.find_project(file_path, opts)
 end
 
 function M.find_module(file_path, opts)
-  return unl_finder.module.find_module_root(file_path, opts)
+  return unl_finder.module.find_module(file_path, opts)
 end
 
 function M.find_engine(project_file_path, opts)
