@@ -1,4 +1,4 @@
--- lua/UNL/backend/picker/provider/fzf_lua.lua (すべての知見を統合した最終版)
+-- lua/UNL/backend/picker/provider/fzf_lua.lua
 
 local M = { name = "fzf-lua" }
 
@@ -8,9 +8,7 @@ end
 
 function M.run(spec)
   local fzf_lua = require("fzf-lua")
-  local fzf_actions = require("fzf-lua.actions")
   local log = require("UNL.logging").get("UNL")
-  -- ★★★ あなたのコードにあった、唯一の正しい require ★★★
   local builtin = require("fzf-lua.previewer.builtin")
   spec = spec or {}
 
@@ -24,7 +22,9 @@ function M.run(spec)
         value = item.value or item
         display = item.display or item.label or item.name or tostring(value)
         filename = item.filename or item.file_path
-        lnum = item.lnum
+        
+        -- ★★★ 修正: 行番号・列番号のエイリアスに対応 ★★★
+        lnum = item.lnum or item.line or item.row
         col = item.col
       else
         value = item
@@ -34,8 +34,14 @@ function M.run(spec)
       if type(value) == 'table' and string.match(display, "^table: 0x") then
         display = value.display or value.label or value.name or display
       end
+      
+      -- 数値型に変換しておく
+      if lnum then lnum = tonumber(lnum) end
+      if col then col = tonumber(col) end
+
       return { value = value, display = display, filename = filename, lnum = lnum, col = col }
     end
+
     for _, item in ipairs(spec.items) do
       local processed = entry_maker_to_use(item)
       local display_key = processed.display or ""
@@ -47,7 +53,8 @@ function M.run(spec)
   local fzf_opts = {
     prompt = spec.title or "Select Item> ",
     cwd = spec.cwd or vim.loop.cwd(),
-    multi = spec.multi_select or false,
+    -- FzfLuaはデフォルトでマルチ選択が可能だが、呼び出し元の意図に合わせて制御したい場合はここで行う
+    -- (fzf-luaのAPI仕様上、完全にシングルモードにするオプションはないが、header等で案内は可能)
     actions = {
       ["default"] = function(selected_list)
         if not selected_list then selected_list = {} end
@@ -59,12 +66,9 @@ function M.run(spec)
         end
 
         if spec.on_submit then
-          -- ★★★ ここがTelescopeと挙動を完全に統一する、最終的なロジックです ★★★
           if spec.multi_select then
-            -- 複数選択モードの場合、常にテーブルを返す
             vim.schedule(function() spec.on_submit(results) end)
           else
-            -- 単一選択モードの場合、最初の要素かnilを返す
             vim.schedule(function() spec.on_submit(#results > 0 and results[1] or nil) end)
           end
         end
@@ -72,7 +76,7 @@ function M.run(spec)
       ["ctrl-c"] = function() if spec.on_cancel then vim.schedule(spec.on_cancel) end end,
     },
   }
-  -- ★★★ あなたのアプローチと逆引きマップを融合した、正しいプレビューワーの実装 ★★★
+
   if spec.preview_enabled ~= false then
     local GenericFzfPreviewer = builtin.buffer_or_file:extend()
 
@@ -87,7 +91,7 @@ function M.run(spec)
       if item and item.filename and type(item.filename) == 'string' then
         return {
           path = item.filename,
-          line = item.lnum,
+          line = item.lnum, -- ここにはエイリアス解決済みの値が入っている
           col = item.col,
         }
       end
