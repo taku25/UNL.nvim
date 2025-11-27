@@ -25,7 +25,7 @@ local function has_child_type(node, type_name)
     return false
 end
 
--- ボディ判定 (書きかけのコードに対応)
+-- ボディ判定
 local function has_body(node, bufnr)
     if not node then return false end
     for child in node:iter_children() do
@@ -75,9 +75,9 @@ function M.parse(path_or_bufnr)
     local result = { list = {}, map = {}, globals = create_global_data() }
     local bufnr
     local file_path = ""
-    local should_delete_buffer = false
+    local is_scratch = false
 
-    -- 引数判定
+    -- 1. 引数判定 & バッファ準備
     if type(path_or_bufnr) == "number" then
         bufnr = path_or_bufnr
         if not vim.api.nvim_buf_is_valid(bufnr) then return result end
@@ -85,27 +85,30 @@ function M.parse(path_or_bufnr)
     else
         file_path = path_or_bufnr
         if not file_path or file_path == "" or vim.fn.filereadable(file_path) == 0 then return result end
-        bufnr = vim.fn.bufadd(file_path)
-        if not vim.api.nvim_buf_is_loaded(bufnr) then
-            vim.fn.bufload(bufnr)
-            -- ★修正: ここで filetype = "cpp" を設定しない！
-            -- これにより LSP が反応してワーニングを出すのを防ぐ
-            should_delete_buffer = true
-        end
+        
+        -- ★修正: ファイルを直接バッファとして開かず、内容を読み込んでスクラッチバッファに入れる
+        -- これにより LSP のアタッチや autocmd の発火を防ぐ
+        local lines = vim.fn.readfile(file_path)
+        if not lines then return result end
+        
+        bufnr = vim.api.nvim_create_buf(false, true) -- listed=false, scratch=true
+        vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, lines)
+        is_scratch = true
     end
 
-    -- ★修正: get_parser に明示的に "cpp" を渡すことで、filetype設定なしでもパース可能にする
+    -- 2. Treesitter Parser 取得 (明示的に "cpp" を指定)
     local ok, parser = pcall(vim.treesitter.get_parser, bufnr, "cpp")
     if not ok or not parser then 
-        if should_delete_buffer and vim.api.nvim_buf_is_valid(bufnr) then
+        if is_scratch and vim.api.nvim_buf_is_valid(bufnr) then
             vim.api.nvim_buf_delete(bufnr, { force = true })
         end
         return result 
     end
 
+    -- 3. パース実行
     local tree = parser:parse(true)[1]
     if not tree then 
-        if should_delete_buffer and vim.api.nvim_buf_is_valid(bufnr) then
+        if is_scratch and vim.api.nvim_buf_is_valid(bufnr) then
             vim.api.nvim_buf_delete(bufnr, { force = true })
         end
         return result 
@@ -124,7 +127,6 @@ function M.parse(path_or_bufnr)
         local s_row, _, e_row, _ = node:range()
         local line_num = s_row + 1
         
-        -- クラス定義ノードを探す（さかのぼる）
         local definition_node = node
         while definition_node do
             local type = definition_node:type()
@@ -145,7 +147,6 @@ function M.parse(path_or_bufnr)
             if type == "unreal_enum_declaration" then kind = "UEnum" end
 
             local base_class = nil
-            -- 基底クラス名を抽出 (public/virtual除外)
             for child in definition_node:iter_children() do
                 if child:type() == "base_class_clause" then
                     for i = 0, child:named_child_count() - 1 do
@@ -159,7 +160,6 @@ function M.parse(path_or_bufnr)
                 end
             end
 
-            -- ★修正: クラス定義全体(definition_node)の範囲を使用する
             local d_start, _, d_end, _ = definition_node:range()
             local def_start_line = d_start + 1
             local def_end_line = d_end + 1
@@ -177,7 +177,6 @@ function M.parse(path_or_bufnr)
                 if current_class and current_class.name == class_name then
                     current_class.base_class = final_base
                 else
-                    -- DECLARE_CLASSはマクロ自体が範囲
                     local d_start, _, d_end, _ = node:range()
                     local new_cls = create_class_data(class_name, "Intrinsic", d_start + 1, d_end + 1, file_path)
                     new_cls.base_class = final_base
@@ -246,7 +245,7 @@ function M.parse(path_or_bufnr)
         ::continue::
     end
 
-    if should_delete_buffer and vim.api.nvim_buf_is_valid(bufnr) then
+    if is_scratch and vim.api.nvim_buf_is_valid(bufnr) then
         vim.api.nvim_buf_delete(bufnr, { force = true })
     end
     
