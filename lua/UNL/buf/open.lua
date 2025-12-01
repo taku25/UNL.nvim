@@ -12,15 +12,26 @@ local M = {}
 -- @return boolean: True if the buffer is safe, false otherwise.
 local function is_safe_buffer(bufnr, conf)
   if not vim.api.nvim_buf_is_valid(bufnr) then return false end
+
+  local filetype = vim.api.nvim_buf_get_option(bufnr, "filetype")
+
+  -- ★★★ 修正箇所: 設定からリストを読み込む ★★★
+  -- configに定義がなければデフォルト値を使う安全策も入れておく
+  local allowed_dashboards = conf.dashboard_filetypes or { "dashboard", "alpha", "starter", "snacks_dashboard" }
+  
+  if vim.tbl_contains(allowed_dashboards, filetype) then
+    return true -- ダッシュボードなら、modifiableフラグに関わらず上書き許可
+  end
+
+  -- 以下、通常のチェック
   if not vim.api.nvim_buf_get_option(bufnr, "modifiable") then return false end
 
   local buftype = vim.api.nvim_buf_get_option(bufnr, "buftype")
-  if vim.tbl_contains(conf.prevent_in_buftypes, buftype) then
+  if vim.tbl_contains(conf.prevent_in_buftypes or {}, buftype) then
     return false
   end
 
-  local filetype = vim.api.nvim_buf_get_option(bufnr, "filetype")
-  if vim.tbl_contains(conf.prevent_in_filetypes, filetype) then
+  if vim.tbl_contains(conf.prevent_in_filetypes or {}, filetype) then
     return false
   end
 
@@ -29,8 +40,7 @@ end
 
 ---
 -- Finds the first "safe" window that is suitable for opening a file.
--- @param conf table: The 'safe_open' configuration table.
--- @return integer|nil: The window ID if a safe one is found, otherwise nil.
+-- (以下、変更なし)
 local function find_safe_window(conf)
   for _, win_id in ipairs(vim.api.nvim_list_wins()) do
     local bufnr = vim.api.nvim_win_get_buf(win_id)
@@ -43,11 +53,7 @@ end
 
 ---
 -- Opens a file in a "safe" window.
--- @param opts table: Options for opening the file.
---   - file_path (string): The absolute path of the file to open.
---   - open_cmd (string): The command to use ("edit", "split", "vsplit").
---   - plugin_name (string): The name of the calling plugin (e.g., "UCM").
---   - split_cmd (string, optional): The command to use when creating a new window (default: "vsplit").
+-- (以下、変更なし)
 function M.safe(opts)
   opts = opts or {}
   if not (opts.file_path and opts.open_cmd and opts.plugin_name) then

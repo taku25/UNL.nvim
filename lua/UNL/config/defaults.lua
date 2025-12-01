@@ -34,7 +34,13 @@ local M = {
   },
 
   safe_open = {
-    -- A list of buffer types to avoid.
+
+    dashboard_filetypes = {
+      "dashboard",
+      "alpha",
+      "starter",
+      "snacks_dashboard",
+    },    -- A list of buffer types to avoid.
     -- See `:help buftype` for more options.
     prevent_in_buftypes = {
       "quickfix",
