@@ -24,27 +24,28 @@ local function ensure_handle()
   end
 end
 
-function M.open()
+M.open = function()
   ensure_handle()
   handle:open()
 end
 
-function M.close()
+M.close = function()
   if handle then handle:close() end
 end
 
-function M.toggle()
-  if M.is_open() then M.close() else M.open() end
-end
-
-function M.is_open()
+M.is_open = function()
   return handle and handle:is_open()
 end
 
-function M.add_line(line)
+M.toggle = function()
+  if M.is_open() then M.close() else M.open() end
+end
+
+
+M.add_line = function(line)
   if M.is_open() then
     handle:add_lines({ line })
   end
 end
-    
+
 return M

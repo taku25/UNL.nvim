@@ -48,6 +48,10 @@ function M.is_process_running(opts)
   unl_process_util.is_process_running(opts)
 end
 
+function M.toggle_debug_log()
+  local debug_log = require("UNL.backend.buf.debug_log")
+  debug_log.toggle()
+end
 
 -- @usage `require("UNL.api").provider.register(...)`
 -- @usage `local ok, result = require("UNL.api").provider.request(...)`

@@ -56,7 +56,36 @@ function LogHandle:close()
     if parent_handle then parent_handle:remove_child(self._spec.id) end
   end
 end
+function LogHandle:open()
+  if self:is_open() then return end
 
+  -- 設定から位置とサイズを計算
+  local pos = self._spec.positioning or {}
+  local location = pos.location or "right"
+  local size_ratio = pos.size or 0.5
+  
+  -- コマンドを組み立てる
+  local cmd = "botright vertical 40new" -- デフォルト
+  local cols = vim.o.columns
+  local lines = vim.o.lines
+
+  if location == "right" then
+    cmd = "botright vertical " .. math.floor(cols * size_ratio) .. "new"
+  elseif location == "left" then
+    cmd = "topleft vertical " .. math.floor(cols * size_ratio) .. "new"
+  elseif location == "bottom" then
+    cmd = "botright " .. math.floor(lines * size_ratio) .. "new"
+  elseif location == "top" then
+    cmd = "topleft " .. math.floor(lines * size_ratio) .. "new"
+  end
+
+  -- 実行
+  vim.cmd(cmd)
+  local win_id = vim.api.nvim_get_current_win()
+  
+  -- 共通の初期化処理 (バッファ作成・アタッチ・キーマップ設定)
+  self:_attach_to_window(win_id)
+end
 function M.batch_open(handles, layout_cmd, on_all_opened)
   vim.schedule(function()
     local wins_before = {}
