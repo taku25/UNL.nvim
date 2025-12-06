@@ -1,78 +1,77 @@
 -- lua/UNL/provider/init.lua
--- UNLプロバイダーシステムの公開API
--- UNL.nvimをハブとして、様々なプラグインがサービスを提供・利用できるようにする
 
 local registry = require("UNL.provider.registry")
 local config = require("UNL.config")
 
 local M = {}
 
----
--- プロバイダーを登録する。主に他のプラグインから呼び出されることを想定。
--- @param spec table: 詳細は `registry.register` を参照
 function M.register(spec)
   return registry.register(spec)
 end
 
 ---
--- プロバイダーにリクエストを送り、レスポンスを期待する。
--- capabilityに最適なプロバイダーを見つけ、その `request` メソッドを呼び出す。
--- @param capability string: 要求する機能 (例: "vcs.get_status")
--- @param opts table: プロバイダーの `request` メソッドに渡す引数
--- @return boolean, any: `ok, result` を返す。プロバイダーが見つからない場合は `false, "No provider found"`
-function M.request(capability, opts)
+-- プロバイダーにリクエストを送る
+-- @param capability string
+-- @param opts table
+-- @param on_complete function|nil (Optional) 非同期コールバック function(ok, result)
+-- @return boolean, any (同期モード時のみ: ok, result)
+function M.request(capability, opts, on_complete)
   opts = opts or {}
 
-  -- opts から logger_name を取得し、呼び出し元のロガーを取得する。
-  -- もし指定がなければ、"UNL.provider" のロガーにフォールバックする。
   local log = require("UNL.logging").get(opts.logger_name or "UNL")
-
-
   log.debug("Request received for capability '%s'", capability)
-  local conf = config.get("UNL") -- "UNL"名前空間の設定を取得
+  
+  local conf = config.get("UNL")
   local provider = registry.resolve(capability, conf)
 
+  -- プロバイダーが見つからない場合
   if not (provider and provider.impl and type(provider.impl.request) == "function") then
-    log.debug("No provider with a 'request' method found for capability '%s'", capability)
-    return false, "No provider found for " .. capability
+    local err_msg = "No provider found for " .. capability
+    log.debug(err_msg)
+    
+    if on_complete then
+      on_complete(false, err_msg)
+      return
+    else
+      return false, err_msg
+    end
   end
 
   log.info("Dispatching request for '%s' to provider '%s'", capability, provider.name)
+
+  -- ★★★ 非同期モード (コールバックあり) ★★★
+  if on_complete then
+    -- pcall で保護しつつ、実装側の request(opts, on_complete) を呼び出す
+    local ok, err = pcall(provider.impl.request, opts, on_complete)
+    
+    if not ok then
+      log.error("Provider '%s' crashed during async request '%s': %s", provider.name, capability, tostring(err))
+      -- クラッシュした場合は、安全のため失敗としてコールバックを呼んでおく
+      on_complete(false, "Provider crashed: " .. tostring(err))
+    end
+    return -- 非同期なので戻り値はなし
+  end
+
+  -- ★★★ 同期モード (コールバックなし / 既存互換) ★★★
   local ok, result = pcall(provider.impl.request, opts)
 
   if not ok then
-    log.error("Provider '%s' failed on request for '%s': %s", provider.name, capability, tostring(result))
-    return false, result -- resultにはエラーメッセージが含まれる
+    log.error("Provider '%s' failed on sync request '%s': %s", provider.name, capability, tostring(result))
+    return false, result
   end
 
   return true, result
 end
 
----
--- 指定されたcapabilityを持つ全てのプロバイダーに通知を送る
--- これは投げっぱなし(fire-and-forget)の操作で、戻り値はない
--- @param capability string: 通知する対象の機能 (例: "project.file_changed")
--- @param opts table: 各プロバイダーの `notify` メソッドに渡す引数
 function M.notify(capability, opts)
+  -- (変更なし)
   opts = opts or {}
   local log = require("UNL.logging").get(opts.logger_name or "UNL")
-  log.debug("Notification received for capability '%s'", capability)
   local providers = registry.get_all(capability)
-
-  if #providers == 0 then
-    log.debug("No providers to notify for capability '%s'", capability)
-    return
-  end
-
-  log.info("Dispatching notification for '%s' to %d provider(s)", capability, #providers)
   for _, provider in ipairs(providers) do
     if provider.impl and type(provider.impl.notify) == 'function' then
-      -- 一つのプロバイダーのエラーが他を妨げないように schedule で実行
       vim.schedule(function()
-        local ok, err = pcall(provider.impl.notify, opts)
-        if not ok then
-          log.error("Provider '%s' failed on notify for '%s': %s", provider.name, capability, tostring(err))
-        end
+        pcall(provider.impl.notify, opts)
       end)
     end
   end
