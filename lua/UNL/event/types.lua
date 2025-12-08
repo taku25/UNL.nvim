@@ -44,6 +44,8 @@ local M = {
   
   -- ★追加: ディレクトリ変更イベント
   ON_AFTER_MODIFY_DIRECTORY = "unl:on_after_modify_directory",
+
+  ON_AFTER_NEW_PROJECT = "unl:on_after_new_project",
 }
 
 return M
