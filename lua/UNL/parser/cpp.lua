@@ -2,14 +2,9 @@
 local M = {}
 local Query = require("UNL.parser.query")
 
-local function get_logger()
-    local ok_uep, uep_log = pcall(require, "UEP.logger")
-    if ok_uep then return uep_log.get() end
-    local ok_unx, unx_log = pcall(require, "UNX.logger")
-    if ok_unx then return unx_log.get() end
+local function get_dummy_logger()
     return { debug = function() end, info = function() end, warn = function() end, error = function() end }
 end
-local logger = get_logger()
 
 local function get_node_text(node, bufnr)
     if not node then return nil end
@@ -71,7 +66,15 @@ local function create_global_data()
     return { methods = {}, fields = {} }
 end
 
-function M.parse(path_or_bufnr)
+function M.parse(path_or_bufnr, config_name)
+    local logger = get_dummy_logger()
+    if config_name then
+        local ok, cfg = pcall(require("UNL.config").get, config_name)
+        if ok and cfg and cfg.logger then
+            logger = cfg.logger
+        end
+    end
+
     local result = { list = {}, map = {}, globals = create_global_data() }
     local bufnr
     local file_path = ""
