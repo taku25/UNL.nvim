@@ -24,6 +24,16 @@ function M.run(spec)
       if item.filename and not item.file then
         item.file = item.filename
       end
+
+      -- text がない場合、display や value から生成 (Matcherエラー回避)
+      if not item.text then
+        item.text = item.display or (type(item.value) == "string" and item.value) or item.file or ""
+      end
+      
+      -- display がない場合、text を使用 (表示が table: 0x... になるのを回避)
+      if not item.display then
+        item.display = item.text
+      end
     end
   end
 
