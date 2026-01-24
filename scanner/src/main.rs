@@ -33,7 +33,7 @@ struct ParseData {
 #[derive(Serialize, Clone)]
 struct ClassInfo {
     class_name: String,
-    base_class: Option<String>,
+    base_classes: Vec<String>,
     symbol_type: String,
     line: usize,
     #[serde(skip)]
@@ -53,6 +53,8 @@ struct MemberInfo {
     flags: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     detail: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    return_type: Option<String>,
 }
 
 const QUERY_STR: &str = r#"
@@ -73,6 +75,7 @@ const QUERY_STR: &str = r#"
   )
 
   ;; Improved Function Captures
+  ;; 1. Function Definition (Implementation)
   (function_definition
     declarator: [
       (function_declarator declarator: (_) @func_name)
@@ -81,6 +84,7 @@ const QUERY_STR: &str = r#"
     ]
   ) @func_node
 
+  ;; 2. Standard Declaration (Member Function/Variable)
   (declaration
     declarator: [
       (function_declarator declarator: (_) @func_name)
@@ -91,8 +95,14 @@ const QUERY_STR: &str = r#"
     ]
   ) @decl_node
 
+  ;; 3. Unreal Function Declaration (UFUNCTION macro present)
+  ;; This node type wraps the whole declaration including storage specifiers like ENGINE_API
   (unreal_function_declaration
-    declarator: (_) @func_name
+    declarator: [
+      (function_declarator declarator: (_) @func_name)
+      (pointer_declarator (_) @func_name)
+      (reference_declarator (_) @func_name)
+    ]
   ) @ufunc_node
 
   ;; Generic Field Captures
@@ -102,8 +112,17 @@ const QUERY_STR: &str = r#"
       (pointer_declarator (_) @prop_name)
       (reference_declarator (_) @prop_name)
       (array_declarator (_) @prop_name)
+      ;; Add function declarators here
+      (function_declarator declarator: (_) @func_name)
+      (pointer_declarator (function_declarator declarator: (_) @func_name))
+      (reference_declarator (function_declarator declarator: (_) @func_name))
     ]
   ) @field_node
+
+  ;; Enum values
+  (enumerator
+    name: (identifier) @enum_val_name
+  ) @enum_item
 "#;
 
 fn main() -> anyhow::Result<()> {
@@ -166,6 +185,28 @@ fn has_child_type(node: Node, type_name: &str) -> bool {
     false
 }
 
+fn clean_type_string(s: &str) -> String {
+    let mut words: Vec<String> = Vec::new();
+    for word in s.split_whitespace() {
+        let w = word.trim();
+        if w.is_empty() { continue; }
+        
+        // 除去対象のキーワード
+        if w == "virtual" || w == "static" || w == "inline" || w == "FORCEINLINE" || 
+           w == "const" || w == "friend" || w == "class" || w == "struct" || w == "enum" ||
+           w.ends_with("_API") { 
+            continue;
+        }
+        
+        if w.starts_with("UFUNCTION") || w.starts_with("UPROPERTY") {
+            continue;
+        }
+        
+        words.push(w.to_string());
+    }
+    words.join(" ")
+}
+
 fn process_file(input: &InputFile, language: &tree_sitter::Language, query: &Query) -> anyhow::Result<ParseResult> {
     let content = fs::read_to_string(&input.path)?;
     let content_bytes = content.as_bytes();
@@ -215,7 +256,7 @@ fn process_file(input: &InputFile, language: &tree_sitter::Language, query: &Que
 
                 classes.push(ClassInfo {
                     class_name: name,
-                    base_class: None,
+                    base_classes: Vec::new(),
                     symbol_type: symbol_type.to_string(),
                     line: node.start_position().row + 1,
                     range_start: parent.start_byte(),
@@ -227,18 +268,30 @@ fn process_file(input: &InputFile, language: &tree_sitter::Language, query: &Que
             }
         } else if capture_name == "base_class_name" {
             if let Some(cls) = classes.last_mut() {
-                cls.base_class = Some(get_node_text(&node, content_bytes).to_string());
+                cls.base_classes.push(get_node_text(&node, content_bytes).to_string());
             }
         } else if capture_name == "func_name" || capture_name == "prop_name" {
             let member_name_raw = get_node_text(&node, content_bytes);
             
+            // 定義ノード(Declaration全体)を探す
             let mut definition_node = node;
-            for _ in 0..5 {
+            let mut ufunc_wrapper = None;
+
+            for _ in 0..6 {
                 let kind = definition_node.kind();
+                // unreal_function_declaration は UFUNCTION マクロを含んだ全体ノード
+                if kind == "unreal_function_declaration" {
+                    ufunc_wrapper = Some(definition_node);
+                    break; 
+                }
                 if kind.contains("declaration") || kind.contains("definition") { break; }
                 if let Some(p) = definition_node.parent() { definition_node = p; } else { break; }
             }
             
+            if let Some(wrapper) = ufunc_wrapper {
+                definition_node = wrapper; // wrapperを定義ノードとして扱う
+            }
+
             let mut flags = Vec::new();
             if has_child_type(definition_node, "ufunction_macro") || has_child_type(definition_node, "unreal_function_macro") || definition_node.kind() == "unreal_function_declaration" {
                 flags.push("UFUNCTION");
@@ -253,7 +306,32 @@ fn process_file(input: &InputFile, language: &tree_sitter::Language, query: &Que
             if node_text.contains("override") { flags.push("override"); }
 
             let mut detail = None;
+            let mut return_type = None;
             let mem_type = if capture_name == "func_name" { "function" } else { "property" };
+
+            // 関数名・プロパティ名 (クリーンアップ前)
+            // UFUNCTION(...) マクロのパラメータなどに含まれるカッコを除外するため、
+            // 単純な split は危険だが、ここでは簡易的に処理
+            let func_name_clean = member_name_raw.split(|c| c == '(' || c == '[' || c == '=' || c == ';').next().unwrap_or("").trim();
+            
+            let def_text = get_node_text(&definition_node, content_bytes);
+            
+            // 戻り値型の抽出
+            if let Some(idx) = def_text.find(func_name_clean) {
+                let prefix = &def_text[..idx];
+                // マクロの閉じ括弧を飛ばす (UFUNCTION(...) の後ろ)
+                let mut actual_prefix = prefix;
+                if let Some(macro_end) = prefix.rfind(')') {
+                    // もし ')' の前に UFUNCTION があれば、そこまでがマクロ
+                    // しかし単純に最後の ')' 以降を型とみなすのが安全 (関数定義の前に他のカッコはほぼ来ない)
+                    actual_prefix = &prefix[macro_end+1..];
+                }
+                
+                let cleaned = clean_type_string(actual_prefix);
+                if !cleaned.is_empty() {
+                    return_type = Some(cleaned);
+                }
+            }
 
             if mem_type == "function" {
                 if let Some(param_list) = find_child_by_type(definition_node, "parameter_list") {
@@ -261,17 +339,28 @@ fn process_file(input: &InputFile, language: &tree_sitter::Language, query: &Que
                 }
             }
 
-            let mut name = member_name_raw.split(|c| c == '(' || c == '[' || c == '=' || c == ';').next().unwrap_or("").trim();
-            name = name.trim_start_matches(|c| c == '*' || c == '&' || c == ' ').trim();
-            name = name.split_whitespace().last().unwrap_or(name);
+            let name_tmp = func_name_clean.trim_start_matches(|c| c == '*' || c == '&' || c == ' ').trim();
+            let clean_name = name_tmp.split_whitespace().last().unwrap_or(name_tmp);
 
-            if !name.is_empty() && name != "virtual" && name != "static" && name != "void" && name != "const" {
+            if !clean_name.is_empty() && clean_name != "virtual" && clean_name != "static" && clean_name != "void" && clean_name != "const" {
                 members.push((MemberInfo {
-                    name: name.to_string(),
+                    name: clean_name.to_string(),
                     mem_type: mem_type.to_string(),
                     flags: flags.join(" "),
                     detail,
+                    return_type,
                 }, definition_node.start_byte(), definition_node.end_byte()));
+            }
+        } else if capture_name == "enum_val_name" {
+            let name = get_node_text(&node, content_bytes).to_string();
+            if !name.is_empty() {
+                members.push((MemberInfo {
+                    name,
+                    mem_type: "enum_item".to_string(),
+                    flags: String::new(),
+                    detail: None,
+                    return_type: None,
+                }, node.start_byte(), node.end_byte()));
             }
         }
     }
