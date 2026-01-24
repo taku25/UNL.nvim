@@ -33,24 +33,39 @@
       * `.build.cs`ファイルの解析を行い依存関係を解析機能を内蔵しています
   * **堅牢なロギングシステム**:
       * ファイル、通知 (`vim.notify`)、コマンドライン (`echo`) など、複数の出力先を持つロガーをプラグインごとに簡単に作成できます。ログレベルや出力形式も柔軟に設定可能です。
+  * **高速スキャナ (Rust製)**:
+      * C++ヘッダーを解析するための、Rust製の超高速バイナリスキャナを内蔵しています。Tree-sitterを利用して、Unreal Engineのマクロやクラス構造を正確に解析します。
 
 ## 🔧 必要要件 (Requirements)
 
   * Neovim v0.11.3 以上
-  * (任意) UI体験を向上させるための各種UIプラグイン (`Telescope`, `fidget.nvim`など)
+  * [Rust と Cargo](https://www.rust-lang.org/tools/install) (スキャナのバイナリをビルドするために必要)
+  * (任意) UI体験を向上させるための各種UIプラグイン (`Telescope`, `fzf-lua`など)
 
 ## 🚀 インストール (Installation)
 
 通常、このライブラリは他の`Unreal Neovim`プラグインの依存関係として自動的にインストールされるため、ユーザーが手動でインストールする必要はありません。
 
-`lazy.nvim`を使用するプラグインは、以下のように依存関係を記述します。
+ただし、Rust製のスキャナが含まれているため、インストール時や更新時にバイナリをコンパイルするための **ビルドフック** を追加する必要があります。
+
+### [lazy.nvim](https://github.com/folke/lazy.nvim) を使用する場合
 
 ```lua
--- 例: UEP.nvimのインストール設定
+return {
+  'taku25/UNL.nvim',
+  build = "cargo build --release --manifest-path scanner/Cargo.toml",
+}
+```
+
+`UEP.nvim` などの依存プラグインを通じてインストールする場合の例：
+
+```lua
 return {
   'taku25/UEP.nvim',
-  -- lazy.nvimが自動的にUNL.nvimもインストール・管理します
-  dependencies = { 'taku25/UNL.nvim' },
+  -- dependencies 内で UNL.nvim に対してビルドフックを指定します
+  dependencies = { 
+    { 'taku25/UNL.nvim', build = "cargo build --release --manifest-path scanner/Cargo.toml" } 
+  },
   opts = {
     -- 設定はUNL.nvimのシステムを通じて行われます
   },

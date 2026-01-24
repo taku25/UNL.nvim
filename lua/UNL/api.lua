@@ -58,4 +58,7 @@ end
 -- @usage `require("UNL.api").provider.notify(...)`
 M.provider = require("UNL.provider")
 
+-- 高速ヘッダースキャナ (Rust製)
+M.scanner = require("UNL.scanner")
+
 return M

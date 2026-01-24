@@ -51,6 +51,8 @@ struct MemberInfo {
     #[serde(rename = "type")]
     mem_type: String,
     flags: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    detail: Option<String>,
 }
 
 const QUERY_STR: &str = r#"
@@ -64,29 +66,34 @@ const QUERY_STR: &str = r#"
   
   (unreal_declare_class_macro) @declare_class_macro
 
-  ;; Unreal-specific function node
-  (unreal_function_declaration
-    declarator: (_) @func_name
-  ) @ufunc_node
+  ;; Base Class extraction
+  (base_class_clause
+    (access_specifier)?
+    (type_identifier) @base_class_name
+  )
 
-  ;; Generic Function Captures
+  ;; Improved Function Captures
   (function_definition
     declarator: [
       (function_declarator declarator: (_) @func_name)
       (pointer_declarator (_) @func_name)
       (reference_declarator (_) @func_name)
-      (field_identifier) @func_name
-      (identifier) @func_name
     ]
-  ) @func_def
+  ) @func_node
 
   (declaration
     declarator: [
       (function_declarator declarator: (_) @func_name)
       (pointer_declarator (_) @func_name)
       (reference_declarator (_) @func_name)
+      (field_identifier) @prop_name
+      (identifier) @prop_name
     ]
-  ) @func_decl
+  ) @decl_node
+
+  (unreal_function_declaration
+    declarator: (_) @func_name
+  ) @ufunc_node
 
   ;; Generic Field Captures
   (field_declaration
@@ -96,7 +103,7 @@ const QUERY_STR: &str = r#"
       (reference_declarator (_) @prop_name)
       (array_declarator (_) @prop_name)
     ]
-  ) @field_decl
+  ) @field_node
 "#;
 
 fn main() -> anyhow::Result<()> {
@@ -142,6 +149,15 @@ fn get_node_text<'a>(node: &Node, source: &'a [u8]) -> &'a str {
     node.utf8_text(source).unwrap_or("")
 }
 
+fn find_child_by_type<'a>(node: Node<'a>, kind: &str) -> Option<Node<'a>> {
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if child.kind() == kind { return Some(child); }
+        if let Some(found) = find_child_by_type(child, kind) { return Some(found); }
+    }
+    None
+}
+
 fn has_child_type(node: Node, type_name: &str) -> bool {
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
@@ -161,10 +177,7 @@ fn process_file(input: &InputFile, language: &tree_sitter::Language, query: &Que
     if let Some(old) = &input.old_hash {
         if old == &new_hash {
             return Ok(ParseResult {
-                path: input.path.clone(),
-                status: "cache_hit".to_string(),
-                mtime: input.mtime,
-                data: None,
+                path: input.path.clone(), status: "cache_hit".to_string(), mtime: input.mtime, data: None,
             });
         }
     }
@@ -212,47 +225,53 @@ fn process_file(input: &InputFile, language: &tree_sitter::Language, query: &Que
                     is_interface: false,
                 });
             }
+        } else if capture_name == "base_class_name" {
+            if let Some(cls) = classes.last_mut() {
+                cls.base_class = Some(get_node_text(&node, content_bytes).to_string());
+            }
         } else if capture_name == "func_name" || capture_name == "prop_name" {
             let member_name_raw = get_node_text(&node, content_bytes);
             
             let mut definition_node = node;
-            for _ in 0..4 {
+            for _ in 0..5 {
                 let kind = definition_node.kind();
                 if kind.contains("declaration") || kind.contains("definition") { break; }
                 if let Some(p) = definition_node.parent() { definition_node = p; } else { break; }
             }
             
-            let mut flags = String::new();
-            let mut is_target = false;
-            let mut mem_type = if capture_name == "func_name" { "function" } else { "property" };
-
-            let def_kind = definition_node.kind();
-            if def_kind == "unreal_function_declaration" {
-                flags = "UFUNCTION".to_string();
-                is_target = true;
-                mem_type = "function";
-            } else if has_child_type(definition_node, "ufunction_macro") || has_child_type(definition_node, "unreal_function_macro") {
-                flags = "UFUNCTION".to_string();
-                is_target = true;
-                mem_type = "function";
-            } else if has_child_type(definition_node, "uproperty_macro") || has_child_type(definition_node, "unreal_property_macro") {
-                flags = "UPROPERTY".to_string();
-                is_target = true;
-                mem_type = "property";
+            let mut flags = Vec::new();
+            if has_child_type(definition_node, "ufunction_macro") || has_child_type(definition_node, "unreal_function_macro") || definition_node.kind() == "unreal_function_declaration" {
+                flags.push("UFUNCTION");
+            }
+            if has_child_type(definition_node, "uproperty_macro") || has_child_type(definition_node, "unreal_property_macro") {
+                flags.push("UPROPERTY");
             }
             
-            if is_target {
-                let mut name = member_name_raw.split(|c| c == '(' || c == '[' || c == '=' || c == ';').next().unwrap_or("").trim();
-                name = name.trim_start_matches(|c| c == '*' || c == '&' || c == ' ').trim();
-                name = name.split_whitespace().last().unwrap_or(name);
+            let node_text = get_node_text(&definition_node, content_bytes);
+            if node_text.contains("virtual") { flags.push("virtual"); }
+            if node_text.contains("static") { flags.push("static"); }
+            if node_text.contains("override") { flags.push("override"); }
 
-                if !name.is_empty() && name != "virtual" && name != "static" {
-                    members.push((MemberInfo {
-                        name: name.to_string(),
-                        mem_type: mem_type.to_string(),
-                        flags,
-                    }, definition_node.start_byte(), definition_node.end_byte()));
+            let mut detail = None;
+            let mem_type = if capture_name == "func_name" { "function" } else { "property" };
+
+            if mem_type == "function" {
+                if let Some(param_list) = find_child_by_type(definition_node, "parameter_list") {
+                    detail = Some(get_node_text(&param_list, content_bytes).to_string());
                 }
+            }
+
+            let mut name = member_name_raw.split(|c| c == '(' || c == '[' || c == '=' || c == ';').next().unwrap_or("").trim();
+            name = name.trim_start_matches(|c| c == '*' || c == '&' || c == ' ').trim();
+            name = name.split_whitespace().last().unwrap_or(name);
+
+            if !name.is_empty() && name != "virtual" && name != "static" && name != "void" && name != "const" {
+                members.push((MemberInfo {
+                    name: name.to_string(),
+                    mem_type: mem_type.to_string(),
+                    flags: flags.join(" "),
+                    detail,
+                }, definition_node.start_byte(), definition_node.end_byte()));
             }
         }
     }

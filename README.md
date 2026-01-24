@@ -33,13 +33,16 @@ This library is designed to save plugin developers from writing boilerplate code
       * Includes a built-in feature to parse `.build.cs` files and analyze their dependencies.
   * **Robust Logging System**:
       * Easily create per-plugin loggers with multiple output targets, such as files, notifications (`vim.notify`), and the command line (`echo`). Log levels and output formats are also flexible.
+  * **High-Performance Scanner (Rust)**:
+      * Includes a built-in Rust-based binary scanner for lightning-fast C++ header analysis. It utilizes Tree-sitter for accurate parsing of Unreal Engine macros and class structures.
 
 -----
 
 ## 🔧 Requirements
 
   * Neovim v0.11.3 or higher
-  * (Optional) Various UI plugins to enhance the user experience (`Telescope`, `fidget.nvim`, etc.)
+  * [Rust and Cargo](https://www.rust-lang.org/tools/install) (Required to build the scanner binary)
+  * (Optional) Various UI plugins to enhance the user experience (`Telescope`, `fzf-lua`, etc.)
 
 -----
 
@@ -47,14 +50,26 @@ This library is designed to save plugin developers from writing boilerplate code
 
 Typically, users do not need to install this library manually, as it will be automatically installed as a dependency of other `Unreal Neovim` plugins.
 
-Plugins using `lazy.nvim` should declare the dependency as follows:
+However, since this plugin includes a Rust-based scanner, you need to add a **build hook** to compile the binary during installation or updates.
+
+### Using [lazy.nvim](https://github.com/folke/lazy.nvim)
 
 ```lua
--- Example: Installation configuration for UEP.nvim
+return {
+  'taku25/UNL.nvim',
+  build = "cargo build --release --manifest-path scanner/Cargo.toml",
+}
+```
+
+Example installation configuration for `UEP.nvim`:
+
+```lua
 return {
   'taku25/UEP.nvim',
   -- lazy.nvim will automatically install and manage UNL.nvim
-  dependencies = { 'taku25/UNL.nvim' },
+  dependencies = {
+    { 'taku25/UNL.nvim', build = "cargo build --release --manifest-path scanner/Cargo.toml" }
+  },
   opts = {
     -- Configuration is handled through the UNL.nvim system
   },
