@@ -1,6 +1,7 @@
 local M = {}
 
---- スキャナバイナリのパスを取得する
+--- スキャナバイナリのパスを取得する (純粋なゲッター)
+-- @return string|nil バイナリの絶対パス。見つからない場合はnil
 function M.get_binary_path()
     local plugin_root = vim.fn.fnamemodify(debug.getinfo(1).source:sub(2), ":h:h:h:h")
     local is_win = vim.loop.os_uname().version:find("Windows") or vim.fn.has("win32") == 1
@@ -21,6 +22,20 @@ function M.get_binary_path()
     return nil
 end
 
+--- バイナリが存在するか確認する
+function M.has_binary()
+    return M.get_binary_path() ~= nil
+end
+
+--- バイナリが見つからない場合の警告を表示する
+function M.warn_binary_missing()
+    local log = require("UNL.logging").get("UNL")
+    log.warn_once(
+        "Scanner binary not found. Please build it by running: cargo build --release --manifest-path scanner/Cargo.toml\n" ..
+        "Or add { 'taku25/UNL.nvim', build = 'cargo build --release --manifest-path scanner/Cargo.toml' } to your plugin spec."
+    )
+end
+
 --- スキャナを実行する (非同期)
 -- @param payload table ファイルリスト [{path, mtime, old_hash}]
 -- @param on_result function(result_table) 各ファイルの結果が返るたびに呼ばれる
@@ -28,7 +43,8 @@ end
 function M.run_async(payload, on_result, on_complete)
     local binary = M.get_binary_path()
     if not binary then
-        if on_complete then on_complete(false, "Scanner binary not found. Please run cargo build in scanner directory.") end
+        M.warn_binary_missing()
+        if on_complete then on_complete(false, "Scanner binary not found.") end
         return nil
     end
 

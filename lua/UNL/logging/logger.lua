@@ -87,6 +87,23 @@ local function create_logger_instance(spec)
   L.info = make_fn(vim.log.levels.INFO)
   L.warn = make_fn(vim.log.levels.WARN)
   L.error = make_fn(vim.log.levels.ERROR)
+
+  local seen_messages = {}
+  local function make_once_fn(lvl)
+    return function(fmt, ...)
+      local msg = fmt; if select("#", ...) > 0 then
+        if pcall(string.format, fmt, ...) then
+          msg = string.format(fmt, ...)
+        end
+      end
+      if seen_messages[msg] then return end
+      seen_messages[msg] = true
+      dispatch(lvl, msg, {})
+    end
+  end
+  L.warn_once = make_once_fn(vim.log.levels.WARN)
+  L.error_once = make_once_fn(vim.log.levels.ERROR)
+
   return L
 end
 

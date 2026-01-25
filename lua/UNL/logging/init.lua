@@ -35,6 +35,13 @@ end
 function M.get(name)
   local logger = manager:get(name)
   if not logger then
+    local seen = {}
+    local function dummy_once(lvl_name, ...)
+      local msg = vim.inspect(...)
+      if seen[msg] then return end
+      seen[msg] = true
+      vim.notify(lvl_name .. ": Logger '"..name.."' not init. " .. msg, vim.log.levels[lvl_name] or vim.log.levels.WARN)
+    end
     return {
       trace = function() end,
       debug = function() end,
@@ -45,6 +52,8 @@ function M.get(name)
       error = function(...)
         vim.notify("ERROR: Logger '"..name.."' not init. " .. vim.inspect(...), vim.log.levels.ERROR)
       end,
+      warn_once = function(...) dummy_once("WARN", ...) end,
+      error_once = function(...) dummy_once("ERROR", ...) end,
       perf = function() end,
     }
   end
