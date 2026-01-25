@@ -57,6 +57,14 @@ return {
 }
 ```
 
+### 手動ビルド (Manual Build)
+
+自動ビルドが失敗した場合は、プラグインのルートディレクトリで以下のコマンドを実行することで手動でビルドできます。
+
+```bash
+cargo build --release --manifest-path scanner/Cargo.toml
+```
+
 `UEP.nvim` などの依存プラグインを通じてインストールする場合の例：
 
 ```lua

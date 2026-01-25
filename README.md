@@ -61,6 +61,14 @@ return {
 }
 ```
 
+### Manual Build
+
+If the automatic build fails, you can manually build the scanner by running the following command in the plugin's root directory:
+
+```bash
+cargo build --release --manifest-path scanner/Cargo.toml
+```
+
 Example installation configuration for `UEP.nvim`:
 
 ```lua
