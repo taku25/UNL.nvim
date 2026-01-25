@@ -33,6 +33,7 @@ struct ParseData {
 #[derive(Serialize, Clone)]
 struct ClassInfo {
     class_name: String,
+    namespace: Option<String>,
     base_classes: Vec<String>,
     symbol_type: String,
     line: usize,
@@ -62,11 +63,21 @@ const QUERY_STR: &str = r#"
   (struct_specifier name: (_) @struct_name) @struct_def
   (enum_specifier name: (_) @enum_name) @enum_def
   
+  ;; Fallback: capture type_identifier directly inside struct/class specifier
+  (struct_specifier (type_identifier) @struct_name)
+  (class_specifier (type_identifier) @class_name)
+
   (unreal_class_declaration name: (_) @class_name) @uclass_def
   (unreal_struct_declaration name: (_) @struct_name) @ustruct_def
   (unreal_enum_declaration name: (_) @enum_name) @uenum_def
   
   (unreal_declare_class_macro) @declare_class_macro
+
+  ;; Alias Declaration (using FTransform = ...)
+  (alias_declaration) @alias_decl
+
+  ;; Type Definition (typedef Old New;)
+  (type_definition) @typedef_decl
 
   ;; Base Class extraction
   (base_class_clause
@@ -75,7 +86,6 @@ const QUERY_STR: &str = r#"
   )
 
   ;; Improved Function Captures
-  ;; 1. Function Definition (Implementation)
   (function_definition
     declarator: [
       (function_declarator declarator: (_) @func_name)
@@ -84,7 +94,6 @@ const QUERY_STR: &str = r#"
     ]
   ) @func_node
 
-  ;; 2. Standard Declaration (Member Function/Variable)
   (declaration
     declarator: [
       (function_declarator declarator: (_) @func_name)
@@ -95,14 +104,8 @@ const QUERY_STR: &str = r#"
     ]
   ) @decl_node
 
-  ;; 3. Unreal Function Declaration (UFUNCTION macro present)
-  ;; This node type wraps the whole declaration including storage specifiers like ENGINE_API
   (unreal_function_declaration
-    declarator: [
-      (function_declarator declarator: (_) @func_name)
-      (pointer_declarator (_) @func_name)
-      (reference_declarator (_) @func_name)
-    ]
+    declarator: (_) @func_name
   ) @ufunc_node
 
   ;; Generic Field Captures
@@ -112,7 +115,6 @@ const QUERY_STR: &str = r#"
       (pointer_declarator (_) @prop_name)
       (reference_declarator (_) @prop_name)
       (array_declarator (_) @prop_name)
-      ;; Add function declarators here
       (function_declarator declarator: (_) @func_name)
       (pointer_declarator (function_declarator declarator: (_) @func_name))
       (reference_declarator (function_declarator declarator: (_) @func_name))
@@ -156,8 +158,6 @@ fn main() -> anyhow::Result<()> {
                 let mut out = stdout_mutex.lock().unwrap();
                 writeln!(out, "{}", json).ok();
             }
-        } else {
-            eprintln!("Error processing {}: {:?}", input.path, result.err());
         }
     });
 
@@ -166,6 +166,28 @@ fn main() -> anyhow::Result<()> {
 
 fn get_node_text<'a>(node: &Node, source: &'a [u8]) -> &'a str {
     node.utf8_text(source).unwrap_or("")
+}
+
+fn get_namespace<'a>(node: &Node<'a>, source: &'a [u8]) -> Option<String> {
+    let mut ns_parts = Vec::new();
+    let mut current = node.parent();
+    
+    while let Some(n) = current {
+        if n.kind() == "namespace_definition" {
+            // Check for direct name field or nested names (namespace UE::Math)
+            if let Some(name_node) = n.child_by_field_name("name") {
+                ns_parts.push(get_node_text(&name_node, source).to_string());
+            }
+        }
+        current = n.parent();
+    }
+    
+    if ns_parts.is_empty() {
+        None
+    } else {
+        ns_parts.reverse();
+        Some(ns_parts.join("::"))
+    }
 }
 
 fn find_child_by_type<'a>(node: Node<'a>, kind: &str) -> Option<Node<'a>> {
@@ -191,7 +213,6 @@ fn clean_type_string(s: &str) -> String {
         let w = word.trim();
         if w.is_empty() { continue; }
         
-        // 除去対象のキーワード
         if w == "virtual" || w == "static" || w == "inline" || w == "FORCEINLINE" || 
            w == "const" || w == "friend" || w == "class" || w == "struct" || w == "enum" ||
            w.ends_with("_API") { 
@@ -241,45 +262,113 @@ fn process_file(input: &InputFile, language: &tree_sitter::Language, query: &Que
         let node = capture.node;
         
         if capture_name == "class_name" || capture_name == "struct_name" || capture_name == "enum_name" {
-            if let Some(parent) = node.parent() {
-                if parent.child_by_field_name("body").is_none() { continue; }
+            let has_body = if let Some(parent) = node.parent() {
+                parent.child_by_field_name("body").is_some()
+            } else { false };
 
-                let name = get_node_text(&node, content_bytes).to_string();
-                let mut symbol_type = "class";
-                if capture_name == "struct_name" { symbol_type = "struct"; }
-                if capture_name == "enum_name" { symbol_type = "enum"; }
-                
-                let kind_str = parent.kind();
-                if kind_str == "unreal_class_declaration" { symbol_type = "UCLASS"; }
-                else if kind_str == "unreal_struct_declaration" { symbol_type = "USTRUCT"; }
-                else if kind_str == "unreal_enum_declaration" { symbol_type = "UENUM"; }
+            if has_body {
+                if let Some(parent) = node.parent() {
+                    let name = get_node_text(&node, content_bytes).to_string();
+                    let namespace = get_namespace(&parent, content_bytes);
+                    
+                    let mut symbol_type = "class";
+                    if capture_name == "struct_name" { symbol_type = "struct"; }
+                    if capture_name == "enum_name" { symbol_type = "enum"; }
+                    
+                    let kind_str = parent.kind();
+                    if kind_str == "unreal_class_declaration" { symbol_type = "UCLASS"; }
+                    else if kind_str == "unreal_struct_declaration" { symbol_type = "USTRUCT"; }
+                    else if kind_str == "unreal_enum_declaration" { symbol_type = "UENUM"; }
 
-                classes.push(ClassInfo {
-                    class_name: name,
-                    base_classes: Vec::new(),
-                    symbol_type: symbol_type.to_string(),
-                    line: node.start_position().row + 1,
-                    range_start: parent.start_byte(),
-                    range_end: parent.end_byte(),
-                    members: Vec::new(),
-                    is_final: false,
-                    is_interface: false,
-                });
+                    let range_start = parent.start_byte();
+                    let range_end = parent.end_byte();
+                    
+                    // Avoid duplicates (overlapping captures)
+                    let mut exists = false;
+                    for c in &classes {
+                        if c.range_start == range_start && c.range_end == range_end {
+                            exists = true;
+                            break;
+                        }
+                    }
+
+                    if !exists {
+                        classes.push(ClassInfo {
+                            class_name: name,
+                            namespace,
+                            base_classes: Vec::new(),
+                            symbol_type: symbol_type.to_string(),
+                            line: node.start_position().row + 1,
+                            range_start,
+                            range_end,
+                            members: Vec::new(),
+                            is_final: false,
+                            is_interface: false,
+                        });
+                    }
+                }
             }
+        } else if capture_name == "alias_decl" {
+            // Manual extraction for alias_declaration
+            if let Some(name_node) = node.child_by_field_name("name") {
+                 let name = get_node_text(&name_node, content_bytes).to_string();
+                 let namespace = get_namespace(&node, content_bytes);
+                 
+                 if let Some(type_node) = node.child_by_field_name("type") {
+                     let mut target_type = get_node_text(&type_node, content_bytes).to_string();
+                     if let Some(idx) = target_type.find('<') { target_type = target_type[..idx].to_string(); }
+                     if let Some(idx) = target_type.rfind("::") { target_type = target_type[idx+2..].to_string(); }
+                     target_type = target_type.trim().to_string();
+                     
+                     if !name.is_empty() && !target_type.is_empty() {
+                         classes.push(ClassInfo {
+                            class_name: name, namespace, base_classes: vec![target_type], symbol_type: "struct".to_string(),
+                            line: node.start_position().row + 1, range_start: node.start_byte(), range_end: node.end_byte(),
+                            members: Vec::new(), is_final: false, is_interface: false,
+                         });
+                     }
+                 }
+            }
+
+        } else if capture_name == "typedef_decl" {
+            // Manual extraction for type_definition (typedef T A;)
+            if let Some(name_node) = node.child_by_field_name("declarator") {
+                 let name = get_node_text(&name_node, content_bytes).to_string();
+                 let namespace = get_namespace(&node, content_bytes);
+                 
+                 if let Some(type_node) = node.child_by_field_name("type") {
+                     let mut target_type = get_node_text(&type_node, content_bytes).to_string();
+                     if let Some(idx) = target_type.find('<') { target_type = target_type[..idx].to_string(); }
+                     if let Some(idx) = target_type.rfind("::") { target_type = target_type[idx+2..].to_string(); }
+                     target_type = target_type.trim().to_string();
+                     
+                     if !name.is_empty() && !target_type.is_empty() {
+                         classes.push(ClassInfo {
+                            class_name: name, namespace, base_classes: vec![target_type], symbol_type: "struct".to_string(),
+                            line: node.start_position().row + 1, range_start: node.start_byte(), range_end: node.end_byte(),
+                            members: Vec::new(), is_final: false, is_interface: false,
+                         });
+                     }
+                 }
+            }
+
         } else if capture_name == "base_class_name" {
             if let Some(cls) = classes.last_mut() {
-                cls.base_classes.push(get_node_text(&node, content_bytes).to_string());
+                let mut name = get_node_text(&node, content_bytes).to_string();
+                if let Some(idx) = name.rfind("::") {
+                    name = name[idx+2..].to_string();
+                }
+                if name != cls.class_name {
+                    cls.base_classes.push(name);
+                }
             }
         } else if capture_name == "func_name" || capture_name == "prop_name" {
             let member_name_raw = get_node_text(&node, content_bytes);
-            
-            // 定義ノード(Declaration全体)を探す
             let mut definition_node = node;
             let mut ufunc_wrapper = None;
 
             for _ in 0..6 {
                 let kind = definition_node.kind();
-                // unreal_function_declaration は UFUNCTION マクロを含んだ全体ノード
                 if kind == "unreal_function_declaration" {
                     ufunc_wrapper = Some(definition_node);
                     break; 
@@ -289,7 +378,7 @@ fn process_file(input: &InputFile, language: &tree_sitter::Language, query: &Que
             }
             
             if let Some(wrapper) = ufunc_wrapper {
-                definition_node = wrapper; // wrapperを定義ノードとして扱う
+                definition_node = wrapper;
             }
 
             let mut flags = Vec::new();
@@ -309,28 +398,17 @@ fn process_file(input: &InputFile, language: &tree_sitter::Language, query: &Que
             let mut return_type = None;
             let mem_type = if capture_name == "func_name" { "function" } else { "property" };
 
-            // 関数名・プロパティ名 (クリーンアップ前)
-            // UFUNCTION(...) マクロのパラメータなどに含まれるカッコを除外するため、
-            // 単純な split は危険だが、ここでは簡易的に処理
             let func_name_clean = member_name_raw.split(|c| c == '(' || c == '[' || c == '=' || c == ';').next().unwrap_or("").trim();
-            
             let def_text = get_node_text(&definition_node, content_bytes);
             
-            // 戻り値型の抽出
             if let Some(idx) = def_text.find(func_name_clean) {
                 let prefix = &def_text[..idx];
-                // マクロの閉じ括弧を飛ばす (UFUNCTION(...) の後ろ)
                 let mut actual_prefix = prefix;
                 if let Some(macro_end) = prefix.rfind(')') {
-                    // もし ')' の前に UFUNCTION があれば、そこまでがマクロ
-                    // しかし単純に最後の ')' 以降を型とみなすのが安全 (関数定義の前に他のカッコはほぼ来ない)
                     actual_prefix = &prefix[macro_end+1..];
                 }
-                
                 let cleaned = clean_type_string(actual_prefix);
-                if !cleaned.is_empty() {
-                    return_type = Some(cleaned);
-                }
+                if !cleaned.is_empty() { return_type = Some(cleaned); }
             }
 
             if mem_type == "function" {
