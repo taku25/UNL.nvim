@@ -214,6 +214,7 @@ fn clean_type_string(s: &str) -> String {
         if w.is_empty() { continue; }
         
         if w == "virtual" || w == "static" || w == "inline" || w == "FORCEINLINE" || 
+           w == "FORCEINLINE_DEBUGGABLE" ||
            w == "const" || w == "friend" || w == "class" || w == "struct" || w == "enum" ||
            w.ends_with("_API") { 
             continue;
