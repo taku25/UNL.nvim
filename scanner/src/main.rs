@@ -335,9 +335,13 @@ fn process_file(input: &InputFile, language: &tree_sitter::Language, query: &Que
             if let Some(name_node) = node.child_by_field_name("declarator") {
                  let name = get_node_text(&name_node, content_bytes).to_string();
                  
-                 // Filter out function pointers (e.g., (*FuncPtr)(...)) or complex declarators
-                 if name.contains('(') || name.contains(')') {
-                     // continue equivalent in this context (just don't process)
+                 // Filter out function pointers, templates, pointers, refs, consts, nested types in the name itself.
+                 // We only want to capture simple aliases like "typedef TVector<double> FVector3d;" 
+                 // where the name "FVector3d" is a clean identifier.
+                 if name.contains('(') || name.contains(')') || name.contains('<') || name.contains('>') ||
+                    name.contains(':') || name.contains('*') || name.contains('&') || 
+                    name.contains("const") || name.contains(' ') {
+                     // Skip complex declarators (function pointers, etc.)
                  } else {
                      let namespace = get_namespace(&node, content_bytes);
                      
