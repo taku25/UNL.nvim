@@ -334,20 +334,26 @@ fn process_file(input: &InputFile, language: &tree_sitter::Language, query: &Que
             // Manual extraction for type_definition (typedef T A;)
             if let Some(name_node) = node.child_by_field_name("declarator") {
                  let name = get_node_text(&name_node, content_bytes).to_string();
-                 let namespace = get_namespace(&node, content_bytes);
                  
-                 if let Some(type_node) = node.child_by_field_name("type") {
-                     let mut target_type = get_node_text(&type_node, content_bytes).to_string();
-                     if let Some(idx) = target_type.find('<') { target_type = target_type[..idx].to_string(); }
-                     if let Some(idx) = target_type.rfind("::") { target_type = target_type[idx+2..].to_string(); }
-                     target_type = target_type.trim().to_string();
+                 // Filter out function pointers (e.g., (*FuncPtr)(...)) or complex declarators
+                 if name.contains('(') || name.contains(')') {
+                     // continue equivalent in this context (just don't process)
+                 } else {
+                     let namespace = get_namespace(&node, content_bytes);
                      
-                     if !name.is_empty() && !target_type.is_empty() {
-                         classes.push(ClassInfo {
-                            class_name: name, namespace, base_classes: vec![target_type], symbol_type: "struct".to_string(),
-                            line: node.start_position().row + 1, range_start: node.start_byte(), range_end: node.end_byte(),
-                            members: Vec::new(), is_final: false, is_interface: false,
-                         });
+                     if let Some(type_node) = node.child_by_field_name("type") {
+                         let mut target_type = get_node_text(&type_node, content_bytes).to_string();
+                         if let Some(idx) = target_type.find('<') { target_type = target_type[..idx].to_string(); }
+                         if let Some(idx) = target_type.rfind("::") { target_type = target_type[idx+2..].to_string(); }
+                         target_type = target_type.trim().to_string();
+                         
+                         if !name.is_empty() && !target_type.is_empty() {
+                             classes.push(ClassInfo {
+                                class_name: name, namespace, base_classes: vec![target_type], symbol_type: "struct".to_string(),
+                                line: node.start_position().row + 1, range_start: node.start_byte(), range_end: node.end_byte(),
+                                members: Vec::new(), is_final: false, is_interface: false,
+                             });
+                         }
                      }
                  }
             }
