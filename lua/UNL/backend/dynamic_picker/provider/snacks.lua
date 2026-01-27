@@ -22,7 +22,7 @@ function M.run(spec)
         vim.list_extend(cmd_table, spec.args)
       end
       local results = vim.fn.systemlist(cmd_table)
-      
+
       return vim.tbl_map(function(line)
         local parts = vim.split(line, "\t", { plain = true, trimempty = true })
         local display_text, file_path = parts[1], parts[2]
@@ -34,7 +34,9 @@ function M.run(spec)
       end, results)
     end
   else
-    require("UNL.logging").get(spec.logger_name or "UNL"):error("snacks.nvim dynamic_picker: spec.command is required.")
+    require("UNL.logging")
+      .get(spec.logger_name or "UNL")
+      :error("snacks.nvim dynamic_picker: spec.command is required.")
     return
   end
 
@@ -64,7 +66,9 @@ function M.run(spec)
     snacks_opts.actions.confirm = function(picker, item)
       if item and item.file then
         Snacks.picker.actions.close(picker)
-        vim.schedule(function() spec.on_submit(item.file) end)
+        vim.schedule(function()
+          spec.on_submit(item.file)
+        end)
       else
         Snacks.picker.actions.close(picker)
       end
@@ -72,13 +76,15 @@ function M.run(spec)
   end
 
   -- 5. ESCキーの動作を設定
-  snacks_opts.win = { input = { keys = {} }, list = { keys = {} } }
-  local esc_action = function(picker)
-    if spec.on_cancel then vim.schedule(spec.on_cancel) end
-    Snacks.picker.actions.close(picker)
+  if spec.on_cancel then
+    snacks_opts.actions.cancel = function(picker)
+      vim.schedule(spec.on_cancel)
+      picker:norm(function()
+        picker.main = picker:filter().current_win
+        picker:close()
+      end)
+    end
   end
-  snacks_opts.win.input.keys["<Esc>"] = esc_action
-  snacks_opts.win.list.keys["<Esc>"] = esc_action
 
   -- 6. ピッカーを実行
   Snacks.picker.pick(snacks_opts)

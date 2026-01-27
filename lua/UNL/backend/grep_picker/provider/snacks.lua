@@ -15,7 +15,9 @@ function M.run(spec)
   }
 
   if spec.include_extensions and #spec.include_extensions > 0 then
-    grep_opts.glob = vim.tbl_map(function(ext) return "*." .. ext end, spec.include_extensions)
+    grep_opts.glob = vim.tbl_map(function(ext)
+      return "*." .. ext
+    end, spec.include_extensions)
   end
 
   grep_opts.actions = {}
@@ -28,8 +30,8 @@ function M.run(spec)
         vim.schedule(function()
           spec.on_submit({
             filename = item.file, -- 'item.file' を使用
-            lnum = item.pos[1],     -- 'item.pos'の最初の要素を行番号として使用
-            col = item.pos[2],      -- 'item.pos'の2番目の要素を列番号として使用
+            lnum = item.pos[1], -- 'item.pos'の最初の要素を行番号として使用
+            col = item.pos[2], -- 'item.pos'の2番目の要素を列番号として使用
           })
         end)
       else
@@ -38,13 +40,15 @@ function M.run(spec)
     end
   end
 
-  grep_opts.win = { input = { keys = {} }, list = { keys = {} } }
-  local esc_action = function(picker)
-    if spec.on_cancel then vim.schedule(spec.on_cancel) end
-    Snacks.picker.actions.close(picker)
+  if spec.on_cancel then
+    grep_opts.actions.cancel = function(picker)
+      vim.schedule(spec.on_cancel)
+      picker:norm(function()
+        picker.main = picker:filter().current_win
+        picker:close()
+      end)
+    end
   end
-  grep_opts.win.input.keys["<Esc>"] = esc_action
-  grep_opts.win.list.keys["<Esc>"] = esc_action
 
   Snacks.picker.grep(grep_opts)
 end

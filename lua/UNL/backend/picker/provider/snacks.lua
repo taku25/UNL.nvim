@@ -99,15 +99,15 @@ function M.run(spec)
     snacks_opts.confirm = "unl_submit"
   end
 
-  snacks_opts.win = { input = { keys = {} }, list = { keys = {} } }
-  local esc_action = function(picker)
-    if spec.on_cancel then
+  if spec.on_cancel then
+    snacks_opts.actions.cancel = function(picker)
       vim.schedule(spec.on_cancel)
+      picker:norm(function()
+        picker.main = picker:filter().current_win
+        picker:close()
+      end)
     end
-    Snacks.picker.actions.close(picker)
   end
-  snacks_opts.win.input.keys["<Esc>"] = esc_action
-  snacks_opts.win.list.keys["<Esc>"] = esc_action
 
   Snacks.picker.pick(snacks_opts)
 end

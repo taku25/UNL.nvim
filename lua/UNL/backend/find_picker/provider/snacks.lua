@@ -24,7 +24,9 @@ function M.run(spec)
       end, results)
     end
   else
-    require("UNL.logging").get(spec.logger_name or "UNL"):error("snacks.nvim find_picker: spec.exec_cmd is required.")
+    require("UNL.logging")
+      .get(spec.logger_name or "UNL")
+      :error("snacks.nvim find_picker: spec.exec_cmd is required.")
     return
   end
 
@@ -44,7 +46,9 @@ function M.run(spec)
         Snacks.picker.actions.close(picker)
         --【修正点】
         -- finderで設定した'item.file'から値を取得
-        vim.schedule(function() spec.on_submit(item.file) end)
+        vim.schedule(function()
+          spec.on_submit(item.file)
+        end)
       else
         Snacks.picker.actions.close(picker)
       end
@@ -52,13 +56,15 @@ function M.run(spec)
   end
 
   -- 4. ESCキーの動作を設定
-  snacks_opts.win = { input = { keys = {} }, list = { keys = {} } }
-  local esc_action = function(picker)
-    if spec.on_cancel then vim.schedule(spec.on_cancel) end
-    Snacks.picker.actions.close(picker)
+  if spec.on_cancel then
+    snacks_opts.actions.cancel = function(picker)
+      vim.schedule(spec.on_cancel)
+      picker:norm(function()
+        picker.main = picker:filter().current_win
+        picker:close()
+      end)
+    end
   end
-  snacks_opts.win.input.keys["<Esc>"] = esc_action
-  snacks_opts.win.list.keys["<Esc>"] = esc_action
 
   -- 5. ピッカーを実行
   Snacks.picker.pick(snacks_opts)
