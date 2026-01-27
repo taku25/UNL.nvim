@@ -71,7 +71,14 @@ const QUERY_STR: &str = r#"
   (unreal_struct_declaration name: (_) @struct_name) @ustruct_def
   (unreal_enum_declaration name: (_) @enum_name) @uenum_def
   
-  (unreal_declare_class_macro) @declare_class_macro
+  (unreal_declaration_macro
+    name: (unreal_macro_name) @macro_type
+    arguments: (unreal_argument_list
+      (unreal_specifier_list
+        (unreal_specifier
+          (unreal_specifier_content
+            (identifier) @macro_item_name))))
+  ) @unreal_macro
 
   ;; Alias Declaration (using FTransform = ...)
   (alias_declaration) @alias_decl
@@ -216,6 +223,7 @@ fn clean_type_string(s: &str) -> String {
         if w == "virtual" || w == "static" || w == "inline" || w == "FORCEINLINE" || 
            w == "FORCEINLINE_DEBUGGABLE" ||
            w == "const" || w == "friend" || w == "class" || w == "struct" || w == "enum" ||
+           w.starts_with("UE_DEPRECATED") || // 追加
            w.ends_with("_API") { 
             continue;
         }
@@ -309,6 +317,42 @@ fn process_file(input: &InputFile, language: &tree_sitter::Language, query: &Que
                     }
                 }
             }
+        } else if capture_name == "macro_item_name" {
+            // Extract Delegate Name from DECLARE_DELEGATE(Name, ...)
+            if let Some(parent) = node.parent() { // unreal_specifier_content
+                if let Some(macro_node) = parent.parent() { // unreal_specifier (or deeper)
+                    // Find the top unreal_declaration_macro
+                    let mut current = macro_node;
+                    while current.kind() != "unreal_declaration_macro" && current.parent().is_some() {
+                        current = current.parent().unwrap();
+                    }
+                    
+                    if current.kind() == "unreal_declaration_macro" {
+                        let name = get_node_text(&node, content_bytes).to_string();
+                        let namespace = get_namespace(&current, content_bytes);
+                        
+                        let mut macro_type_str = "delegate";
+                        if let Some(type_node) = current.child_by_field_name("name") {
+                            macro_type_str = get_node_text(&type_node, content_bytes);
+                        }
+
+                        if !name.is_empty() {
+                            classes.push(ClassInfo {
+                                class_name: name,
+                                namespace,
+                                base_classes: vec![macro_type_str.to_string()],
+                                symbol_type: "struct".to_string(), // Treat delegates as structs
+                                line: node.start_position().row + 1,
+                                range_start: current.start_byte(),
+                                range_end: current.end_byte(),
+                                members: Vec::new(),
+                                is_final: false,
+                                is_interface: false,
+                            });
+                        }
+                    }
+                }
+            }
         } else if capture_name == "alias_decl" {
             // Manual extraction for alias_declaration
             if let Some(name_node) = node.child_by_field_name("name") {
@@ -364,13 +408,17 @@ fn process_file(input: &InputFile, language: &tree_sitter::Language, query: &Que
             }
 
         } else if capture_name == "base_class_name" {
+            let node_start = node.start_byte();
             if let Some(cls) = classes.last_mut() {
-                let mut name = get_node_text(&node, content_bytes).to_string();
-                if let Some(idx) = name.rfind("::") {
-                    name = name[idx+2..].to_string();
-                }
-                if name != cls.class_name {
-                    cls.base_classes.push(name);
+                // Only add if this base class clause is within the last captured class/struct range
+                if node_start >= cls.range_start && node_start <= cls.range_end {
+                    let mut name = get_node_text(&node, content_bytes).to_string();
+                    if let Some(idx) = name.rfind("::") {
+                        name = name[idx+2..].to_string();
+                    }
+                    if name != cls.class_name {
+                        cls.base_classes.push(name);
+                    }
                 }
             }
         } else if capture_name == "func_name" || capture_name == "prop_name" {
