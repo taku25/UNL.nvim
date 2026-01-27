@@ -59,15 +59,16 @@ struct MemberInfo {
 }
 
 const QUERY_STR: &str = r#"
-  (class_specifier name: (_) @class_name) @class_def
-  (struct_specifier name: (_) @struct_name) @struct_def
-  (enum_specifier name: (_) @enum_name) @enum_def
+  (class_specifier name: (type_identifier) @class_name) @class_def
+  (struct_specifier name: (type_identifier) @struct_name) @struct_def
+  (enum_specifier name: (type_identifier) @enum_name) @enum_def
   
-  ;; Fallback: capture type_identifier directly inside struct/class specifier
+  ;; Fallback: capture type_identifier directly inside struct/class/enum specifier
   (struct_specifier (type_identifier) @struct_name)
   (class_specifier (type_identifier) @class_name)
+  (enum_specifier (type_identifier) @enum_name)
 
-  (unreal_class_declaration name: (_) @class_name) @uclass_def
+  (unreal_class_declaration name: (type_identifier) @class_name) @uclass_def
   (unreal_struct_declaration name: (_) @struct_name) @ustruct_def
   (unreal_enum_declaration name: (_) @enum_name) @uenum_def
   
@@ -277,9 +278,16 @@ fn process_file(input: &InputFile, language: &tree_sitter::Language, query: &Que
 
             if has_body {
                 if let Some(parent) = node.parent() {
-                    let name = get_node_text(&node, content_bytes).to_string();
+                    let mut name = get_node_text(&node, content_bytes).to_string();
                     let namespace = get_namespace(&parent, content_bytes);
                     
+                    // Handle "enum Type" inside a namespace
+                    if capture_name == "enum_name" && name == "Type" {
+                        if let Some(ns) = &namespace {
+                            name = format!("{}::{}", ns, name);
+                        }
+                    }
+
                     let mut symbol_type = "class";
                     if capture_name == "struct_name" { symbol_type = "struct"; }
                     if capture_name == "enum_name" { symbol_type = "enum"; }
