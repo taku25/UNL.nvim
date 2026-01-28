@@ -2,10 +2,17 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 #[derive(Deserialize, Debug)]
-#[serde(untagged)]
+#[serde(tag = "type")]
 pub enum RawRequest {
+    #[serde(rename = "refresh")]
     Refresh(RefreshRequest),
-    Scan(Vec<InputFile>),
+    #[serde(rename = "scan")]
+    Scan(ScanRequest),
+}
+
+#[derive(Deserialize, Debug)]
+pub struct ScanRequest {
+    pub files: Vec<InputFile>,
 }
 
 #[derive(Deserialize, Debug)]

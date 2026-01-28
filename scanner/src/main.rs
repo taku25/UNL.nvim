@@ -40,7 +40,8 @@ fn run_scan_command() -> anyhow::Result<()> {
     let request: RawRequest = serde_json::from_str(&buffer)?;
 
     match request {
-        RawRequest::Scan(inputs) => {
+        RawRequest::Scan(req) => {
+            let inputs = req.files;
             let db_path = inputs.get(0).and_then(|i| i.db_path.clone());
             let results: Vec<types::ParseResult> = inputs.into_par_iter().filter_map(|input| {
                 scanner::process_file(&input, &language, &query).ok()
