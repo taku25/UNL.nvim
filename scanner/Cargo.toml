@@ -13,3 +13,6 @@ rayon = "1.8"
 anyhow = "1.0"
 streaming-iterator = "0.1"
 sha2 = "0.10"
+rusqlite = { version = "0.31", features = ["bundled"] }
+ignore = "0.4"
+regex = "1.10"

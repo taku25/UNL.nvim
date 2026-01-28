@@ -63,8 +63,13 @@ function M.run_async(payload, on_result, on_complete)
             end
         end,
         on_stderr = function(_, data)
-            if data and #data > 1 then
-                -- エラーログなど (必要に応じて)
+            if data then
+                local log = require("UNL.logging").get("UNL")
+                for _, line in ipairs(data) do
+                    if line ~= "" then
+                        log.error("[Scanner Error] %s", line)
+                    end
+                end
             end
         end,
         on_exit = function(_, code)
