@@ -181,8 +181,8 @@ fn get_namespace<'a>(node: &Node<'a>, source: &'a [u8]) -> Option<String> {
     let mut current = node.parent();
     
     while let Some(n) = current {
-        if n.kind() == "namespace_definition" {
-            // Check for direct name field or nested names (namespace UE::Math)
+        let kind = n.kind();
+        if kind == "namespace_definition" || kind == "class_specifier" || kind == "struct_specifier" {
             if let Some(name_node) = n.child_by_field_name("name") {
                 ns_parts.push(get_node_text(&name_node, source).to_string());
             }
@@ -344,19 +344,50 @@ fn process_file(input: &InputFile, language: &tree_sitter::Language, query: &Que
                             macro_type_str = get_node_text(&type_node, content_bytes);
                         }
 
-                        if !name.is_empty() {
-                            classes.push(ClassInfo {
-                                class_name: name,
-                                namespace,
-                                base_classes: vec![macro_type_str.to_string()],
-                                symbol_type: "struct".to_string(), // Treat delegates as structs
-                                line: node.start_position().row + 1,
-                                range_start: current.start_byte(),
-                                range_end: current.end_byte(),
-                                members: Vec::new(),
-                                is_final: false,
-                                is_interface: false,
-                            });
+                        // Only proceed if this looks like a delegate/event declaration macro
+                        let is_delegate = macro_type_str.starts_with("DECLARE_DELEGATE") ||
+                                          macro_type_str.starts_with("DECLARE_MULTICAST_DELEGATE") ||
+                                          macro_type_str.starts_with("DECLARE_DYNAMIC_DELEGATE") ||
+                                          macro_type_str.starts_with("DECLARE_DYNAMIC_MULTICAST") ||
+                                          macro_type_str.starts_with("DECLARE_EVENT") ||
+                                          macro_type_str.starts_with("DECLARE_TS_MULTICAST_DELEGATE");
+
+                        if is_delegate && !name.is_empty() {
+                            let mut is_name_position = false;
+                            let has_retval = macro_type_str.contains("RetVal");
+                            
+                            if let Some(spec_node) = parent.parent() { // unreal_specifier
+                                if let Some(list_node) = spec_node.parent() { // unreal_specifier_list
+                                    let mut arg_idx = 0;
+                                    let mut cursor = list_node.walk();
+                                    for child in list_node.children(&mut cursor) {
+                                        if child.id() == spec_node.id() {
+                                            // _RetVal macros have Name as 2nd arg (idx 2 considering commas)
+                                            // Others have Name as 1st arg (idx 0)
+                                            is_name_position = if has_retval { arg_idx == 2 } else { arg_idx == 0 };
+                                            break;
+                                        }
+                                        if child.kind() == "unreal_specifier" {
+                                            arg_idx += 2; // Rough estimate including commas
+                                        }
+                                    }
+                                }
+                            }
+
+                            if is_name_position {
+                                classes.push(ClassInfo {
+                                    class_name: name,
+                                    namespace,
+                                    base_classes: vec![macro_type_str.to_string()],
+                                    symbol_type: "struct".to_string(),
+                                    line: node.start_position().row + 1,
+                                    range_start: current.start_byte(),
+                                    range_end: current.end_byte(),
+                                    members: Vec::new(),
+                                    is_final: false,
+                                    is_interface: false,
+                                });
+                            }
                         }
                     }
                 }
@@ -370,10 +401,9 @@ fn process_file(input: &InputFile, language: &tree_sitter::Language, query: &Que
                  if let Some(type_node) = node.child_by_field_name("type") {
                      let mut target_type = get_node_text(&type_node, content_bytes).to_string();
                      if let Some(idx) = target_type.find('<') { target_type = target_type[..idx].to_string(); }
-                     if let Some(idx) = target_type.rfind("::") { target_type = target_type[idx+2..].to_string(); }
                      target_type = target_type.trim().to_string();
                      
-                     if !name.is_empty() && !target_type.is_empty() {
+                     if !name.is_empty() && !target_type.is_empty() && name != target_type {
                          classes.push(ClassInfo {
                             class_name: name, namespace, base_classes: vec![target_type], symbol_type: "struct".to_string(),
                             line: node.start_position().row + 1, range_start: node.start_byte(), range_end: node.end_byte(),
@@ -401,10 +431,9 @@ fn process_file(input: &InputFile, language: &tree_sitter::Language, query: &Que
                      if let Some(type_node) = node.child_by_field_name("type") {
                          let mut target_type = get_node_text(&type_node, content_bytes).to_string();
                          if let Some(idx) = target_type.find('<') { target_type = target_type[..idx].to_string(); }
-                         if let Some(idx) = target_type.rfind("::") { target_type = target_type[idx+2..].to_string(); }
                          target_type = target_type.trim().to_string();
                          
-                         if !name.is_empty() && !target_type.is_empty() {
+                         if !name.is_empty() && !target_type.is_empty() && name != target_type {
                              classes.push(ClassInfo {
                                 class_name: name, namespace, base_classes: vec![target_type], symbol_type: "struct".to_string(),
                                 line: node.start_position().row + 1, range_start: node.start_byte(), range_end: node.end_byte(),
