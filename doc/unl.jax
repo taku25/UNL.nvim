@@ -1,0 +1,78 @@
+*unl.txt*  Unreal Neovim Library - Unreal Engineプラグインのコアライブラリ
+
+Author: taku25
+License: MIT
+
+目次                                                          *unl-contents*
+
+1. はじめに ................................................. |unl-introduction|
+2. コマンド ................................................. |unl-commands|
+3. API ...................................................... |unl-api|
+4. 設定 ..................................................... |unl-configuration|
+
+==============================================================================
+1. はじめに                                                 *unl-introduction*
+
+UNL.nvim は、Neovim 上での Unreal Engine 開発を支援するプラグイン群のための
+共有ライブラリです。プロジェクト管理、RPCサーバー通信 (Rust)、データベース
+同期、共通UI抽象化などを担当します。
+
+==============================================================================
+2. コマンド                                                     *unl-commands*
+
+:UNL start                                                        *UNL-start*
+    UNLサーバー (unl-server) とファイル監視を開始します。
+    サーバーが既に起動している場合は、既存のインスタンスを再利用します。
+    現在のプロジェクトが登録済みか確認し、必要ならセットアップを行います。
+
+:UNL setup                                                        *UNL-setup*
+    データベースを初期化し、現在のプロジェクトをサーバーに登録します。
+    通常は `:UNL start` から自動的に呼び出されます。
+
+:UNL refresh [Scope]                                            *UNL-refresh*
+    プロジェクトファイルを再スキャンし、データベースを更新します。
+    Scope: "Game" (デフォルト), "Engine", "Full".
+
+:UNL watch                                                        *UNL-watch*
+    現在のプロジェクトに対するファイル監視を開始します。
+    通常は `:UNL start` から自動的に呼び出されます。
+
+:UNL cleanup                                                    *UNL-cleanup*
+    現在のプロジェクトの全てのデータベースレコードを削除します。
+    データベースが破損した場合などに使用します。
+
+:UNL status                                                      *UNL-status*
+    UNLサーバーと現在のプロジェクトのステータスを表示します。
+
+:UNL cd [Path]                                                       *UNL-cd*
+    UNLが管理しているプロジェクトにカレントディレクトリを変更します。
+
+==============================================================================
+3. API                                                               *unl-api*
+
+`require("UNL.api")` を介してUNLの機能にアクセスできます。
+
+unl.start()                                                      *unl.start()*
+    サーバーと監視を開始します。
+
+unl.refresh({opts})                                            *unl.refresh()*
+    データベースを更新します。
+    opts: { scope = "Game" | "Engine" | "Full" }
+
+unl.setup()                                                      *unl.setup()*
+    プロジェクトを手動でセットアップします。
+
+unl.db.search_files_in_modules({modules}, {filter}, {limit}, {cb})
+                                            *unl.db.search_files_in_modules()*
+    サーバーサイドでファイルを検索します (高速)。
+    modules: 検索対象のモジュール名リスト (例: {"Core", "MyGame"})
+    filter:  ファイルパスにマッチさせるキーワード (例: "Actor")
+    limit:   取得する最大件数 (例: 100)
+    cb:      コールバック関数(files)
+
+==============================================================================
+4. 設定                                                    *unl-configuration*
+
+デフォルト設定については README または `lua/UNL/config.lua` を参照してください。
+
+vim:tw=78:ts=8:ft=help:norl:

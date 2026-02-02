@@ -48,8 +48,12 @@ function M.run_async(payload, on_result, on_complete)
         return nil
     end
 
+    local unl_config = require("UNL.config")
+    local port = unl_config.get().remote.port or 30010
+
     local input_json = vim.json.encode(payload)
     local job_id = vim.fn.jobstart({ binary }, {
+        env = { UNL_SERVER_PORT = tostring(port) },
         stdout_buffered = false,
         on_stdout = function(_, data)
             if not data then return end
@@ -87,6 +91,46 @@ function M.run_async(payload, on_result, on_complete)
     end
 
     return job_id
+end
+
+function M.run_command(subcommand, payload, on_stdout, on_complete)
+    local binary = M.get_binary_path()
+    if not binary then
+        M.warn_binary_missing()
+        if on_complete then on_complete(false) end
+        return
+    end
+
+    local unl_config = require("UNL.config")
+    local port = unl_config.get().remote.port or 30010
+
+    local json_payload = vim.json.encode(payload)
+    local cmd = { binary, subcommand, json_payload }
+    
+    vim.fn.jobstart(cmd, {
+        env = { UNL_SERVER_PORT = tostring(port) },
+        stdout_buffered = false,
+        on_stdout = function(_, data)
+            if data and on_stdout then
+                for _, line in ipairs(data) do
+                    if line ~= "" then on_stdout(line) end
+                end
+            end
+        end,
+        on_stderr = function(_, data)
+            if data then
+                local log = require("UNL.logging").get("UNL")
+                for _, line in ipairs(data) do
+                    if line ~= "" then log.error("[Scanner:%s] %s", subcommand, line) end
+                end
+            end
+        end,
+        on_exit = function(_, code)
+            if on_complete then
+                on_complete(code == 0)
+            end
+        end
+    })
 end
 
 return M

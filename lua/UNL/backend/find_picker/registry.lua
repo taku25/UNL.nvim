@@ -1,7 +1,5 @@
 -- lua/UNL/backend/find_picker/registry.lua
 
-local unl_log = require("UNL.logging").get("UNL")
-
 local M = {}
 
 local providers = {}
@@ -11,7 +9,6 @@ local providers = {}
 -- @param provider_spec table: Must contain a 'name' key.
 function M.register(provider_spec)
   if not (provider_spec and provider_spec.name) then
-    unl_log.warn("Find Picker provider registration failed: missing name.")
     return
   end
   providers[provider_spec.name] = provider_spec

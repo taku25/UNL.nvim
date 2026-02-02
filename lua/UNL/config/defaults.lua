@@ -76,6 +76,7 @@ local M = {
   remote = {
     host = "127.0.0.1",
     port = 30010,
+    auto_server_start = true,
   },
 }
 return M

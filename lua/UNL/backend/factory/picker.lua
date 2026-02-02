@@ -6,7 +6,8 @@ local M = {}
 -- ... (M.load_providers は変更なし) ...
 function M.load_providers(registry, provider_modules, opts)
   local opts = opts or {}
-  local log = require("UNL.logging").get(opts.logger_name or "UNL")
+  local logging = require("UNL.logging")
+  local log = logging.get(opts.logger_name or "UNL")
   for _, mod_name in ipairs(provider_modules) do
     local ok, provider = pcall(require, mod_name)
     if ok and provider.name then
@@ -27,7 +28,8 @@ end
 --   - logger_name (string)
 function M.run_with_fallback(opts)
   opts = opts or {}
-  local log = require("UNL.logging").get(opts.logger_name or "UNL")
+  local logging = require("UNL.logging")
+  local log = logging.get(opts.logger_name or "UNL")
 
   -- ▼▼▼ ここからが新しいロジック ▼▼▼
   

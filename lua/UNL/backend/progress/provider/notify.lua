@@ -14,7 +14,7 @@ local spec = {
   create = function(opts)
     if opts.enabled == false then return nil end
     local aggr = Aggregator.new(opts.weights)
-    local throttle_ms = opts.throttle_ms or 120
+    local throttle_ms = opts.throttle_ms or 50 -- Reduced from 120
     local title = opts.title or "UNL Refresh"
     local last = 0
 

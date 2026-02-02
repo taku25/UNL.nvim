@@ -42,15 +42,38 @@ function M.get(name)
       seen[msg] = true
       vim.notify(lvl_name .. ": Logger '"..name.."' not init. " .. msg, vim.log.levels[lvl_name] or vim.log.levels.WARN)
     end
+    local function safe_inspect(...)
+      local n = select("#", ...)
+      if n == 0 then return "" end
+      if n == 1 then
+        local val = select(1, ...)
+        return type(val) == "string" and val or vim.inspect(val)
+      end
+      return vim.inspect({...})
+    end
+
+    local function safe_format(...)
+      local n = select("#", ...)
+      if n == 0 then return "" end
+      local first = select(1, ...)
+      if type(first) ~= "string" then return safe_inspect(...) end
+      
+      local ok, res = pcall(string.format, ...)
+      if ok then return res end
+      return safe_inspect(...)
+    end
+
     return {
       trace = function() end,
       debug = function() end,
-      info = function() end,
+      info = function(...)
+        print("INFO: " .. safe_format(...))
+      end,
       warn = function(...)
-        vim.notify("WARN: Logger '"..name.."' not init. " .. vim.inspect(...), vim.log.levels.WARN)
+        print("WARN: " .. safe_format(...))
       end,
       error = function(...)
-        vim.notify("ERROR: Logger '"..name.."' not init. " .. vim.inspect(...), vim.log.levels.ERROR)
+        print("ERROR: " .. safe_format(...))
       end,
       warn_once = function(...) dummy_once("WARN", ...) end,
       error_once = function(...) dummy_once("ERROR", ...) end,

@@ -142,7 +142,7 @@ function M.create(spec)
     complete = complete_handler,
   })
 
-  get_logger().info("%s commands registered.", spec.cmd_name)
+  get_logger().debug("%s commands registered.", spec.cmd_name)
 end
 
 return M

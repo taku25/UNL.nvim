@@ -22,12 +22,27 @@ pub struct RefreshRequest {
     pub msg_type: String,
     pub project_root: String,
     pub engine_root: Option<String>,
-    pub db_path: String,
+    pub db_path: Option<String>,
     pub config: UEPConfig,
     pub scope: Option<String>,
+    pub vcs_hash: Option<String>,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Serialize, Debug)]
+pub struct WatchRequest {
+    pub project_root: String,
+    pub db_path: Option<String>,
+}
+
+#[derive(Deserialize, Serialize, Debug)]
+pub struct SetupRequest {
+    pub project_root: String,
+    pub db_path: String,
+    pub config: UEPConfig,
+    pub vcs_hash: Option<String>,
+}
+
+#[derive(Deserialize, Serialize, Debug)]
 #[allow(dead_code)]
 pub struct UEPConfig {
     pub excludes_directory: Vec<String>,
@@ -136,20 +151,99 @@ pub struct UModuleJson {
     pub mod_type: String,
 }
 
+#[derive(Deserialize, Serialize, Debug)]
+#[serde(tag = "kind")]
+pub enum QueryRequest {
+    FindDerivedClasses { base_class: String },
+    SearchFiles { part: String },
+    LoadComponentData { component: String },
+    GetModuleByName { name: String },
+    GetClassesInModules { modules: Vec<String>, #[serde(default)] symbol_type: Option<String> },
+    GetRecursiveDerivedClasses { base_class: String },
+    GetRecursiveParentClasses { child_class: String },
+    GetProgramFiles,
+    GetAllIniFiles,
+    FindSymbolInModule { module: String, symbol: String },
+    FindClassByName { name: String },
+    SearchClassesPrefix { prefix: String, limit: Option<usize> },
+    GetClasses { extra_where: Option<String>, params: Option<Vec<String>> },
+    GetStructs { extra_where: Option<String>, params: Option<Vec<String>> },
+    GetStructsOnly,
+    GetClassMembersById { class_id: i64 },
+    GetClassMembers { class_name: String },
+    GetClassMethods { class_name: String },
+    GetClassProperties { class_name: String },
+    GetClassMembersRecursive { class_name: String, namespace: Option<String> },
+    SearchFilesByPathPart { part: String },
+    GetEnumValues { enum_name: String },
+    GetComponents,
+    GetModules,
+    GetModuleIdByName { name: String },
+    GetModuleRootPath { name: String },
+    GetFilesInModule { module_id: i64 },
+    GetFilesInModules { modules: Vec<String> },
+    SearchFilesInModules { modules: Vec<String>, filter: String, limit: Option<usize> },
+    SearchSymbolsInModules { modules: Vec<String>, symbol_type: Option<String>, filter: String, limit: Option<usize> },
+    GetDirectoriesInModule { module_id: i64 },
+    GetModuleFilesByNameAndRoot { name: String, root: String },
+    GetModuleDirsByNameAndRoot { name: String, root: String },
+    GetClassFilePath { class_name: String },
+    UpdateMemberReturnType { class_name: String, member_name: String, return_type: String },
+    GetTargetFiles,
+    GetAllFilePaths,
+    GetAllFilesMetadata,
+}
+
 use std::io::{self, Write};
 
-pub fn report_progress(stage: &str, current: usize, total: usize, message: &str) {
-    let p = Progress {
-        msg_type: "progress".to_string(),
-        stage: stage.to_string(),
-        current,
-        total,
-        message: message.to_string(),
-    };
-    if let Ok(mut json) = serde_json::to_string(&p) {
-        json.push('\n');
-        let mut stdout = io::stdout().lock();
-        let _ = stdout.write_all(json.as_bytes());
-        let _ = stdout.flush();
+pub trait ProgressReporter: Send + Sync {
+
+    fn report(&self, stage: &str, current: usize, total: usize, message: &str);
+
+}
+
+
+
+pub struct StdoutReporter;
+
+impl ProgressReporter for StdoutReporter {
+
+    fn report(&self, stage: &str, current: usize, total: usize, message: &str) {
+
+        let p = Progress {
+
+            msg_type: "progress".to_string(),
+
+            stage: stage.to_string(),
+
+            current,
+
+            total,
+
+            message: message.to_string(),
+
+        };
+
+        if let Ok(mut json) = serde_json::to_string(&p) {
+
+            json.push('\n');
+
+            let mut stdout = io::stdout().lock();
+
+            let _ = stdout.write_all(json.as_bytes());
+
+            let _ = stdout.flush();
+
+        }
+
     }
+
+}
+
+
+
+pub fn report_progress(stage: &str, current: usize, total: usize, message: &str) {
+
+    StdoutReporter.report(stage, current, total, message);
+
 }

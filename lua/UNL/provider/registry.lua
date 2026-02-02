@@ -41,7 +41,7 @@ function M.register(spec)
     priority = spec.priority or 100,
   })
 
-  log.info("Registered provider '%s' for capability '%s'", spec.name, spec.capability)
+  log.debug("Registered provider '%s' for capability '%s'", spec.name, spec.capability)
   return true
 end
 

@@ -53,7 +53,7 @@ pub fn process_file(input: &InputFile, language: &tree_sitter::Language, query: 
     }
 
     let mut parser = Parser::new();
-    parser.set_language(language).unwrap();
+    parser.set_language(&language).unwrap();
     let tree = parser.parse(&content, None).ok_or(anyhow::anyhow!("Parse failed"))?;
     let root = tree.root_node();
     
@@ -65,10 +65,10 @@ pub fn process_file(input: &InputFile, language: &tree_sitter::Language, query: 
 
     while let Some((m, capture_index)) = captures.next() {
         let capture = m.captures[*capture_index];
-        let capture_name: &str = &query.capture_names()[capture.index as usize];
+        let capture_name = &query.capture_names()[capture.index as usize];
         let node = capture.node;
         
-        if capture_name == "class_name" || capture_name == "struct_name" || capture_name == "enum_name" {
+        if *capture_name == "class_name" || *capture_name == "struct_name" || *capture_name == "enum_name" {
             let has_body = if let Some(parent) = node.parent() {
                 parent.child_by_field_name("body").is_some()
             } else { false };
@@ -78,15 +78,15 @@ pub fn process_file(input: &InputFile, language: &tree_sitter::Language, query: 
                     let mut name = get_node_text(&node, content_bytes).to_string();
                     let namespace = get_namespace(&parent, content_bytes);
                     
-                    if capture_name == "enum_name" && name == "Type" {
+                    if *capture_name == "enum_name" && name == "Type" {
                         if let Some(ns) = &namespace {
                             name = format!("{}::{}", ns, name);
                         }
                     }
 
                     let mut symbol_type = "class";
-                    if capture_name == "struct_name" { symbol_type = "struct"; }
-                    if capture_name == "enum_name" { symbol_type = "enum"; }
+                    if *capture_name == "struct_name" { symbol_type = "struct"; }
+                    if *capture_name == "enum_name" { symbol_type = "enum"; }
                     
                     let kind_str = parent.kind();
                     if kind_str == "unreal_class_declaration" { symbol_type = "UCLASS"; }
@@ -120,7 +120,7 @@ pub fn process_file(input: &InputFile, language: &tree_sitter::Language, query: 
                     }
                 }
             }
-        } else if capture_name == "macro_item_name" {
+        } else if *capture_name == "macro_item_name" {
             if let Some(parent) = node.parent() { 
                 if let Some(macro_node) = parent.parent() { 
                     let mut current = macro_node;
@@ -182,7 +182,7 @@ pub fn process_file(input: &InputFile, language: &tree_sitter::Language, query: 
                     }
                 }
             }
-        } else if capture_name == "alias_decl" {
+        } else if *capture_name == "alias_decl" {
             if let Some(name_node) = node.child_by_field_name("name") {
                  let name = get_node_text(&name_node, content_bytes).to_string();
                  let namespace = get_namespace(&node, content_bytes);
@@ -194,14 +194,14 @@ pub fn process_file(input: &InputFile, language: &tree_sitter::Language, query: 
                      
                      if !name.is_empty() && !target_type.is_empty() && name != target_type {
                          classes.push(ClassInfo {
-                            class_name: name, namespace, base_classes: vec![target_type], symbol_type: "struct".to_string(),
+                            class_name: name, namespace, base_classes: vec![target_type], symbol_type: "typedef".to_string(),
                             line: node.start_position().row + 1, range_start: node.start_byte(), range_end: node.end_byte(),
                             members: Vec::new(), is_final: false, is_interface: false,
                          });
                      }
                  }
             }
-        } else if capture_name == "typedef_decl" {
+        } else if *capture_name == "typedef_decl" {
             if let Some(name_node) = node.child_by_field_name("declarator") {
                  let name = get_node_text(&name_node, content_bytes).to_string();
                  if !name.contains('(') && !name.contains('<') && !name.contains(':') && !name.contains(' ') {
@@ -213,7 +213,7 @@ pub fn process_file(input: &InputFile, language: &tree_sitter::Language, query: 
                          
                          if !name.is_empty() && !target_type.is_empty() && name != target_type {
                              classes.push(ClassInfo {
-                                class_name: name, namespace, base_classes: vec![target_type], symbol_type: "struct".to_string(),
+                                class_name: name, namespace, base_classes: vec![target_type], symbol_type: "typedef".to_string(),
                                 line: node.start_position().row + 1, range_start: node.start_byte(), range_end: node.end_byte(),
                                 members: Vec::new(), is_final: false, is_interface: false,
                              });
@@ -221,7 +221,7 @@ pub fn process_file(input: &InputFile, language: &tree_sitter::Language, query: 
                      }
                  }
             }
-        } else if capture_name == "base_class_name" {
+        } else if *capture_name == "base_class_name" {
             let node_start = node.start_byte();
             if let Some(cls) = classes.last_mut() {
                 if node_start >= cls.range_start && node_start <= cls.range_end {
@@ -234,7 +234,7 @@ pub fn process_file(input: &InputFile, language: &tree_sitter::Language, query: 
                     }
                 }
             }
-        } else if capture_name == "func_name" || capture_name == "prop_name" {
+        } else if *capture_name == "func_name" || *capture_name == "prop_name" {
             let member_name_raw = get_node_text(&node, content_bytes);
             let mut definition_node = node;
             let mut ufunc_wrapper = None;
@@ -268,7 +268,7 @@ pub fn process_file(input: &InputFile, language: &tree_sitter::Language, query: 
 
             let mut detail = None;
             let mut return_type = None;
-            let mem_type = if capture_name == "func_name" { "function" } else { "property" };
+            let mem_type = if *capture_name == "func_name" { "function" } else { "property" };
 
             let func_name_clean = member_name_raw.split(|c| c == '(' || c == '[' || c == '=' || c == ';').next().unwrap_or("").trim();
             let def_text = get_node_text(&definition_node, content_bytes);
@@ -301,7 +301,7 @@ pub fn process_file(input: &InputFile, language: &tree_sitter::Language, query: 
                     return_type,
                 }, definition_node.start_byte(), definition_node.end_byte()));
             }
-        } else if capture_name == "enum_val_name" {
+        } else if *capture_name == "enum_val_name" {
             let name = get_node_text(&node, content_bytes).to_string();
             if !name.is_empty() {
                 members.push((MemberInfo {

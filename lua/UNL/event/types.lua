@@ -46,6 +46,7 @@ local M = {
   ON_AFTER_MODIFY_DIRECTORY = "unl:on_after_modify_directory",
 
   ON_AFTER_NEW_PROJECT = "unl:on_after_new_project",
+  ON_SERVER_PROGRESS = "unl:on_server_progress",
 }
 
 return M

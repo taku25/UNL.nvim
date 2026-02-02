@@ -1,0 +1,78 @@
+*unl.txt*  Unreal Neovim Library - Core library for Unreal Engine plugins
+
+Author: taku25
+License: MIT
+
+CONTENTS                                                      *unl-contents*
+
+1. Introduction ............................................. |unl-introduction|
+2. Commands ................................................. |unl-commands|
+3. API ...................................................... |unl-api|
+4. Configuration ............................................ |unl-configuration|
+
+==============================================================================
+1. INTRODUCTION                                             *unl-introduction*
+
+UNL.nvim is a shared library for Unreal Engine development plugins in Neovim.
+It handles project management, RPC server communication (Rust), database
+synchronization, and common UI abstractions.
+
+==============================================================================
+2. COMMANDS                                                     *unl-commands*
+
+:UNL start                                                        *UNL-start*
+    Starts the UNL server (unl-server) and the file watcher.
+    If the server is already running, it reuses the existing instance.
+    Checks if the current project is registered and performs setup if needed.
+
+:UNL setup                                                        *UNL-setup*
+    Initializes the database and registers the current project with the server.
+    Usually called automatically by `:UNL start`.
+
+:UNL refresh [Scope]                                            *UNL-refresh*
+    Rescans project files and updates the database.
+    Scope: "Game" (default), "Engine", "Full".
+
+:UNL watch                                                        *UNL-watch*
+    Starts the file watcher for the current project.
+    Usually called automatically by `:UNL start`.
+
+:UNL cleanup                                                    *UNL-cleanup*
+    Deletes all database records for the current project.
+    Use this if the database becomes corrupted.
+
+:UNL status                                                      *UNL-status*
+    Shows the status of the UNL server and the current project.
+
+:UNL cd [Path]                                                       *UNL-cd*
+    Changes the current directory to a project managed by UNL.
+
+==============================================================================
+3. API                                                               *unl-api*
+
+You can access UNL functions via `require("UNL.api")`.
+
+unl.start()                                                      *unl.start()*
+    Starts the server and watcher.
+
+unl.refresh({opts})                                            *unl.refresh()*
+    Refreshes the database.
+    opts: { scope = "Game" | "Engine" | "Full" }
+
+unl.setup()                                                      *unl.setup()*
+    Sets up the project manually.
+
+unl.db.search_files_in_modules({modules}, {filter}, {limit}, {cb})
+                                            *unl.db.search_files_in_modules()*
+    Searches for files on the server side (High Performance).
+    modules: List of module names (e.g., {"Core", "MyGame"})
+    filter:  Keyword to match file paths (e.g., "Actor")
+    limit:   Max number of results (e.g., 100)
+    cb:      Callback function(files)
+
+==============================================================================
+4. CONFIGURATION                                           *unl-configuration*
+
+See the README or `lua/UNL/config.lua` for default options.
+
+vim:tw=78:ts=8:ft=help:norl:

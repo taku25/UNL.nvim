@@ -33,6 +33,10 @@ This library is designed to save plugin developers from writing boilerplate code
       * Includes a built-in feature to parse `.build.cs` files and analyze their dependencies.
   * **Robust Logging System**:
       * Easily create per-plugin loggers with multiple output targets, such as files, notifications (`vim.notify`), and the command line (`echo`). Log levels and output formats are also flexible.
+  * **Project Management & RPC Server**:
+      * Centralizes the management of the Rust-based RPC server (`unl-server`) via the `:UNL start` command. It prevents multiple instances and allows safe sharing across multiple Neovim sessions.
+      * Handles project-specific database initialization and registration via `:UNL setup`.
+      * Provides server-side file filtering and symbol search APIs for high performance even in massive projects.
   * **High-Performance Scanner (Rust)**:
       * Includes a built-in Rust-based binary scanner for lightning-fast C++ header analysis. It utilizes Tree-sitter for accurate parsing of Unreal Engine macros and class structures.
 
@@ -169,6 +173,37 @@ function M.setup(user_config)
 end
 
 return M
+```
+
+## 🤖 API & Automation
+
+You can control UNL programmatically via `require("UNL.api")`. This is useful for creating custom keymaps or integrating with other plugins.
+
+```lua
+local unl = require("UNL.api")
+
+-- Start the UNL server and file watcher
+unl.start()
+
+-- Refresh the project database (scans files and updates DB)
+-- scope: "Game", "Engine", "Full"
+unl.refresh({ scope = "Game" })
+
+-- Setup UNL for the current project (usually called by start, but can be manual)
+unl.setup()
+
+-- Start the file watcher explicitly
+unl.watch()
+
+-- Search files using server-side filtering (High Performance)
+-- modules: list of module names to search in
+-- filter: keyword to match file paths
+-- limit: max number of results
+unl.db.search_files_in_modules({"Core", "Engine"}, "Actor", 100, function(files)
+  for _, file in ipairs(files) do
+    print(file.file_path)
+  end
+end)
 ```
 
 -----

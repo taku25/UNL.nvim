@@ -33,6 +33,10 @@
       * `.build.cs`ファイルの解析を行い依存関係を解析機能を内蔵しています
   * **堅牢なロギングシステム**:
       * ファイル、通知 (`vim.notify`)、コマンドライン (`echo`) など、複数の出力先を持つロガーをプラグインごとに簡単に作成できます。ログレベルや出力形式も柔軟に設定可能です。
+  * **プロジェクト管理とRPCサーバー**:
+      * `:UNL start` コマンドにより、Rust製のRPCサーバー (`unl-server`) を一元管理します。多重起動を防止し、複数のNeovimインスタンスから安全に共有できます。
+      * `:UNL setup` でプロジェクトごとのデータベース初期化と登録を行います。
+      * サーバーサイドでの高速なファイルフィルタリングやシンボル検索APIを提供し、大規模プロジェクトでも快適なレスポンスを実現します。
   * **高速スキャナ (Rust製)**:
       * C++ヘッダーを解析するための、Rust製の超高速バイナリスキャナを内蔵しています。Tree-sitterを利用して、Unreal Engineのマクロやクラス構造を正確に解析します。
 
@@ -161,6 +165,37 @@ function M.setup(user_config)
 end
 
 return M
+```
+
+## 🤖 API & 自動化 (API & Automation)
+
+`require("UNL.api")` を介して、プログラムからUNLを制御できます。カスタムキーマップの作成や、他のプラグインとの連携に役立ちます。
+
+```lua
+local unl = require("UNL.api")
+
+-- UNLサーバーとファイル監視を開始
+unl.start()
+
+-- プロジェクトデータベースを更新 (ファイルスキャンとDB同期)
+-- scope: "Game", "Engine", "Full"
+unl.refresh({ scope = "Game" })
+
+-- 現在のプロジェクトのセットアップ (通常はstartから呼ばれますが、手動実行も可)
+unl.setup()
+
+-- ファイル監視を明示的に開始
+unl.watch()
+
+-- サーバーサイドフィルタリングを使った高速ファイル検索
+-- modules: 検索対象のモジュール名リスト
+-- filter: ファイルパスにマッチさせるキーワード
+-- limit: 取得する最大件数
+unl.db.search_files_in_modules({"Core", "Engine"}, "Actor", 100, function(files)
+  for _, file in ipairs(files) do
+    print(file.file_path)
+  end
+end)
 ```
 
 ## 📜 ライセンス (License)

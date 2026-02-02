@@ -47,4 +47,22 @@ function M.ensure_json(name)
   end
   return name .. ".json"
 end
+
+function M.get_db_path(project_root)
+  local cache_dir = vim.fn.stdpath("cache") .. "/UNL"
+  if vim.fn.isdirectory(cache_dir) == 0 then
+    vim.fn.mkdir(cache_dir, "p")
+  end
+  
+  -- プロジェクト名を取得 (最後のディレクトリ名)
+  local project_name = vim.fn.fnamemodify(project_root, ":t")
+  if project_name == "" then project_name = "Root" end
+  
+  -- フルパスのハッシュを取得
+  local hash = vim.fn.sha256(project_root):sub(1, 16)
+  
+  local filename = string.format("%s_%s.db", project_name, hash)
+  return M.normalize(cache_dir .. "/" .. filename)
+end
+
 return M
