@@ -216,13 +216,14 @@ struct DeleteProjectRequest { project_root: String }
 
 async fn handle_delete_project(state: &AppState, params: &Value) -> anyhow::Result<Value> {
     let req: DeleteProjectRequest = convert_params(params)?;
-    let root_path = PathBuf::from(req.project_root.replace("/", "\\"));
+    let sep = std::path::MAIN_SEPARATOR.to_string();
+    let root_path = PathBuf::from(req.project_root.replace('/', &sep));
     
     let removed = {
         let mut projects = state.projects.lock().unwrap();
         let mut found_key = None;
         for root in projects.keys() {
-            if root == &root_path || root.to_string_lossy().replace("/", "\\") == root_path.to_string_lossy().replace("/", "\\") {
+            if root == &root_path || root.to_string_lossy().replace('/', &sep) == root_path.to_string_lossy().replace('/', &sep) {
                 found_key = Some(root.clone());
                 break;
             }
@@ -270,12 +271,13 @@ async fn handle_setup(state: &AppState, params: &Value) -> anyhow::Result<Value>
 
 async fn handle_refresh(state: &AppState, params: &Value, tx: mpsc::Sender<Vec<u8>>) -> anyhow::Result<Value> {
     let mut req: RefreshRequest = convert_params(params)?;
-    let project_root_path = PathBuf::from(req.project_root.replace("/", "\\"));
+    let sep = std::path::MAIN_SEPARATOR.to_string();
+    let project_root_path = PathBuf::from(req.project_root.replace('/', &sep));
     let db_path = {
         let mut projects = state.projects.lock().unwrap();
         let mut found_key = None;
         for root in projects.keys() {
-            if root == &project_root_path || root.to_string_lossy().replace("/", "\\") == project_root_path.to_string_lossy().replace("/", "\\") {
+            if root == &project_root_path || root.to_string_lossy().replace('/', &sep) == project_root_path.to_string_lossy().replace('/', &sep) {
                 found_key = Some(root.clone());
                 break;
             }

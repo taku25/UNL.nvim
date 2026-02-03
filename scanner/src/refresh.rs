@@ -15,8 +15,9 @@ pub fn run_refresh(req: RefreshRequest, reporter: Arc<dyn ProgressReporter>) -> 
     let db_path_str = req.db_path.as_ref().ok_or_else(|| anyhow::anyhow!("DB path required for refresh"))?;
     
     // パスの完全正規化
-    let project_root = PathBuf::from(req.project_root.replace("/", "\\"));
-    let engine_root = req.engine_root.as_ref().map(|r| PathBuf::from(r.replace("/", "\\")));
+    let sep = std::path::MAIN_SEPARATOR.to_string();
+    let project_root = PathBuf::from(req.project_root.replace('/', &sep));
+    let engine_root = req.engine_root.as_ref().map(|r| PathBuf::from(r.replace('/', &sep)));
 
     if !project_root.exists() {
         return Err(anyhow::anyhow!("Project root does not exist: {:?}", project_root));
