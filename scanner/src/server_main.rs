@@ -211,19 +211,30 @@ fn convert_params<T: serde::de::DeserializeOwned>(val: &Value) -> anyhow::Result
     Ok(serde_json::from_value(val.clone())?)
 }
 
+fn normalize_to_unix(s: &str) -> String {
+    s.replace('\\', "/")
+}
+
+fn normalize_to_native(s: &str) -> String {
+    if cfg!(target_os = "windows") {
+        s.replace('/', "\\")
+    } else {
+        s.replace('\\', "/")
+    }
+}
+
 #[derive(Deserialize)]
 struct DeleteProjectRequest { project_root: String }
 
 async fn handle_delete_project(state: &AppState, params: &Value) -> anyhow::Result<Value> {
     let req: DeleteProjectRequest = convert_params(params)?;
-    let sep = std::path::MAIN_SEPARATOR.to_string();
-    let root_path = PathBuf::from(req.project_root.replace('/', &sep));
+    let root_unix = normalize_to_unix(&req.project_root);
     
     let removed = {
         let mut projects = state.projects.lock().unwrap();
         let mut found_key = None;
         for root in projects.keys() {
-            if root == &root_path || root.to_string_lossy().replace('/', &sep) == root_path.to_string_lossy().replace('/', &sep) {
+            if normalize_to_unix(&root.to_string_lossy()) == root_unix {
                 found_key = Some(root.clone());
                 break;
             }
@@ -237,7 +248,7 @@ async fn handle_delete_project(state: &AppState, params: &Value) -> anyhow::Resu
     
     if removed {
         let _ = state.save_registry();
-        info!("Deleted project: {:?}", root_path);
+        info!("Deleted project: {}", root_unix);
         Ok(Value::String("Deleted".to_string()))
     } else {
         Err(anyhow::anyhow!("Project not found"))
@@ -255,17 +266,17 @@ struct PingRequest { pid: u32 }
 
 async fn handle_setup(state: &AppState, params: &Value) -> anyhow::Result<Value> {
     let req: SetupRequest = convert_params(params)?;
-    let db_path = req.db_path.clone();
-    let sep = std::path::MAIN_SEPARATOR.to_string();
-    let root_path = PathBuf::from(req.project_root.replace('/', &sep));
+    let db_path_native = normalize_to_native(&req.db_path);
+    let root_unix = normalize_to_unix(&req.project_root);
+    let root_path_unix = PathBuf::from(&root_unix);
     tokio::task::spawn_blocking(move || {
-        let conn = rusqlite::Connection::open(&db_path)?;
+        let conn = rusqlite::Connection::open(&db_path_native)?;
         unl_core::db::init_db(&conn)?;
         Ok::<_, anyhow::Error>(())
     }).await??;
     {
         let mut projects = state.projects.lock().unwrap();
-        projects.insert(root_path, ProjectContext { db_path: req.db_path.clone(), vcs_hash: req.vcs_hash.clone(), _last_refresh: Instant::now() });
+        projects.insert(root_path_unix, ProjectContext { db_path: normalize_to_unix(&req.db_path), vcs_hash: req.vcs_hash.clone(), _last_refresh: Instant::now() });
     }
     let _ = state.save_registry();
     Ok(serde_json::json!({ "status": "ok" }))
@@ -273,27 +284,28 @@ async fn handle_setup(state: &AppState, params: &Value) -> anyhow::Result<Value>
 
 async fn handle_refresh(state: &AppState, params: &Value, tx: mpsc::Sender<Vec<u8>>) -> anyhow::Result<Value> {
     let mut req: RefreshRequest = convert_params(params)?;
-    let sep = std::path::MAIN_SEPARATOR.to_string();
-    let project_root_path = PathBuf::from(req.project_root.replace('/', &sep));
-    let db_path = {
+    let root_unix = normalize_to_unix(&req.project_root);
+    let root_path_unix = PathBuf::from(&root_unix);
+    let db_path_unix = {
         let mut projects = state.projects.lock().unwrap();
         let mut found_key = None;
         for root in projects.keys() {
-            if root == &project_root_path || root.to_string_lossy().replace('/', &sep) == project_root_path.to_string_lossy().replace('/', &sep) {
+            if normalize_to_unix(&root.to_string_lossy()) == root_unix {
                 found_key = Some(root.clone());
                 break;
             }
         }
         if let Some(path) = &req.db_path {
-             projects.insert(project_root_path.clone(), ProjectContext { db_path: path.clone(), vcs_hash: req.vcs_hash.clone(), _last_refresh: Instant::now() });
-             path.clone()
+             let path_u = normalize_to_unix(path);
+             projects.insert(root_path_unix.clone(), ProjectContext { db_path: path_u.clone(), vcs_hash: req.vcs_hash.clone(), _last_refresh: Instant::now() });
+             path_u
         } else if let Some(key) = found_key {
              let ctx = projects.get_mut(&key).unwrap();
              ctx.vcs_hash = req.vcs_hash.clone();
              ctx.db_path.clone()
         } else { return Err(anyhow::anyhow!("Project not found")); }
     };
-    req.db_path = Some(db_path);
+    req.db_path = Some(db_path_unix);
     let _ = state.save_registry();
     let reporter = Arc::new(RpcProgressReporter { tx });
     tokio::task::spawn_blocking(move || { refresh::run_refresh(req, reporter) }).await??;
@@ -302,10 +314,10 @@ async fn handle_refresh(state: &AppState, params: &Value, tx: mpsc::Sender<Vec<u
 
 async fn handle_watch(state: &AppState, params: &Value) -> anyhow::Result<Value> {
     let req: WatchRequest = convert_params(params)?;
-    let sep = std::path::MAIN_SEPARATOR.to_string();
-    let project_root = PathBuf::from(req.project_root.replace('/', &sep));
+    let root_native = normalize_to_native(&req.project_root);
+    let root_path_native = PathBuf::from(&root_native);
     let mut watcher = state.watcher.lock().unwrap();
-    watcher.watch(&project_root, RecursiveMode::Recursive)?;
+    watcher.watch(&root_path_native, RecursiveMode::Recursive)?;
     Ok(Value::String("Watch started".to_string()))
 }
 
@@ -314,14 +326,15 @@ struct ServerQueryRequest { project_root: String, #[serde(flatten)] query: Query
 
 async fn handle_query(state: &AppState, params: &Value) -> anyhow::Result<Value> {
     let req: ServerQueryRequest = convert_params(params)?;
-    let sep = std::path::MAIN_SEPARATOR.to_string();
-    let root_path = PathBuf::from(req.project_root.replace('/', &sep));
-    let db_path = {
+    let root_unix = normalize_to_unix(&req.project_root);
+    let root_path_unix = PathBuf::from(&root_unix);
+    let db_path_unix = {
         let projects = state.projects.lock().unwrap();
-        let ctx = projects.get(&root_path).ok_or_else(|| anyhow::anyhow!("Project not found"))?;
+        let ctx = projects.get(&root_path_unix).ok_or_else(|| anyhow::anyhow!("Project not found"))?;
         ctx.db_path.clone()
     };
-    tokio::task::spawn_blocking(move || unl_core::query::process_query(&db_path, req.query)).await?
+    let db_path_native = normalize_to_native(&db_path_unix);
+    tokio::task::spawn_blocking(move || unl_core::query::process_query(&db_path_native, req.query)).await?
 }
 
 async fn handle_scan(_state: &AppState, params: &Value) -> anyhow::Result<Value> {

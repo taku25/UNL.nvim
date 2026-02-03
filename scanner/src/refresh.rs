@@ -14,12 +14,24 @@ use crate::{scanner, db};
 pub fn run_refresh(req: RefreshRequest, reporter: Arc<dyn ProgressReporter>) -> anyhow::Result<()> {
     let db_path_str = req.db_path.as_ref().ok_or_else(|| anyhow::anyhow!("DB path required for refresh"))?;
     
-    // パスの完全正規化
-    let sep = std::path::MAIN_SEPARATOR.to_string();
-    let project_root = PathBuf::from(req.project_root.replace('/', &sep));
-    let engine_root = req.engine_root.as_ref().map(|r| PathBuf::from(r.replace('/', &sep)));
+    // 内部的なパス正規化: DB保存用は / に、OS操作用は Native に
+    let normalize_to_native = |s: &str| {
+        if cfg!(target_os = "windows") {
+            s.replace('/', "\\")
+        } else {
+            s.replace('\\', "/")
+        }
+    };
+    let _normalize_to_db = |s: &str| s.replace('\\', "/");
+
+    let project_root = PathBuf::from(normalize_to_native(&req.project_root));
+    let engine_root = req.engine_root.as_ref().map(|r| PathBuf::from(normalize_to_native(r)));
+    let db_path_native = normalize_to_native(db_path_str);
+
+    tracing::info!("Starting refresh. Project: {:?}, DB: {}", project_root, db_path_native);
 
     if !project_root.exists() {
+        tracing::error!("Project root does not exist: {:?}", project_root);
         return Err(anyhow::anyhow!("Project root does not exist: {:?}", project_root));
     }
 
@@ -186,7 +198,7 @@ pub fn run_refresh(req: RefreshRequest, reporter: Arc<dyn ProgressReporter>) -> 
 
     // 4. Sync to DB
     reporter.report("db_sync", 0, 100, "Updating database structure...");
-    let db_path = Path::new(db_path_str);
+    let db_path = Path::new(&db_path_native);
     let mut conn = Connection::open(db_path)?;
     conn.busy_timeout(std::time::Duration::from_millis(10000))?;
     db::init_db(&conn)?;
