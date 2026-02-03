@@ -81,7 +81,7 @@ impl AppState {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
-    let port: u16 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(30010);
+    let port: u16 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(30110);
     let registry_path = args.get(2).map(PathBuf::from);
     let log_path = if let Some(ref p) = registry_path { p.parent().unwrap().join("unl-server.log") } else { PathBuf::from("unl-server.log") };
     let log_file = std::fs::OpenOptions::new().create(true).append(true).open(&log_path)?;

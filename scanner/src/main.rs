@@ -9,7 +9,7 @@ use serde_json::Value;
 
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
-    let server_port: u16 = std::env::var("UNL_SERVER_PORT").ok().and_then(|v| v.parse().ok()).unwrap_or(30010);
+    let server_port: u16 = std::env::var("UNL_SERVER_PORT").ok().and_then(|v| v.parse().ok()).unwrap_or(30110);
     let is_server_running = TcpStream::connect(format!("127.0.0.1:{}", server_port)).is_ok();
 
     if args.len() > 1 {
