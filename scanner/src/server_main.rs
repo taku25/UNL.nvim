@@ -71,7 +71,9 @@ impl AppState {
     }
     fn register_client(&self, pid: u32) {
         let mut clients = self.active_clients.lock().unwrap();
-        clients.insert(pid);
+        if clients.insert(pid) {
+            info!("Registered new client PID: {}", pid);
+        }
         *self.last_activity.lock().unwrap() = Instant::now();
     }
 }
@@ -125,24 +127,44 @@ async fn main() -> anyhow::Result<()> {
         let mut sys = System::new_all();
         loop {
             tokio::time::sleep(Duration::from_secs(60)).await;
-            sys.refresh_all();
+            sys.refresh_processes();
             let mut clients = state_for_lifecycle.active_clients.lock().unwrap();
             let mut to_remove = Vec::new();
-            for &pid in clients.iter() { if sys.process(Pid::from(pid as usize)).is_none() { to_remove.push(pid); } }
-            for pid in to_remove { clients.remove(&pid); }
+            for &pid in clients.iter() {
+                if sys.process(Pid::from(pid as usize)).is_none() {
+                    to_remove.push(pid);
+                }
+            }
+            for pid in to_remove {
+                info!("Client process {} disconnected (not found)", pid);
+                clients.remove(&pid);
+            }
             if clients.is_empty() {
                 let last = *state_for_lifecycle.last_activity.lock().unwrap();
-                if last.elapsed() > Duration::from_secs(600) { std::process::exit(0); }
-            } else { *state_for_lifecycle.last_activity.lock().unwrap() = Instant::now(); }
+                if last.elapsed() > Duration::from_secs(600) {
+                    info!("No active clients for 600s. Shutting down UNL Server...");
+                    std::process::exit(0);
+                }
+            } else {
+                *state_for_lifecycle.last_activity.lock().unwrap() = Instant::now();
+            }
         }
     });
 
     let addr = format!("127.0.0.1:{}", port);
-    let listener = TcpListener::bind(&addr).await?;
-    loop {
-        let (socket, _) = listener.accept().await?;
-        let state = Arc::clone(&state);
-        tokio::spawn(async move { handle_connection(socket, state).await; });
+    match TcpListener::bind(&addr).await {
+        Ok(listener) => {
+            info!("UNL Server listening on {}", addr);
+            loop {
+                let (socket, _) = listener.accept().await?;
+                let state = Arc::clone(&state);
+                tokio::spawn(async move { handle_connection(socket, state).await; });
+            }
+        }
+        Err(e) => {
+            tracing::error!("Failed to bind to {}: {}", addr, e);
+            return Err(e.into());
+        }
     }
 }
 
