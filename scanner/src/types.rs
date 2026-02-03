@@ -98,6 +98,8 @@ pub struct MemberInfo {
     #[serde(rename = "type")]
     pub mem_type: String,
     pub flags: String,
+    pub access: String,
+    pub line: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -194,6 +196,7 @@ pub enum QueryRequest {
     GetModuleFilesByNameAndRoot { name: String, root: String },
     GetModuleDirsByNameAndRoot { name: String, root: String },
     GetClassFilePath { class_name: String },
+    GetFileSymbols { file_path: String },
     UpdateMemberReturnType { class_name: String, member_name: String, return_type: String },
     GetTargetFiles,
     GetAllFilePaths,

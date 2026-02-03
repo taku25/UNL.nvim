@@ -25,10 +25,11 @@ pub const QUERY_STR: &str = r#"
   (alias_declaration) @alias_decl
   (type_definition) @typedef_decl
   (base_class_clause (access_specifier)? (type_identifier) @base_class_name)
-  (function_definition declarator: [(function_declarator declarator: (_) @func_name) (pointer_declarator (_) @func_name) (reference_declarator (_) @func_name)]) @func_node
-  (declaration declarator: [(function_declarator declarator: (_) @func_name) (pointer_declarator (_) @func_name) (reference_declarator (_) @func_name) (field_identifier) @prop_name (identifier) @prop_name]) @decl_node
-  (unreal_function_declaration declarator: (_) @func_name) @ufunc_node
-  (field_declaration declarator: [(field_identifier) @prop_name (pointer_declarator (_) @prop_name) (reference_declarator (_) @prop_name) (array_declarator (_) @prop_name) (function_declarator declarator: (_) @func_name) (pointer_declarator (function_declarator declarator: (_) @func_name)) (reference_declarator (function_declarator declarator: (_) @func_name))]) @field_node
+  
+  (function_definition) @func_node
+  (declaration) @decl_node
+  (unreal_function_declaration) @ufunc_node
+  (field_declaration) @field_node
   (enumerator name: (identifier) @enum_val_name) @enum_item
 "#;
 
@@ -234,33 +235,83 @@ pub fn process_file(input: &InputFile, language: &tree_sitter::Language, query: 
                     }
                 }
             }
-        } else if *capture_name == "func_name" || *capture_name == "prop_name" {
-            let member_name_raw = get_node_text(&node, content_bytes);
-            let mut definition_node = node;
-            let mut ufunc_wrapper = None;
-
-            for _ in 0..6 {
-                let kind = definition_node.kind();
-                if kind == "unreal_function_declaration" {
-                    ufunc_wrapper = Some(definition_node);
-                    break; 
-                }
-                if kind.contains("declaration") || kind.contains("definition") { break; }
-                if let Some(p) = definition_node.parent() { definition_node = p; } else { break; }
-            }
+        } else if *capture_name == "func_node" || *capture_name == "decl_node" || *capture_name == "ufunc_node" || *capture_name == "field_node" {
+            let definition_node = node;
             
-            if let Some(wrapper) = ufunc_wrapper {
-                definition_node = wrapper;
+            // Extract member name and scope
+            let mut member_name = String::new();
+            let mut scope_name = None;
+            let mut is_function = *capture_name == "func_node" || *capture_name == "ufunc_node";
+            
+            // Traverse to find name and scope
+            if let Some(declarator) = find_declarator_node(definition_node) {
+                let mut current = declarator;
+                loop {
+                    match current.kind() {
+                        "identifier" | "field_identifier" => {
+                            member_name = get_node_text(&current, content_bytes).to_string();
+                            break;
+                        },
+                        "qualified_identifier" => {
+                            if let Some(s) = current.child_by_field_name("scope") {
+                                scope_name = Some(get_node_text(&s, content_bytes).to_string());
+                            }
+                            if let Some(n) = current.child_by_field_name("name") {
+                                member_name = get_node_text(&n, content_bytes).to_string();
+                            }
+                            break;
+                        },
+                        "function_declarator" => {
+                            is_function = true;
+                            if let Some(d) = current.child_by_field_name("declarator") {
+                                current = d;
+                                continue;
+                            }
+                            break;
+                        },
+                        "pointer_declarator" | "reference_declarator" | "array_declarator" => {
+                            if let Some(d) = current.child_by_field_name("declarator") {
+                                current = d;
+                                continue;
+                            }
+                            break;
+                        },
+                        _ => break,
+                    }
+                }
             }
+
+            if member_name.is_empty() { continue; }
 
             let mut flags = Vec::new();
+            let mut access = "public".to_string();
+            
             if has_child_type(definition_node, "ufunction_macro") || has_child_type(definition_node, "unreal_function_macro") || definition_node.kind() == "unreal_function_declaration" {
                 flags.push("UFUNCTION");
+                is_function = true;
             }
             if has_child_type(definition_node, "uproperty_macro") || has_child_type(definition_node, "unreal_property_macro") {
                 flags.push("UPROPERTY");
+                is_function = false;
             }
             
+            // Access specifier check
+            let mut curr = definition_node;
+            while let Some(parent) = curr.parent() {
+                let pk = parent.kind();
+                if pk == "field_declaration_list" || pk == "class_specifier" || pk == "struct_specifier" {
+                    let mut cursor = parent.walk();
+                    for child in parent.children(&mut cursor) {
+                        if child.start_byte() >= curr.start_byte() { break; }
+                        if child.kind() == "access_specifier" {
+                            access = get_node_text(&child, content_bytes).trim().trim_end_matches(':').trim().to_lowercase();
+                        }
+                    }
+                    break;
+                }
+                curr = parent;
+            }
+
             let node_text = get_node_text(&definition_node, content_bytes);
             if node_text.contains("virtual") { flags.push("virtual"); }
             if node_text.contains("static") { flags.push("static"); }
@@ -268,38 +319,62 @@ pub fn process_file(input: &InputFile, language: &tree_sitter::Language, query: 
 
             let mut detail = None;
             let mut return_type = None;
-            let mem_type = if *capture_name == "func_name" { "function" } else { "property" };
+            let mem_type = if is_function { "function" } else { "property" };
 
-            let func_name_clean = member_name_raw.split(|c| c == '(' || c == '[' || c == '=' || c == ';').next().unwrap_or("").trim();
-            let def_text = get_node_text(&definition_node, content_bytes);
-            
-            if let Some(idx) = def_text.find(func_name_clean) {
-                let prefix = &def_text[..idx];
+            // Return type extraction
+            if let Some(idx) = node_text.find(&member_name) {
+                let prefix = &node_text[..idx];
                 let mut actual_prefix = prefix;
                 if let Some(macro_end) = prefix.rfind(')') {
                     actual_prefix = &prefix[macro_end+1..];
                 }
-                let cleaned = clean_type_string(actual_prefix);
+                let mut cleaned = clean_type_string(actual_prefix);
+                
+                // Strip class scope from out-of-line definitions (e.g., "bool MyClass::" -> "bool")
+                if let Some(sn) = &scope_name {
+                    let scope_marker = format!("{}::", sn);
+                    if let Some(s_idx) = cleaned.find(&scope_marker) {
+                        cleaned = cleaned[..s_idx].trim().to_string();
+                    }
+                }
+
                 if !cleaned.is_empty() { return_type = Some(cleaned); }
             }
 
-            if mem_type == "function" {
+            if is_function {
                 if let Some(param_list) = find_child_by_type(definition_node, "parameter_list") {
                     detail = Some(get_node_text(&param_list, content_bytes).to_string());
                 }
             }
 
-            let name_tmp = func_name_clean.trim_start_matches(|c| c == '*' || c == '&' || c == ' ').trim();
-            let clean_name = name_tmp.split_whitespace().last().unwrap_or(name_tmp);
-
-            if !clean_name.is_empty() && clean_name != "virtual" && clean_name != "static" && clean_name != "void" && clean_name != "const" {
-                members.push((MemberInfo {
-                    name: clean_name.to_string(),
+            if !member_name.is_empty() && member_name != "virtual" && member_name != "static" && member_name != "void" && member_name != "const" {
+                let mut member = MemberInfo {
+                    name: member_name.clone(),
                     mem_type: mem_type.to_string(),
                     flags: flags.join(" "),
+                    access,
+                    line: definition_node.start_position().row + 1,
                     detail,
                     return_type,
-                }, definition_node.start_byte(), definition_node.end_byte()));
+                };
+
+                if let Some(sn) = scope_name {
+                    let mut found_idx = None;
+                    for (i, cls) in classes.iter().enumerate() { if cls.class_name == sn { found_idx = Some(i); break; } }
+                    
+                    let idx = if let Some(i) = found_idx { i } else {
+                        classes.push(ClassInfo {
+                            class_name: sn.clone(), namespace: None, base_classes: Vec::new(), symbol_type: "class".to_string(),
+                            line: 1, range_start: 0, range_end: 0, members: Vec::new(), is_final: false, is_interface: false,
+                        });
+                        classes.len() - 1
+                    };
+                    
+                    member.access = "impl".to_string();
+                    classes[idx].members.push(member);
+                } else {
+                    members.push((member, definition_node.start_byte(), definition_node.end_byte()));
+                }
             }
         } else if *capture_name == "enum_val_name" {
             let name = get_node_text(&node, content_bytes).to_string();
@@ -308,6 +383,8 @@ pub fn process_file(input: &InputFile, language: &tree_sitter::Language, query: 
                     name,
                     mem_type: "enum_item".to_string(),
                     flags: String::new(),
+                    access: "public".to_string(),
+                    line: node.start_position().row + 1,
                     detail: None,
                     return_type: None,
                 }, node.start_byte(), node.end_byte()));
@@ -377,6 +454,21 @@ fn has_child_type(node: Node, type_name: &str) -> bool {
         if child.kind() == type_name { return true; }
     }
     false
+}
+
+fn find_declarator_node<'a>(node: Node<'a>) -> Option<Node<'a>> {
+    for i in 0..node.child_count() {
+        if let Some(child) = node.child(i) {
+            let field_name = node.field_name_for_child(i as u32);
+            if field_name == Some("declarator") {
+                return Some(child);
+            }
+            if let Some(found) = find_declarator_node(child) {
+                return Some(found);
+            }
+        }
+    }
+    None
 }
 
 fn clean_type_string(s: &str) -> String {

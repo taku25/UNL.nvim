@@ -218,7 +218,10 @@ async fn process_msg(msgid: u64, method: String, params: Value, state: Arc<AppSt
     };
     let (err_val, res_val) = match result {
         Ok(res) => (Value::Null, res),
-        Err(e) => (Value::String(e.to_string()), Value::Null),
+        Err(e) => {
+            tracing::error!("Method '{}' failed: {}. Params: {}", method, e, params);
+            (Value::String(e.to_string()), Value::Null)
+        },
     };
     let response = (1, msgid, err_val, res_val);
     if let Ok(vec) = rmp_serde::to_vec(&response) {

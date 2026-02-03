@@ -879,6 +879,116 @@ pub fn process_query(db_path: &str, req: QueryRequest) -> anyhow::Result<Value> 
              let res = stmt.query_row([class_name], |row| Ok(row.get::<_, String>(0)?)).optional()?;
              Ok(json!(res))
         },
+        QueryRequest::GetFileSymbols { file_path } => {
+            // 1. Get all classes/structs/enums in this file
+            let mut stmt = conn.prepare(
+                "SELECT c.id, c.name, c.symbol_type, c.line_number, c.namespace, c.base_class
+                 FROM classes c JOIN files f ON c.file_id = f.id
+                 WHERE f.path = ?"
+            )?;
+            let class_rows = stmt.query_map([&file_path], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,    // id
+                    row.get::<_, String>(1)?, // name
+                    row.get::<_, String>(2)?, // type
+                    row.get::<_, i64>(3)?,    // line
+                    row.get::<_, Option<String>>(4)?, // namespace
+                    row.get::<_, Option<String>>(5)?, // base
+                ))
+            })?;
+
+            let mut results = Vec::new();
+            for r in class_rows {
+                let (cid, cname, ctype, cline, cns, cbase) = r?;
+                
+                // kind を UI が期待するキャメルケースに変換
+                let mapped_class_kind = match ctype.as_str() {
+                    "UCLASS" | "class" => "UClass",
+                    "USTRUCT" | "struct" => "UStruct",
+                    "UENUM" | "enum" => "UEnum",
+                    _ => &ctype,
+                };
+
+                let mut class_info = json!({
+                    "name": cname,
+                    "kind": mapped_class_kind,
+                    "line": cline,
+                    "namespace": cns,
+                    "base_class": cbase,
+                    "file_path": file_path,
+                    "fields": { "public": [], "protected": [], "private": [] },
+                    "methods": { "public": [], "protected": [], "private": [] }
+                });
+
+                // 2. Get members for this class
+                let mut mem_stmt = conn.prepare(
+                    "SELECT name, type, flags, access, detail, return_type, is_static, line_number
+                     FROM members WHERE class_id = ? ORDER BY name"
+                )?;
+                let mem_rows = mem_stmt.query_map([cid], |row| {
+                    let m_name: String = row.get(0)?;
+                    let m_type: String = row.get(1)?;
+                    let m_flags: Option<String> = row.get(2)?;
+                    let m_access: Option<String> = row.get(3)?;
+                    let m_detail: Option<String> = row.get(4)?;
+                    let m_return_type: Option<String> = row.get(5)?;
+                    let is_static: bool = row.get::<_, i64>(6)? == 1;
+                    let line: i64 = row.get(7)?;
+
+                    let flags_str = m_flags.clone().unwrap_or_default();
+                    let mapped_kind = if m_type == "function" {
+                        if flags_str.contains("UFUNCTION") { "UFunction" } else { "Function" }
+                    } else if m_type == "property" || m_type == "variable" {
+                        if flags_str.contains("UPROPERTY") { "UProperty" } else { "Field" }
+                    } else if m_type == "enum_item" {
+                        "EnumItem"
+                    } else {
+                        &m_type
+                    };
+
+                    Ok(json!({
+                        "name": m_name,
+                        "kind": mapped_kind,
+                        "flags": m_flags,
+                        "access": m_access,
+                        "detail": m_detail,
+                        "return_type": m_return_type,
+                        "is_static": is_static,
+                        "file_path": file_path,
+                        "line": line,
+                    }))
+                })?;
+
+                for m_res in mem_rows {
+                    let m = m_res?;
+                    let access = m["access"].as_str().unwrap_or("public").to_lowercase();
+                    let m_kind = m["kind"].as_str().unwrap_or("");
+                    let target_map = if m_kind.to_lowercase().contains("function") { "methods" } else { "fields" };
+                    if let Some(target) = class_info[target_map].as_object_mut() {
+                        target.entry(access).or_insert(json!([])).as_array_mut().unwrap().push(m);
+                    }
+                }
+
+                // 3. Get enum values if it's an enum
+                if ctype == "enum" || ctype == "UENUM" {
+                    let mut enum_stmt = conn.prepare("SELECT name FROM enum_values WHERE enum_id = ?")?;
+                    let ev_rows = enum_stmt.query_map([cid], |row| {
+                        Ok(json!({
+                            "name": row.get::<_, String>(0)?,
+                            "kind": "EnumItem",
+                            "file_path": file_path,
+                            "line": cline
+                        }))
+                    })?;
+                    for ev in ev_rows {
+                        class_info["fields"]["public"].as_array_mut().unwrap().push(ev?);
+                    }
+                }
+
+                results.push(class_info);
+            }
+            Ok(json!(results))
+        },
         QueryRequest::UpdateMemberReturnType { class_name, member_name, return_type } => {
              let mut stmt = conn.prepare(
                 "UPDATE members SET return_type = ? 

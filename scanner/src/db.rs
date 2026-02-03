@@ -77,6 +77,9 @@ pub fn init_db(conn: &Connection) -> rusqlite::Result<()> {
         )",
         [],
     )?;
+    // Migrations
+    let _ = conn.execute("ALTER TABLE members ADD COLUMN line_number INTEGER", []);
+    
     conn.execute("CREATE INDEX IF NOT EXISTS idx_members_name ON members(name)", [])?;
     conn.execute("CREATE INDEX IF NOT EXISTS idx_members_class_id ON members(class_id)", [])?;
 
@@ -161,7 +164,7 @@ pub fn save_to_db(conn: &mut Connection, results: &[ParseResult], reporter: Arc<
             let mut stmt_class_id = tx.prepare("SELECT id FROM classes WHERE name = ? AND file_id = ? LIMIT 1")?;
             let mut stmt_inheritance = tx.prepare("INSERT INTO inheritance (child_id, parent_name) VALUES (?, ?)")?;
             let mut stmt_enum = tx.prepare("INSERT INTO enum_values (enum_id, name) VALUES (?, ?)")?;
-            let mut stmt_member = tx.prepare("INSERT INTO members (class_id, name, type, flags, access, detail, return_type, is_static) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")?;
+            let mut stmt_member = tx.prepare("INSERT INTO members (class_id, name, type, flags, access, detail, return_type, is_static, line_number) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")?;
 
             for (i, result) in batch.iter().enumerate() {
                 let global_i = current_idx + i;
@@ -214,7 +217,7 @@ pub fn save_to_db(conn: &mut Connection, results: &[ParseResult], reporter: Arc<
                                 } else {
                                     let is_static = if mem.flags.contains("static") { 1 } else { 0 };
                                     let _ = stmt_member.execute(params![
-                                        class_id, mem.name, mem.mem_type, mem.flags, "public", mem.detail, mem.return_type, is_static
+                                        class_id, mem.name, mem.mem_type, mem.flags, mem.access, mem.detail, mem.return_type, is_static, mem.line as i64
                                     ]);
                                 }
                             }

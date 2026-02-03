@@ -108,6 +108,11 @@ function M.get_class_file_path(class_name, callback)
     remote.get_class_file_path(class_name, callback)
 end
 
+--- 指定したファイルの全シンボルを取得
+function M.get_file_symbols(file_path, callback)
+    remote.get_file_symbols(file_path, callback)
+end
+
 --- クラス名の前方一致検索
 function M.search_classes_prefix(prefix, limit, callback)
     remote.search_classes_prefix(prefix, limit, callback)

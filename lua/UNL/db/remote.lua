@@ -202,6 +202,15 @@ function M.get_class_file_path(class_name, cb)
     M.request("GetClassFilePath", { class_name = class_name }, cb)
 end
 
+function M.get_file_symbols(file_path, cb)
+    if not file_path or file_path == "" then
+        log.error("get_file_symbols: file_path is missing or empty")
+        if cb then cb(nil, "file_path is missing") end
+        return
+    end
+    M.request("GetFileSymbols", { file_path = file_path }, cb)
+end
+
 function M.update_member_return_type(class_name, member_name, return_type, cb)
     M.request("UpdateMemberReturnType", { class_name = class_name, member_name = member_name, return_type = return_type }, cb)
 end
