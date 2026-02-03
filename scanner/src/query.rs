@@ -712,22 +712,40 @@ pub fn process_query(db_path: &str, req: QueryRequest) -> anyhow::Result<Value> 
              let rows = stmt.query_map([module_id], |row| Ok(json!(row.get::<_, String>(0)?)))?;
              Ok(json!(rows.collect::<Result<Vec<Value>, _>>()?))
         },
-        QueryRequest::GetFilesInModules { modules } => {
+        QueryRequest::GetFilesInModules { modules, extensions, filter } => {
              if modules.is_empty() { return Ok(json!([])); }
              
              let mut all_files = Vec::new();
-             // SQLite usually has a limit of 999 parameters. Use 500 to be safe.
              for chunk in modules.chunks(500) {
                  let placeholders: Vec<String> = chunk.iter().map(|_| "?".to_string()).collect();
-                 let sql = format!(
+                 let mut sql = format!(
                      "SELECT f.path, f.extension, m.name, m.root_path
                       FROM files f
                       JOIN modules m ON f.module_id = m.id
                       WHERE m.name IN ({})",
                      placeholders.join(",")
                  );
+
+                 if let Some(exts) = &extensions {
+                     if !exts.is_empty() {
+                         let ext_placeholders: Vec<String> = exts.iter().map(|_| "?".to_string()).collect();
+                         sql.push_str(&format!(" AND f.extension IN ({})", ext_placeholders.join(",")));
+                     }
+                 }
+                 if filter.is_some() {
+                     sql.push_str(" AND f.path LIKE ?");
+                 }
+                 
                  let mut stmt = conn.prepare(&sql)?;
-                 let params: Vec<&dyn ToSql> = chunk.iter().map(|s| s as &dyn ToSql).collect();
+                 let mut params: Vec<&dyn ToSql> = chunk.iter().map(|s| s as &dyn ToSql).collect();
+                 
+                 if let Some(exts) = &extensions {
+                     for ext in exts { params.push(ext); }
+                 }
+                 if let Some(f) = &filter {
+                     params.push(f);
+                 }
+
                  let rows = stmt.query_map(rusqlite::params_from_iter(params), |row| {
                      Ok(json!({
                          "file_path": row.get::<_, String>(0)?,

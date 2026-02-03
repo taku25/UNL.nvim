@@ -162,8 +162,16 @@ function M.get_files_in_module(module_id, cb)
     M.request("GetFilesInModule", { module_id = module_id }, cb)
 end
 
-function M.get_files_in_modules(modules, cb)
-    M.request("GetFilesInModules", { modules = modules }, cb)
+function M.get_files_in_modules(modules, extensions, filter, cb)
+    if type(extensions) == "function" then
+        cb = extensions
+        extensions = nil
+        filter = nil
+    elseif type(filter) == "function" then
+        cb = filter
+        filter = nil
+    end
+    M.request("GetFilesInModules", { modules = modules, extensions = extensions, filter = filter }, cb)
 end
 
 function M.search_files_in_modules(modules, filter, limit, cb)

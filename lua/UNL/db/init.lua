@@ -66,8 +66,16 @@ function M.get_module_by_name(name, callback)
 end
 
 --- モジュール内のファイル一覧を一括取得
-function M.get_files_in_modules(modules, callback)
-    remote.get_files_in_modules(modules, callback)
+function M.get_files_in_modules(modules, extensions, filter, callback)
+    if type(extensions) == "function" then
+        callback = extensions
+        extensions = nil
+        filter = nil
+    elseif type(filter) == "function" then
+        callback = filter
+        filter = nil
+    end
+    remote.get_files_in_modules(modules, extensions, filter, callback)
 end
 
 --- モジュールリスト内からファイルを検索

@@ -181,7 +181,13 @@ pub enum QueryRequest {
     GetModuleIdByName { name: String },
     GetModuleRootPath { name: String },
     GetFilesInModule { module_id: i64 },
-    GetFilesInModules { modules: Vec<String> },
+    GetFilesInModules { 
+        modules: Vec<String>,
+        #[serde(default)]
+        extensions: Option<Vec<String>>,
+        #[serde(default)]
+        filter: Option<String>,
+    },
     SearchFilesInModules { modules: Vec<String>, filter: String, limit: Option<usize> },
     SearchSymbolsInModules { modules: Vec<String>, symbol_type: Option<String>, filter: String, limit: Option<usize> },
     GetDirectoriesInModule { module_id: i64 },
