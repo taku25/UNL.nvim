@@ -256,6 +256,8 @@ struct PingRequest { pid: u32 }
 async fn handle_setup(state: &AppState, params: &Value) -> anyhow::Result<Value> {
     let req: SetupRequest = convert_params(params)?;
     let db_path = req.db_path.clone();
+    let sep = std::path::MAIN_SEPARATOR.to_string();
+    let root_path = PathBuf::from(req.project_root.replace('/', &sep));
     tokio::task::spawn_blocking(move || {
         let conn = rusqlite::Connection::open(&db_path)?;
         unl_core::db::init_db(&conn)?;
@@ -263,7 +265,7 @@ async fn handle_setup(state: &AppState, params: &Value) -> anyhow::Result<Value>
     }).await??;
     {
         let mut projects = state.projects.lock().unwrap();
-        projects.insert(PathBuf::from(&req.project_root), ProjectContext { db_path: req.db_path.clone(), vcs_hash: req.vcs_hash.clone(), _last_refresh: Instant::now() });
+        projects.insert(root_path, ProjectContext { db_path: req.db_path.clone(), vcs_hash: req.vcs_hash.clone(), _last_refresh: Instant::now() });
     }
     let _ = state.save_registry();
     Ok(serde_json::json!({ "status": "ok" }))
@@ -300,7 +302,8 @@ async fn handle_refresh(state: &AppState, params: &Value, tx: mpsc::Sender<Vec<u
 
 async fn handle_watch(state: &AppState, params: &Value) -> anyhow::Result<Value> {
     let req: WatchRequest = convert_params(params)?;
-    let project_root = PathBuf::from(&req.project_root);
+    let sep = std::path::MAIN_SEPARATOR.to_string();
+    let project_root = PathBuf::from(req.project_root.replace('/', &sep));
     let mut watcher = state.watcher.lock().unwrap();
     watcher.watch(&project_root, RecursiveMode::Recursive)?;
     Ok(Value::String("Watch started".to_string()))
@@ -311,9 +314,11 @@ struct ServerQueryRequest { project_root: String, #[serde(flatten)] query: Query
 
 async fn handle_query(state: &AppState, params: &Value) -> anyhow::Result<Value> {
     let req: ServerQueryRequest = convert_params(params)?;
+    let sep = std::path::MAIN_SEPARATOR.to_string();
+    let root_path = PathBuf::from(req.project_root.replace('/', &sep));
     let db_path = {
         let projects = state.projects.lock().unwrap();
-        let ctx = projects.get(&PathBuf::from(&req.project_root)).ok_or_else(|| anyhow::anyhow!("Project not found"))?;
+        let ctx = projects.get(&root_path).ok_or_else(|| anyhow::anyhow!("Project not found"))?;
         ctx.db_path.clone()
     };
     tokio::task::spawn_blocking(move || unl_core::query::process_query(&db_path, req.query)).await?
