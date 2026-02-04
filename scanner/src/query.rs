@@ -325,7 +325,7 @@ pub fn process_query(db_path: &str, req: QueryRequest) -> anyhow::Result<Value> 
                 JOIN members m ON p.id = m.class_id
                 JOIN classes c ON p.id = c.id
                 JOIN files f ON c.file_id = f.id
-                WHERE m.name = ?
+                WHERE m.name = ? AND p.level > 0
                 ORDER BY p.level ASC
                 LIMIT 1"
              )?;
@@ -344,23 +344,28 @@ pub fn process_query(db_path: &str, req: QueryRequest) -> anyhow::Result<Value> 
                  let h_path = data["file_path"].as_str().unwrap();
                  let c_name = data["class_name"].as_str().unwrap();
                  
+                 // ヘッダーのファイル名（拡張子なし）を取得
+                 let h_stem = std::path::Path::new(h_path)
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("");
+
                  // .h に対応する .cpp を探す (同一モジュール内)
-                 // ファイル名が一致する、あるいはクラス名で始まる .cpp を探す
+                 // ヘッダーのファイル名ステムで始まる .cpp を探す
                  let mut stmt_cpp = conn.prepare(
                      "SELECT f.path
                       FROM files f
                       WHERE f.module_id = (SELECT module_id FROM files WHERE path = ?)
                       AND f.extension IN ('cpp', 'c', 'cc')
-                      AND (f.filename = ? OR f.filename LIKE ?)
+                      AND f.filename LIKE ?
                       LIMIT 1"
                  )?;
-                 let target_filename = format!("{}.cpp", c_name);
-                 let target_like = format!("{}%.cpp", c_name);
+                 let target_like = format!("{}%.cpp", h_stem);
                  
-                 let res_cpp = stmt_cpp.query_row(params![h_path, target_filename, target_like], |row| {
+                 let res_cpp = stmt_cpp.query_row(params![h_path, target_like], |row| {
                      Ok(json!({
                          "file_path": row.get::<_, String>(0)?,
-                         "line_number": 0, // あとで Lua 側で検索する
+                         "line_number": 0, // Lua側でパターン検索させる
                          "class_name": c_name,
                      }))
                  }).optional()?;
