@@ -83,6 +83,7 @@ pub struct ClassInfo {
     pub base_classes: Vec<String>,
     pub symbol_type: String,
     pub line: usize,
+    pub end_line: usize,
     #[serde(skip)]
     pub range_start: usize,
     #[serde(skip)]
@@ -199,6 +200,7 @@ pub enum QueryRequest {
     GetModuleDirsByNameAndRoot { name: String, root: String },
     GetClassFilePath { class_name: String },
     GetFileSymbols { file_path: String },
+    ParseBuffer { content: String, file_path: Option<String> },
     UpdateMemberReturnType { class_name: String, member_name: String, return_type: String },
     GetTargetFiles,
     GetAllFilePaths,

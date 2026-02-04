@@ -51,6 +51,7 @@ pub fn init_db(conn: &Connection) -> rusqlite::Result<()> {
             base_class TEXT,
             file_id INTEGER,
             line_number INTEGER,
+            end_line_number INTEGER,
             symbol_type TEXT DEFAULT 'class',
             FOREIGN KEY(file_id) REFERENCES files(id) ON DELETE CASCADE
         )",
@@ -60,6 +61,10 @@ pub fn init_db(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute("CREATE INDEX IF NOT EXISTS idx_classes_base_class ON classes(base_class)", [])?;
     conn.execute("CREATE INDEX IF NOT EXISTS idx_classes_file_id ON classes(file_id)", [])?;
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_classes_unique_name_file ON classes(name, symbol_type, namespace, file_id)", [])?;
+    
+    // Migrations for existing databases
+    let _ = conn.execute("ALTER TABLE classes ADD COLUMN end_line_number INTEGER", []);
+    let _ = conn.execute("ALTER TABLE members ADD COLUMN line_number INTEGER", []);
 
     // 4. Members
     conn.execute(
@@ -160,7 +165,7 @@ pub fn save_to_db(conn: &mut Connection, results: &[ParseResult], reporter: Arc<
         let tx = conn.transaction()?;
         {
             let mut stmt_file = tx.prepare("INSERT OR REPLACE INTO files (path, filename, extension, mtime, file_hash, module_id, is_header) VALUES (?, ?, ?, ?, ?, ?, ?)")?;
-            let mut stmt_class = tx.prepare("INSERT OR IGNORE INTO classes (name, namespace, base_class, file_id, line_number, symbol_type) VALUES (?, ?, ?, ?, ?, ?)")?;
+            let mut stmt_class = tx.prepare("INSERT OR IGNORE INTO classes (name, namespace, base_class, file_id, line_number, symbol_type, end_line_number) VALUES (?, ?, ?, ?, ?, ?, ?)")?;
             let mut stmt_class_id = tx.prepare("SELECT id FROM classes WHERE name = ? AND file_id = ? LIMIT 1")?;
             let mut stmt_inheritance = tx.prepare("INSERT INTO inheritance (child_id, parent_name) VALUES (?, ?)")?;
             let mut stmt_enum = tx.prepare("INSERT INTO enum_values (enum_id, name) VALUES (?, ?)")?;
@@ -198,7 +203,7 @@ pub fn save_to_db(conn: &mut Connection, results: &[ParseResult], reporter: Arc<
 
                     for cls in &data.classes {
                         let _ = stmt_class.execute(params![
-                            cls.class_name, cls.namespace, cls.base_classes.first(), file_id, cls.line as i64, cls.symbol_type
+                            cls.class_name, cls.namespace, cls.base_classes.first(), file_id, cls.line as i64, cls.symbol_type, cls.end_line as i64
                         ]);
                         
                         let class_id_res: rusqlite::Result<i64> = stmt_class_id.query_row(

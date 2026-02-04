@@ -76,16 +76,8 @@ function M.get_module_by_name(name, callback)
 end
 
 --- モジュール内のファイル一覧を一括取得
-function M.get_files_in_modules(modules, extensions, filter, callback)
-    if type(extensions) == "function" then
-        callback = extensions
-        extensions = nil
-        filter = nil
-    elseif type(filter) == "function" then
-        callback = filter
-        filter = nil
-    end
-    remote.get_files_in_modules(modules, extensions, filter, callback)
+function M.get_files_in_modules(modules, callback)
+    remote.get_files_in_modules(modules, callback)
 end
 
 --- モジュールリスト内からファイルを検索
@@ -118,11 +110,6 @@ function M.get_class_file_path(class_name, callback)
     remote.get_class_file_path(class_name, callback)
 end
 
---- 指定したファイルの全シンボルを取得
-function M.get_file_symbols(file_path, callback)
-    remote.get_file_symbols(file_path, callback)
-end
-
 --- クラス名の前方一致検索
 function M.search_classes_prefix(prefix, limit, callback)
     remote.search_classes_prefix(prefix, limit, callback)
@@ -141,6 +128,16 @@ end
 --- *.Target.cs ファイルの一覧を取得
 function M.get_target_files(callback)
     remote.get_target_files(callback)
+end
+
+--- 指定したファイルのシンボル情報を取得
+function M.get_file_symbols(file_path, callback)
+    remote.get_file_symbols(file_path, callback)
+end
+
+--- 現在のバッファの内容をサーバーで解析する
+function M.parse_buffer(bufnr, callback)
+    remote.parse_buffer(bufnr, callback)
 end
 
 --- メンバーの戻り値型を更新 (書き込み操作)

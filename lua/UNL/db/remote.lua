@@ -211,12 +211,24 @@ function M.get_class_file_path(class_name, cb)
 end
 
 function M.get_file_symbols(file_path, cb)
-    if not file_path or file_path == "" then
-        log.error("get_file_symbols: file_path is missing or empty")
-        if cb then cb(nil, "file_path is missing") end
+    M.request("GetFileSymbols", { file_path = file_path }, cb)
+end
+
+function M.parse_buffer(bufnr, cb)
+    bufnr = bufnr or vim.api.nvim_get_current_buf()
+    if not vim.api.nvim_buf_is_valid(bufnr) then
+        if cb then cb(nil, "Invalid buffer") end
         return
     end
-    M.request("GetFileSymbols", { file_path = file_path }, cb)
+
+    local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+    local content = table.concat(lines, "\n")
+    local file_path = vim.api.nvim_buf_get_name(bufnr)
+
+    M.request("ParseBuffer", {
+        content = content,
+        file_path = (file_path ~= "") and file_path or nil
+    }, cb)
 end
 
 function M.update_member_return_type(class_name, member_name, return_type, cb)

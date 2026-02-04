@@ -53,9 +53,20 @@ pub fn process_file(input: &InputFile, language: &tree_sitter::Language, query: 
         }
     }
 
+    let classes = parse_content(&content, &input.path, language, query)?;
+
+    Ok(ParseResult {
+        path: input.path.clone(), status: "parsed".to_string(), mtime: input.mtime,
+        data: Some(ParseData { classes, parser: "treesitter".to_string(), new_hash }),
+        module_id: input.module_id,
+    })
+}
+
+pub fn parse_content(content: &str, _path: &str, language: &tree_sitter::Language, query: &Query) -> anyhow::Result<Vec<ClassInfo>> {
+    let content_bytes = content.as_bytes();
     let mut parser = Parser::new();
     parser.set_language(&language).unwrap();
-    let tree = parser.parse(&content, None).ok_or(anyhow::anyhow!("Parse failed"))?;
+    let tree = parser.parse(content, None).ok_or(anyhow::anyhow!("Parse failed"))?;
     let root = tree.root_node();
     
     let mut cursor = QueryCursor::new();
@@ -112,6 +123,7 @@ pub fn process_file(input: &InputFile, language: &tree_sitter::Language, query: 
                             base_classes: Vec::new(),
                             symbol_type: symbol_type.to_string(),
                             line: node.start_position().row + 1,
+                            end_line: parent.end_position().row + 1,
                             range_start,
                             range_end,
                             members: Vec::new(),
@@ -172,6 +184,7 @@ pub fn process_file(input: &InputFile, language: &tree_sitter::Language, query: 
                                     base_classes: vec![macro_type_str.to_string()],
                                     symbol_type: "struct".to_string(),
                                     line: node.start_position().row + 1,
+                                    end_line: current.end_position().row + 1,
                                     range_start: current.start_byte(),
                                     range_end: current.end_byte(),
                                     members: Vec::new(),
@@ -196,7 +209,9 @@ pub fn process_file(input: &InputFile, language: &tree_sitter::Language, query: 
                      if !name.is_empty() && !target_type.is_empty() && name != target_type {
                          classes.push(ClassInfo {
                             class_name: name, namespace, base_classes: vec![target_type], symbol_type: "typedef".to_string(),
-                            line: node.start_position().row + 1, range_start: node.start_byte(), range_end: node.end_byte(),
+                            line: node.start_position().row + 1, 
+                            end_line: node.end_position().row + 1,
+                            range_start: node.start_byte(), range_end: node.end_byte(),
                             members: Vec::new(), is_final: false, is_interface: false,
                          });
                      }
@@ -215,7 +230,9 @@ pub fn process_file(input: &InputFile, language: &tree_sitter::Language, query: 
                          if !name.is_empty() && !target_type.is_empty() && name != target_type {
                              classes.push(ClassInfo {
                                 class_name: name, namespace, base_classes: vec![target_type], symbol_type: "typedef".to_string(),
-                                line: node.start_position().row + 1, range_start: node.start_byte(), range_end: node.end_byte(),
+                                line: node.start_position().row + 1, 
+                                end_line: node.end_position().row + 1,
+                                range_start: node.start_byte(), range_end: node.end_byte(),
                                 members: Vec::new(), is_final: false, is_interface: false,
                              });
                          }
@@ -238,12 +255,10 @@ pub fn process_file(input: &InputFile, language: &tree_sitter::Language, query: 
         } else if *capture_name == "func_node" || *capture_name == "decl_node" || *capture_name == "ufunc_node" || *capture_name == "field_node" {
             let definition_node = node;
             
-            // Extract member name and scope
             let mut member_name = String::new();
             let mut scope_name = None;
             let mut is_function = *capture_name == "func_node" || *capture_name == "ufunc_node";
             
-            // Traverse to find name and scope
             if let Some(declarator) = find_declarator_node(definition_node) {
                 let mut current = declarator;
                 loop {
@@ -295,7 +310,6 @@ pub fn process_file(input: &InputFile, language: &tree_sitter::Language, query: 
                 is_function = false;
             }
             
-            // Access specifier check
             let mut curr = definition_node;
             while let Some(parent) = curr.parent() {
                 let pk = parent.kind();
@@ -321,7 +335,6 @@ pub fn process_file(input: &InputFile, language: &tree_sitter::Language, query: 
             let mut return_type = None;
             let mem_type = if is_function { "function" } else { "property" };
 
-            // Return type extraction
             if let Some(idx) = node_text.find(&member_name) {
                 let prefix = &node_text[..idx];
                 let mut actual_prefix = prefix;
@@ -329,15 +342,12 @@ pub fn process_file(input: &InputFile, language: &tree_sitter::Language, query: 
                     actual_prefix = &prefix[macro_end+1..];
                 }
                 let mut cleaned = clean_type_string(actual_prefix);
-                
-                // Strip class scope from out-of-line definitions (e.g., "bool MyClass::" -> "bool")
                 if let Some(sn) = &scope_name {
                     let scope_marker = format!("{}::", sn);
                     if let Some(s_idx) = cleaned.find(&scope_marker) {
                         cleaned = cleaned[..s_idx].trim().to_string();
                     }
                 }
-
                 if !cleaned.is_empty() { return_type = Some(cleaned); }
             }
 
@@ -365,11 +375,12 @@ pub fn process_file(input: &InputFile, language: &tree_sitter::Language, query: 
                     let idx = if let Some(i) = found_idx { i } else {
                         classes.push(ClassInfo {
                             class_name: sn.clone(), namespace: None, base_classes: Vec::new(), symbol_type: "class".to_string(),
-                            line: 1, range_start: 0, range_end: 0, members: Vec::new(), is_final: false, is_interface: false,
+                            line: 1, 
+                            end_line: 1,
+                            range_start: 0, range_end: 0, members: Vec::new(), is_final: false, is_interface: false,
                         });
                         classes.len() - 1
                     };
-                    
                     member.access = "impl".to_string();
                     classes[idx].members.push(member);
                 } else {
@@ -403,12 +414,8 @@ pub fn process_file(input: &InputFile, language: &tree_sitter::Language, query: 
         }
         if let Some(idx) = best_class_idx { classes[idx].members.push(member); }
     }
-
-    Ok(ParseResult {
-        path: input.path.clone(), status: "parsed".to_string(), mtime: input.mtime,
-        data: Some(ParseData { classes, parser: "treesitter".to_string(), new_hash }),
-        module_id: input.module_id,
-    })
+    
+    Ok(classes)
 }
 
 // --- Internal Helpers ---

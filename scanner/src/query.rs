@@ -1010,13 +1010,21 @@ pub fn process_query(db_path: &str, req: QueryRequest) -> anyhow::Result<Value> 
              Ok(json!(res))
         },
         QueryRequest::GetFileSymbols { file_path } => {
+            let normalized_path = if std::path::MAIN_SEPARATOR == '\\' {
+                file_path.replace('\\', "/")
+            } else {
+                file_path.clone()
+            };
             // 1. Get all classes/structs/enums in this file
             let mut stmt = conn.prepare(
-                "SELECT c.id, c.name, c.symbol_type, c.line_number, c.namespace, c.base_class
-                 FROM classes c JOIN files f ON c.file_id = f.id
-                 WHERE f.path = ?"
+                "SELECT c.id, c.name, c.symbol_type, c.line_number, c.namespace, c.base_class, c.end_line_number, 
+                        m.name as module_name, m.root_path as module_root
+                 FROM classes c 
+                 JOIN files f ON c.file_id = f.id
+                 LEFT JOIN modules m ON f.module_id = m.id
+                 WHERE LOWER(f.path) = LOWER(?)"
             )?;
-            let class_rows = stmt.query_map([&file_path], |row| {
+            let class_rows = stmt.query_map([&normalized_path], |row| {
                 Ok((
                     row.get::<_, i64>(0)?,    // id
                     row.get::<_, String>(1)?, // name
@@ -1024,14 +1032,16 @@ pub fn process_query(db_path: &str, req: QueryRequest) -> anyhow::Result<Value> 
                     row.get::<_, i64>(3)?,    // line
                     row.get::<_, Option<String>>(4)?, // namespace
                     row.get::<_, Option<String>>(5)?, // base
+                    row.get::<_, Option<i64>>(6)?,    // end_line
+                    row.get::<_, Option<String>>(7)?, // module_name
+                    row.get::<_, Option<String>>(8)?, // module_root
                 ))
             })?;
 
             let mut results = Vec::new();
             for r in class_rows {
-                let (cid, cname, ctype, cline, cns, cbase) = r?;
+                let (cid, cname, ctype, cline, cns, cbase, cend, mname, mroot) = r?;
                 
-                // kind を UI が期待するキャメルケースに変換
                 let mapped_class_kind = match ctype.as_str() {
                     "UCLASS" | "class" => "UClass",
                     "USTRUCT" | "struct" => "UStruct",
@@ -1043,9 +1053,12 @@ pub fn process_query(db_path: &str, req: QueryRequest) -> anyhow::Result<Value> 
                     "name": cname,
                     "kind": mapped_class_kind,
                     "line": cline,
+                    "end_line": cend.unwrap_or(cline),
                     "namespace": cns,
                     "base_class": cbase,
                     "file_path": file_path,
+                    "module_name": mname,
+                    "module_root": mroot,
                     "fields": { "public": [], "protected": [], "private": [] },
                     "methods": { "public": [], "protected": [], "private": [] }
                 });
@@ -1118,6 +1131,94 @@ pub fn process_query(db_path: &str, req: QueryRequest) -> anyhow::Result<Value> 
                 results.push(class_info);
             }
             Ok(json!(results))
+        },
+        QueryRequest::ParseBuffer { content, file_path } => {
+            let path = file_path.map(|p| {
+                if std::path::MAIN_SEPARATOR == '\\' {
+                    p.replace('\\', "/")
+                } else {
+                    p
+                }
+            }).unwrap_or_else(|| "buffer.cpp".to_string());
+            let language: tree_sitter::Language = tree_sitter_unreal_cpp::LANGUAGE.into();
+            let query = tree_sitter::Query::new(&language, crate::scanner::QUERY_STR)?;
+            
+            // 1. シンボル解析 (scanner.rs のロジックを使用)
+            let classes = crate::scanner::parse_content(&content, &path, &language, &query)?;
+            
+            // UIが期待する構造に変換 (GetFileSymbols と同等)
+            let mut results = Vec::new();
+            for cls in classes {
+                let mapped_class_kind = match cls.symbol_type.as_str() {
+                    "UCLASS" | "class" => "UClass",
+                    "USTRUCT" | "struct" => "UStruct",
+                    "UENUM" | "enum" => "UEnum",
+                    _ => &cls.symbol_type,
+                };
+
+                let mut class_info = json!({
+                    "name": cls.class_name,
+                    "kind": mapped_class_kind,
+                    "line": cls.line,
+                    "end_line": cls.end_line,
+                    "namespace": cls.namespace,
+                    "base_class": cls.base_classes.first(),
+                    "file_path": path,
+                    "fields": { "public": [], "protected": [], "private": [] },
+                    "methods": { "public": [], "protected": [], "private": [] }
+                });
+
+                for m in cls.members {
+                    let access = m.access.to_lowercase();
+                    let flags_str = m.flags.clone();
+                    let mapped_kind = if m.mem_type == "function" {
+                        if flags_str.contains("UFUNCTION") { "UFunction" } else { "Function" }
+                    } else if m.mem_type == "property" || m.mem_type == "variable" {
+                        if flags_str.contains("UPROPERTY") { "UProperty" } else { "Field" }
+                    } else if m.mem_type == "enum_item" {
+                        "EnumItem"
+                    } else {
+                        &m.mem_type
+                    };
+
+                    let m_json = json!({
+                        "name": m.name,
+                        "kind": mapped_kind,
+                        "flags": m.flags,
+                        "access": m.access,
+                        "detail": m.detail,
+                        "return_type": m.return_type,
+                        "file_path": path,
+                        "line": m.line,
+                    });
+
+                    let target_map = if mapped_kind.to_lowercase().contains("function") { "methods" } else { "fields" };
+                    if let Some(target) = class_info[target_map].as_object_mut() {
+                        target.entry(access).or_insert(json!([])).as_array_mut().unwrap().push(m_json);
+                    }
+                }
+                results.push(class_info);
+            }
+
+            // 2. インクルード位置解析
+            let mut generated_h_line = 0;
+            let mut last_include_line = 0;
+            for (i, line) in content.lines().enumerate() {
+                if line.contains(".generated.h") {
+                    generated_h_line = i + 1;
+                }
+                if line.trim().starts_with("#include") {
+                    last_include_line = i + 1;
+                }
+            }
+
+            Ok(json!({
+                "symbols": results,
+                "metadata": {
+                    "generated_h_line": generated_h_line,
+                    "last_include_line": last_include_line,
+                }
+            }))
         },
         QueryRequest::UpdateMemberReturnType { class_name, member_name, return_type } => {
              let mut stmt = conn.prepare(
