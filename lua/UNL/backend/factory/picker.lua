@@ -54,12 +54,12 @@ function M.run_with_fallback(opts)
     local provider = opts.registry.get(provider_name)
     
     if provider and provider.available and provider.available() then
-      log.info("%s: Attempting to use provider '%s'...", opts.picker_type_name, provider_name)
+      log.debug("%s: Attempting to use provider '%s'...", opts.picker_type_name, provider_name)
       
       local ok, err = pcall(provider.run, opts.spec)
       
       if ok then
-        log.info("%s: Provider '%s' executed successfully.", opts.picker_type_name, provider_name)
+        log.debug("%s: Provider '%s' executed successfully.", opts.picker_type_name, provider_name)
         success = true
         break
       else
