@@ -82,6 +82,14 @@ function M.get_recursive_parent_classes(child_class, cb)
     M.request("GetRecursiveParentClasses", { child_class = child_class }, cb)
 end
 
+function M.find_symbol_in_inheritance_chain(class_name, symbol_name, mode, cb)
+    M.request("FindSymbolInInheritanceChain", { class_name = class_name, symbol_name = symbol_name, mode = mode }, cb)
+end
+
+function M.get_virtual_functions_in_inheritance_chain(class_name, cb)
+    M.request("GetVirtualFunctionsInInheritanceChain", { class_name = class_name }, cb)
+end
+
 function M.get_program_files(cb)
     M.request("GetProgramFiles", {}, cb)
 end

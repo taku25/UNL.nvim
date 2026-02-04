@@ -305,6 +305,109 @@ pub fn process_query(db_path: &str, req: QueryRequest) -> anyhow::Result<Value> 
              let res: Result<Vec<Value>, _> = rows.collect();
              Ok(json!(res?))
         },
+        QueryRequest::FindSymbolInInheritanceChain { class_name, symbol_name, mode } => {
+             let is_impl = mode.unwrap_or_default() == "implementation";
+             
+             // 1. 継承チェーン内のクラスを近い順に取得
+             // 2. 各クラスのメンバから symbol_name を探す
+             // 3. 最初に見つかったものを返す
+             let mut stmt = conn.prepare(
+                "WITH RECURSIVE parents_cte AS (
+                  SELECT id, name, 0 as level FROM classes WHERE name = ?
+                  UNION
+                  SELECT p.id, p.name, pc.level + 1
+                  FROM classes p
+                  JOIN inheritance i ON p.name = i.parent_name
+                  JOIN parents_cte pc ON i.child_id = pc.id
+                )
+                SELECT f.path, m.line_number, p.name as class_name
+                FROM parents_cte p
+                JOIN members m ON p.id = m.class_id
+                JOIN classes c ON p.id = c.id
+                JOIN files f ON c.file_id = f.id
+                WHERE m.name = ?
+                ORDER BY p.level ASC
+                LIMIT 1"
+             )?;
+             
+             let res = stmt.query_row(params![class_name, symbol_name], |row| {
+                 Ok(json!({
+                     "file_path": row.get::<_, String>(0)?,
+                     "line_number": row.get::<_, i64>(1)?,
+                     "class_name": row.get::<_, String>(2)?,
+                 }))
+             }).optional()?;
+
+             // もし実装(.cpp)を求めている場合
+             if is_impl && res.is_some() {
+                 let data = res.as_ref().unwrap();
+                 let h_path = data["file_path"].as_str().unwrap();
+                 let c_name = data["class_name"].as_str().unwrap();
+                 
+                 // .h に対応する .cpp を探す (同一モジュール内)
+                 // ファイル名が一致する、あるいはクラス名で始まる .cpp を探す
+                 let mut stmt_cpp = conn.prepare(
+                     "SELECT f.path
+                      FROM files f
+                      WHERE f.module_id = (SELECT module_id FROM files WHERE path = ?)
+                      AND f.extension IN ('cpp', 'c', 'cc')
+                      AND (f.filename = ? OR f.filename LIKE ?)
+                      LIMIT 1"
+                 )?;
+                 let target_filename = format!("{}.cpp", c_name);
+                 let target_like = format!("{}%.cpp", c_name);
+                 
+                 let res_cpp = stmt_cpp.query_row(params![h_path, target_filename, target_like], |row| {
+                     Ok(json!({
+                         "file_path": row.get::<_, String>(0)?,
+                         "line_number": 0, // あとで Lua 側で検索する
+                         "class_name": c_name,
+                     }))
+                 }).optional()?;
+                 
+                 if res_cpp.is_some() {
+                     return Ok(json!(res_cpp));
+                 }
+             }
+
+             Ok(json!(res))
+        },
+        QueryRequest::GetVirtualFunctionsInInheritanceChain { class_name } => {
+             let mut stmt = conn.prepare(
+                "WITH RECURSIVE parents_cte AS (
+                  SELECT id, name, 0 as level FROM classes WHERE name = ?
+                  UNION
+                  SELECT p.id, p.name, pc.level + 1
+                  FROM classes p
+                  JOIN inheritance i ON p.name = i.parent_name
+                  JOIN parents_cte pc ON i.child_id = pc.id
+                )
+                SELECT m.name, m.type, m.flags, m.return_type, m.detail, m.line_number, f.path, p.name as class_name
+                FROM parents_cte p
+                JOIN members m ON p.id = m.class_id
+                JOIN classes c ON p.id = c.id
+                JOIN files f ON c.file_id = f.id
+                WHERE m.flags LIKE '%virtual%'
+                ORDER BY p.level ASC, m.name ASC"
+             )?;
+             
+             let rows = stmt.query_map([class_name], |row| {
+                 Ok(json!({
+                     "name": row.get::<_, String>(0)?,
+                     "kind": row.get::<_, String>(1)?,
+                     "flags": row.get::<_, Option<String>>(2)?,
+                     "return_type": row.get::<_, Option<String>>(3)?,
+                     "params": row.get::<_, Option<String>>(4)?,
+                     "line": row.get::<_, i64>(5)?,
+                     "file_path": row.get::<_, String>(6)?,
+                     "declared_in": row.get::<_, String>(7)?,
+                     "is_virtual": true,
+                 }))
+             })?;
+             
+             let res: Result<Vec<Value>, _> = rows.collect();
+             Ok(json!(res?))
+        },
         QueryRequest::GetProgramFiles => {
              let mut stmt = conn.prepare(
                 "SELECT f.path, m.name, m.root_path
@@ -345,13 +448,35 @@ pub fn process_query(db_path: &str, req: QueryRequest) -> anyhow::Result<Value> 
                  JOIN modules m ON f.module_id = m.id
                  WHERE m.name = ? AND c.name = ? LIMIT 1"
              )?;
-             let res = stmt.query_row([module, symbol], |row| {
+             let res = stmt.query_row([&module, &symbol], |row| {
                  Ok(json!({
                      "file_path": row.get::<_, String>(0)?,
                      "line_number": row.get::<_, i64>(1)?,
                  }))
              }).optional()?;
-             Ok(json!(res))
+             
+             if let Some(r) = res {
+                 return Ok(json!(r));
+             }
+
+             // Fallback to members search
+             let mut stmt_mem = conn.prepare(
+                "SELECT f.path, mem.line_number
+                 FROM members mem
+                 JOIN classes c ON mem.class_id = c.id
+                 JOIN files f ON c.file_id = f.id
+                 JOIN modules m ON f.module_id = m.id
+                 WHERE m.name = ? AND mem.name = ? LIMIT 1"
+             )?;
+             
+             let res_mem = stmt_mem.query_row([&module, &symbol], |row| {
+                 Ok(json!({
+                     "file_path": row.get::<_, String>(0)?,
+                     "line_number": row.get::<_, i64>(1)?,
+                 }))
+             }).optional()?;
+             
+             Ok(json!(res_mem))
         },
         QueryRequest::FindClassByName { name } => {
              let mut stmt = conn.prepare(

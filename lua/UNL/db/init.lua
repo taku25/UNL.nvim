@@ -50,6 +50,16 @@ function M.get_inheritance_chain(child_class, callback)
     remote.get_recursive_parent_classes(child_class, callback)
 end
 
+--- 継承チェーンからシンボルを検索
+function M.find_symbol_in_inheritance_chain(class_name, symbol_name, mode, callback)
+    remote.find_symbol_in_inheritance_chain(class_name, symbol_name, mode, callback)
+end
+
+--- 継承チェーンから仮想関数一覧を取得
+function M.get_virtual_functions_in_inheritance_chain(class_name, callback)
+    remote.get_virtual_functions_in_inheritance_chain(class_name, callback)
+end
+
 --- プロジェクトのコンポーネント一覧を取得
 function M.get_components(callback)
     remote.get_components(callback)

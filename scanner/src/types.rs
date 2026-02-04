@@ -163,6 +163,8 @@ pub enum QueryRequest {
     GetClassesInModules { modules: Vec<String>, #[serde(default)] symbol_type: Option<String> },
     GetRecursiveDerivedClasses { base_class: String },
     GetRecursiveParentClasses { child_class: String },
+    FindSymbolInInheritanceChain { class_name: String, symbol_name: String, #[serde(default)] mode: Option<String> },
+    GetVirtualFunctionsInInheritanceChain { class_name: String },
     GetProgramFiles,
     GetAllIniFiles,
     FindSymbolInModule { module: String, symbol: String },
