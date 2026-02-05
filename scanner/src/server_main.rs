@@ -104,19 +104,22 @@ impl AppState {
         tokio::task::spawn_blocking(move || {
             let start = Instant::now();
             let conn = conn_for_warmup.lock().unwrap();
-            info!("Shadow warm-up started...");
+            info!("Shadow warm-up (aggressive) started...");
             
-            // Scan major tables. We don't care about results, just force reading from disk.
-            let _ = conn.query_row("SELECT count(*) FROM classes", [], |_| Ok(()));
-            let _ = conn.query_row("SELECT count(*) FROM inheritance", [], |_| Ok(()));
-            let _ = conn.query_row("SELECT count(*) FROM members", [], |_| Ok(()));
-            let _ = conn.query_row("SELECT count(*) FROM files", [], |_| Ok(()));
-            let _ = conn.query_row("SELECT count(*) FROM modules", [], |_| Ok(()));
+            // Force reading the actual data of major columns to fill cache/mmap
+            // Also perform a full join scan to warm up indexes used in common queries like 'UEP files'
+            let _ = conn.query_row(
+                "SELECT SUM(LENGTH(c.name) + LENGTH(f.path) + LENGTH(m.name)) 
+                 FROM classes c 
+                 JOIN files f ON c.file_id = f.id 
+                 JOIN modules m ON f.module_id = m.id", 
+                [], |_| Ok(())
+            );
             
-            // If we want even more deep caching, we could scan indexes too, 
-            // but count(*) on these tables usually touches the primary index/data pages.
+            let _ = conn.query_row("SELECT SUM(LENGTH(name) + LENGTH(COALESCE(detail, ''))) FROM members", [], |_| Ok(()));
+            let _ = conn.query_row("SELECT SUM(LENGTH(parent_name)) FROM inheritance", [], |_| Ok(()));
             
-            info!("Shadow warm-up completed in {:?}.", start.elapsed());
+            info!("Shadow warm-up (aggressive) completed in {:?}.", start.elapsed());
         });
 
         conns.insert(db_path_native.to_string(), Arc::clone(&conn_arc));

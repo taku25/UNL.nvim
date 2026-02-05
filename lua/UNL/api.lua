@@ -8,6 +8,8 @@ local cmd_cleanup = require("UNL.cmd.cleanup")
 local cmd_status = require("UNL.cmd.status")
 local cmd_cd = require("UNL.cmd.cd")
 local cmd_delete = require("UNL.cmd.delete")
+local cmd_stop = require("UNL.cmd.stop")
+local cmd_restart = require("UNL.cmd.restart")
 
 local M = {}
 
@@ -60,6 +62,8 @@ function M.cleanup(opts) cmd_cleanup.execute(opts) end
 function M.server_status(opts) cmd_status.execute(opts) end
 function M.cd(opts) cmd_cd.execute(opts) end
 function M.delete(opts) cmd_delete.execute(opts) end
+function M.stop(opts) cmd_stop.execute(opts) end
+function M.restart(opts) cmd_restart.execute(opts) end
 
 function M.register_client()
   require("UNL.scanner.server").register_self()

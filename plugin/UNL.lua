@@ -70,6 +70,16 @@ builder.create({
       desc = "Delete a project from the UNL registry.",
       args = {},
     },
+    ["stop"] = {
+      handler = api.stop,
+      desc = "Stop the UNL scanner server.",
+      args = {},
+    },
+    ["restart"] = {
+      handler = api.restart,
+      desc = "Restart the UNL scanner server.",
+      args = {},
+    },
     -- (将来、ここに :UNL clear_cache のようなコマンドが追加されるかもしれませんね)
   },
 })
