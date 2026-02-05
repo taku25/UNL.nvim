@@ -87,6 +87,7 @@ pub fn init_db(conn: &Connection) -> rusqlite::Result<()> {
     
     conn.execute("CREATE INDEX IF NOT EXISTS idx_members_name ON members(name)", [])?;
     conn.execute("CREATE INDEX IF NOT EXISTS idx_members_class_id ON members(class_id)", [])?;
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_members_unique ON members(class_id, name, type, line_number)", [])?;
 
     // 5. Enum Values
     conn.execute(
@@ -99,6 +100,7 @@ pub fn init_db(conn: &Connection) -> rusqlite::Result<()> {
         [],
     )?;
     conn.execute("CREATE INDEX IF NOT EXISTS idx_enum_values_id ON enum_values(enum_id)", [])?;
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_enum_values_unique ON enum_values(enum_id, name)", [])?;
 
     // 6. Inheritance
     conn.execute(
@@ -112,6 +114,7 @@ pub fn init_db(conn: &Connection) -> rusqlite::Result<()> {
     )?;
     conn.execute("CREATE INDEX IF NOT EXISTS idx_inheritance_child ON inheritance(child_id)", [])?;
     conn.execute("CREATE INDEX IF NOT EXISTS idx_inheritance_parent ON inheritance(parent_name)", [])?;
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_inheritance_unique ON inheritance(child_id, parent_name)", [])?;
 
     // 7. Project Meta
     conn.execute(
@@ -147,7 +150,7 @@ pub fn save_to_db(conn: &mut Connection, results: &[ParseResult], reporter: Arc<
     conn.busy_timeout(std::time::Duration::from_millis(30000))?;
     let _ = conn.pragma_update(None, "journal_mode", "WAL");
     let _ = conn.pragma_update(None, "synchronous", "OFF"); // Max speed during bulk
-    let _ = conn.pragma_update(None, "cache_size", "-200000"); // 200MB cache
+    let _ = conn.pragma_update(None, "cache_size", "-800000"); // 800MB cache
     let _ = conn.pragma_update(None, "temp_store", "MEMORY");
     
     conn.execute("PRAGMA foreign_keys = ON", [])?; // Must be ON for CASCADE
@@ -167,9 +170,9 @@ pub fn save_to_db(conn: &mut Connection, results: &[ParseResult], reporter: Arc<
             let mut stmt_file = tx.prepare("INSERT OR REPLACE INTO files (path, filename, extension, mtime, file_hash, module_id, is_header) VALUES (?, ?, ?, ?, ?, ?, ?)")?;
             let mut stmt_class = tx.prepare("INSERT OR IGNORE INTO classes (name, namespace, base_class, file_id, line_number, symbol_type, end_line_number) VALUES (?, ?, ?, ?, ?, ?, ?)")?;
             let mut stmt_class_id = tx.prepare("SELECT id FROM classes WHERE name = ? AND file_id = ? LIMIT 1")?;
-            let mut stmt_inheritance = tx.prepare("INSERT INTO inheritance (child_id, parent_name) VALUES (?, ?)")?;
-            let mut stmt_enum = tx.prepare("INSERT INTO enum_values (enum_id, name) VALUES (?, ?)")?;
-            let mut stmt_member = tx.prepare("INSERT INTO members (class_id, name, type, flags, access, detail, return_type, is_static, line_number) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")?;
+            let mut stmt_inheritance = tx.prepare("INSERT OR IGNORE INTO inheritance (child_id, parent_name) VALUES (?, ?)")?;
+            let mut stmt_enum = tx.prepare("INSERT OR IGNORE INTO enum_values (enum_id, name) VALUES (?, ?)")?;
+            let mut stmt_member = tx.prepare("INSERT OR IGNORE INTO members (class_id, name, type, flags, access, detail, return_type, is_static, line_number) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")?;
 
             for (i, result) in batch.iter().enumerate() {
                 let global_i = current_idx + i;
@@ -248,8 +251,7 @@ pub fn save_to_db(conn: &mut Connection, results: &[ParseResult], reporter: Arc<
     Ok(())
 }
 
-pub fn get_module_id_for_path(db_path: &str, file_path: &str) -> anyhow::Result<Option<i64>> {
-    let conn = Connection::open(db_path)?;
+pub fn get_module_id_for_path(conn: &Connection, file_path: &str) -> anyhow::Result<Option<i64>> {
     let mut stmt = conn.prepare(
         "SELECT id, root_path FROM modules ORDER BY length(root_path) DESC"
     )?;

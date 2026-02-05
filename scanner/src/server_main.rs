@@ -48,6 +48,7 @@ struct ProjectContext {
 
 struct AppState {
     projects: Mutex<HashMap<PathBuf, ProjectContext>>,
+    connections: Mutex<HashMap<String, Arc<Mutex<rusqlite::Connection>>>>,
     watcher: Mutex<notify::RecommendedWatcher>,
     registry_path: Option<PathBuf>,
     active_clients: Mutex<HashSet<u32>>,
@@ -76,6 +77,51 @@ impl AppState {
         }
         *self.last_activity.lock().unwrap() = Instant::now();
     }
+
+    fn get_connection(&self, db_path_native: &str) -> anyhow::Result<Arc<Mutex<rusqlite::Connection>>> {
+        let mut conns = self.connections.lock().unwrap();
+        if let Some(conn) = conns.get(db_path_native) {
+            return Ok(Arc::clone(conn));
+        }
+
+        info!("Opening new database connection: {}", db_path_native);
+        let conn = rusqlite::Connection::open(db_path_native)?;
+        
+        // Performance tuning for queries
+        let _ = conn.pragma_update(None, "journal_mode", "WAL");
+        let _ = conn.pragma_update(None, "synchronous", "NORMAL");
+        let _ = conn.pragma_update(None, "cache_size", "-800000"); // 800MB cache
+        let _ = conn.pragma_update(None, "mmap_size", "1073741824"); // 1GB mmap
+        let _ = conn.pragma_update(None, "temp_store", "MEMORY");
+        
+        // Warm up: read schema
+        let _ = conn.query_row("SELECT count(*) FROM sqlite_master", [], |_| Ok(()));
+
+        let conn_arc = Arc::new(Mutex::new(conn));
+        
+        // Shadow Warm-up in background: scan all tables to fill page cache / mmap
+        let conn_for_warmup = Arc::clone(&conn_arc);
+        tokio::task::spawn_blocking(move || {
+            let start = Instant::now();
+            let conn = conn_for_warmup.lock().unwrap();
+            info!("Shadow warm-up started...");
+            
+            // Scan major tables. We don't care about results, just force reading from disk.
+            let _ = conn.query_row("SELECT count(*) FROM classes", [], |_| Ok(()));
+            let _ = conn.query_row("SELECT count(*) FROM inheritance", [], |_| Ok(()));
+            let _ = conn.query_row("SELECT count(*) FROM members", [], |_| Ok(()));
+            let _ = conn.query_row("SELECT count(*) FROM files", [], |_| Ok(()));
+            let _ = conn.query_row("SELECT count(*) FROM modules", [], |_| Ok(()));
+            
+            // If we want even more deep caching, we could scan indexes too, 
+            // but count(*) on these tables usually touches the primary index/data pages.
+            
+            info!("Shadow warm-up completed in {:?}.", start.elapsed());
+        });
+
+        conns.insert(db_path_native.to_string(), Arc::clone(&conn_arc));
+        Ok(conn_arc)
+    }
 }
 
 #[tokio::main]
@@ -100,6 +146,7 @@ async fn main() -> anyhow::Result<()> {
     let initial_projects = registry_path.as_ref().map(|p| AppState::load_registry(p)).unwrap_or_default();
     let state = Arc::new(AppState {
         projects: Mutex::new(initial_projects),
+        connections: Mutex::new(HashMap::new()),
         watcher: Mutex::new(watcher),
         registry_path,
         active_clients: Mutex::new(HashSet::new()),
@@ -109,7 +156,14 @@ async fn main() -> anyhow::Result<()> {
     {
         let projects = state.projects.lock().unwrap();
         let mut watcher = state.watcher.lock().unwrap();
-        for root in projects.keys() { let _ = watcher.watch(root, RecursiveMode::Recursive); }
+        for (root, ctx) in projects.iter() {
+            let _ = watcher.watch(root, RecursiveMode::Recursive);
+            let db_path_native = normalize_to_native(&ctx.db_path);
+            match state.get_connection(&db_path_native) {
+                Ok(_) => info!("Pre-warmed connection for project: {:?}", root),
+                Err(e) => tracing::error!("Failed to pre-warm connection for {:?}: {}", root, e),
+            }
+        }
     }
 
     let state_for_watcher = Arc::clone(&state);
@@ -294,8 +348,9 @@ async fn handle_setup(state: &AppState, params: &Value) -> anyhow::Result<Value>
     let db_path_native = normalize_to_native(&req.db_path);
     let root_unix = normalize_to_unix(&req.project_root);
     let root_path_unix = PathBuf::from(&root_unix);
+    let db_path_native_clone = db_path_native.clone();
     tokio::task::spawn_blocking(move || {
-        let conn = rusqlite::Connection::open(&db_path_native)?;
+        let conn = rusqlite::Connection::open(&db_path_native_clone)?;
         unl_core::db::init_db(&conn)?;
         Ok::<_, anyhow::Error>(())
     }).await??;
@@ -303,6 +358,7 @@ async fn handle_setup(state: &AppState, params: &Value) -> anyhow::Result<Value>
         let mut projects = state.projects.lock().unwrap();
         projects.insert(root_path_unix, ProjectContext { db_path: normalize_to_unix(&req.db_path), vcs_hash: req.vcs_hash.clone(), _last_refresh: Instant::now() });
     }
+    let _ = state.get_connection(&db_path_native); // Pre-open and warm up
     let _ = state.save_registry();
     Ok(serde_json::json!({ "status": "ok" }))
 }
@@ -330,10 +386,14 @@ async fn handle_refresh(state: &AppState, params: &Value, tx: mpsc::Sender<Vec<u
              ctx.db_path.clone()
         } else { return Err(anyhow::anyhow!("Project not found")); }
     };
-    req.db_path = Some(db_path_unix);
+    req.db_path = Some(db_path_unix.clone());
     let _ = state.save_registry();
     let reporter = Arc::new(RpcProgressReporter { tx });
     tokio::task::spawn_blocking(move || { refresh::run_refresh(req, reporter) }).await??;
+    
+    let db_path_native = normalize_to_native(&db_path_unix);
+    let _ = state.get_connection(&db_path_native); // Re-warm
+    
     Ok(Value::String("Refresh success".to_string()))
 }
 
@@ -359,17 +419,23 @@ async fn handle_query(state: &AppState, params: &Value) -> anyhow::Result<Value>
         ctx.db_path.clone()
     };
     let db_path_native = normalize_to_native(&db_path_unix);
-    tokio::task::spawn_blocking(move || unl_core::query::process_query(&db_path_native, req.query)).await?
+    let conn_arc = state.get_connection(&db_path_native)?;
+    tokio::task::spawn_blocking(move || {
+        let conn = conn_arc.lock().unwrap();
+        unl_core::query::process_query(&conn, req.query)
+    }).await?
 }
 
-async fn handle_scan(_state: &AppState, params: &Value) -> anyhow::Result<Value> {
+async fn handle_scan(state: &AppState, params: &Value) -> anyhow::Result<Value> {
     let req: ScanRequest = convert_params(params)?;
     let db_path = req.files.get(0).and_then(|f| f.db_path.clone()).ok_or_else(|| anyhow::anyhow!("No DB path"))?;
+    let db_path_native = normalize_to_native(&db_path);
+    let conn_arc = state.get_connection(&db_path_native)?;
     tokio::task::spawn_blocking(move || {
         let language = tree_sitter_unreal_cpp::LANGUAGE.into();
         let query = tree_sitter::Query::new(&language, scanner::QUERY_STR).unwrap();
         let results: Vec<ParseResult> = req.files.into_iter().filter_map(|input| scanner::process_file(&input, &language, &query).ok()).collect();
-        let mut conn = rusqlite::Connection::open(&db_path)?;
+        let mut conn = conn_arc.lock().unwrap();
         db::save_to_db(&mut conn, &results, Arc::new(unl_core::types::StdoutReporter))?;
         Ok(serde_json::json!(results.len()))
     }).await?
@@ -399,21 +465,27 @@ async fn handle_file_change(state: &AppState, path: PathBuf) {
         for (root, ctx) in projects.iter() { if path.starts_with(root) { res = Some((root.clone(), ctx.db_path.clone())); break; } }
         res
     };
-    if let Some((_root, db_path)) = target {
+    if let Some((_root, db_path_unix)) = target {
         let path_str = path.to_string_lossy().replace("\\", "/");
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
         if !["h", "cpp", "hpp", "cs"].contains(&ext) { return; }
-        let db_path_clone = db_path.clone(); let path_str_clone = path_str.clone();
+        
+        let db_path_native = normalize_to_native(&db_path_unix);
+        let conn_arc = match state.get_connection(&db_path_native) {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        
+        let path_str_clone = path_str.clone();
         tokio::task::spawn_blocking(move || {
-            if let Ok(Some(mod_id)) = db::get_module_id_for_path(&db_path_clone, &path_str_clone) {
+            let mut conn = conn_arc.lock().unwrap();
+            if let Ok(Some(mod_id)) = db::get_module_id_for_path(&conn, &path_str_clone) {
                 let language = tree_sitter_unreal_cpp::LANGUAGE.into();
                 let query = tree_sitter::Query::new(&language, scanner::QUERY_STR).unwrap();
                 let mtime = std::fs::metadata(&path_str_clone).and_then(|m| m.modified()).ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs()).unwrap_or(0);
-                let input = InputFile { path: path_str_clone, mtime, old_hash: None, module_id: Some(mod_id), db_path: Some(db_path_clone.clone()) };
+                let input = InputFile { path: path_str_clone, mtime, old_hash: None, module_id: Some(mod_id), db_path: Some(db_path_native.clone()) };
                 if let Ok(res) = scanner::process_file(&input, &language, &query) { 
-                    if let Ok(mut conn) = rusqlite::Connection::open(&db_path_clone) {
-                        let _ = db::save_to_db(&mut conn, &[res], Arc::new(unl_core::types::StdoutReporter));
-                    }
+                    let _ = db::save_to_db(&mut conn, &[res], Arc::new(unl_core::types::StdoutReporter));
                 }
             }
         });

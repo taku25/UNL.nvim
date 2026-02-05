@@ -364,6 +364,7 @@ pub fn parse_content(content: &str, _path: &str, language: &tree_sitter::Languag
                     flags: flags.join(" "),
                     access,
                     line: definition_node.start_position().row + 1,
+                    end_line: definition_node.end_position().row + 1,
                     detail,
                     return_type,
                 };
@@ -376,13 +377,21 @@ pub fn parse_content(content: &str, _path: &str, language: &tree_sitter::Languag
                         classes.push(ClassInfo {
                             class_name: sn.clone(), namespace: None, base_classes: Vec::new(), symbol_type: "class".to_string(),
                             line: 1, 
-                            end_line: 1,
+                            end_line: 999999,
                             range_start: 0, range_end: 0, members: Vec::new(), is_final: false, is_interface: false,
                         });
                         classes.len() - 1
                     };
+                    
+                    // Expand range for implementation classes
+                    let cls = &mut classes[idx];
+                    let m_line = definition_node.start_position().row + 1;
+                    let m_end_line = definition_node.end_position().row + 1;
+                    if m_line < cls.line { cls.line = m_line; }
+                    if m_end_line > cls.end_line { cls.end_line = m_end_line; }
+                    
                     member.access = "impl".to_string();
-                    classes[idx].members.push(member);
+                    cls.members.push(member);
                 } else {
                     members.push((member, definition_node.start_byte(), definition_node.end_byte()));
                 }
@@ -396,6 +405,7 @@ pub fn parse_content(content: &str, _path: &str, language: &tree_sitter::Languag
                     flags: String::new(),
                     access: "public".to_string(),
                     line: node.start_position().row + 1,
+                    end_line: node.end_position().row + 1,
                     detail: None,
                     return_type: None,
                 }, node.start_byte(), node.end_byte()));

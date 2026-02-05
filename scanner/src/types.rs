@@ -101,6 +101,7 @@ pub struct MemberInfo {
     pub flags: String,
     pub access: String,
     pub line: usize,
+    pub end_line: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

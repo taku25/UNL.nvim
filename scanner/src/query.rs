@@ -3,9 +3,7 @@ use crate::types::QueryRequest;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 
-pub fn process_query(db_path: &str, req: QueryRequest) -> anyhow::Result<Value> {
-    let conn = Connection::open(db_path)?;
-    
+pub fn process_query(conn: &Connection, req: QueryRequest) -> anyhow::Result<Value> {
     match req {
         QueryRequest::FindDerivedClasses { base_class } => {
             let mut stmt = conn.prepare(
@@ -246,7 +244,7 @@ pub fn process_query(db_path: &str, req: QueryRequest) -> anyhow::Result<Value> 
              let mut stmt = conn.prepare(
                 "WITH RECURSIVE derived_cte AS (
                   SELECT id, name, symbol_type FROM classes WHERE name = ?
-                  UNION
+                  UNION ALL
                   SELECT c.id, c.name, c.symbol_type
                   FROM classes c
                   JOIN inheritance i ON c.id = i.child_id
@@ -257,7 +255,8 @@ pub fn process_query(db_path: &str, req: QueryRequest) -> anyhow::Result<Value> 
                 JOIN classes c ON d.id = c.id
                 JOIN files f ON c.file_id = f.id
                 JOIN modules m ON f.module_id = m.id
-                WHERE d.name != ?"
+                WHERE d.name != ?
+                GROUP BY d.name"
              )?;
              let rows = stmt.query_map([&base_class, &base_class], |row| {
                   Ok(json!({
@@ -277,18 +276,19 @@ pub fn process_query(db_path: &str, req: QueryRequest) -> anyhow::Result<Value> 
               let mut stmt = conn.prepare(
                 "WITH RECURSIVE parents_cte AS (
                   SELECT id, name, 0 as level FROM classes WHERE name = ?
-                  UNION
+                  UNION ALL
                   SELECT p.id, p.name, c.level + 1
                   FROM classes p
                   JOIN inheritance i ON p.name = i.parent_name
                   JOIN parents_cte c ON i.child_id = c.id
                 )
-                SELECT d.name, '', c.line_number, f.path, f.filename, c.symbol_type, m.name, d.level
+                SELECT d.name, '', c.line_number, f.path, f.filename, c.symbol_type, m.name, MIN(d.level) as min_level
                 FROM parents_cte d
                 JOIN classes c ON d.id = c.id
                 JOIN files f ON c.file_id = f.id
                 JOIN modules m ON f.module_id = m.id
-                ORDER BY d.level ASC"
+                GROUP BY d.name
+                ORDER BY min_level ASC"
              )?;
              let rows = stmt.query_map([child_class], |row| {
                   Ok(json!({
@@ -1140,6 +1140,7 @@ pub fn process_query(db_path: &str, req: QueryRequest) -> anyhow::Result<Value> 
                     p
                 }
             }).unwrap_or_else(|| "buffer.cpp".to_string());
+            tracing::info!("Parsing buffer for: {}", path);
             let language: tree_sitter::Language = tree_sitter_unreal_cpp::LANGUAGE.into();
             let query = tree_sitter::Query::new(&language, crate::scanner::QUERY_STR)?;
             
@@ -1190,6 +1191,7 @@ pub fn process_query(db_path: &str, req: QueryRequest) -> anyhow::Result<Value> 
                         "return_type": m.return_type,
                         "file_path": path,
                         "line": m.line,
+                        "end_line": m.end_line,
                     });
 
                     let target_map = if mapped_kind.to_lowercase().contains("function") { "methods" } else { "fields" };
