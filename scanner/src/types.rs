@@ -195,6 +195,15 @@ pub enum QueryRequest {
         filter: Option<String>,
     },
     SearchFilesInModules { modules: Vec<String>, filter: String, limit: Option<usize> },
+    GetFilesInModulesAsync { 
+        modules: Vec<String>,
+        #[serde(default)]
+        extensions: Option<Vec<String>>,
+        #[serde(default)]
+        filter: Option<String>,
+    },
+    SearchFilesInModulesAsync { modules: Vec<String>, filter: String, limit: Option<usize> },
+    GetClassesInModulesAsync { modules: Vec<String>, #[serde(default)] symbol_type: Option<String> },
     SearchSymbolsInModules { modules: Vec<String>, symbol_type: Option<String>, filter: String, limit: Option<usize> },
     GetDirectoriesInModule { module_id: i64 },
     GetModuleFilesByNameAndRoot { name: String, root: String },

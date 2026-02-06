@@ -7,8 +7,9 @@ local msgid_counter = 0
 
 function M.request(method, params, on_notification, on_response, timeout_ms)
     local ok_conf, config = pcall(require, "UNL.config")
-    local port = (ok_conf and config.get().remote and config.get().remote.port) or 30010
-    local host = "127.0.0.1"
+    local conf = ok_conf and config.get("UNL")
+    local port = (conf and conf.remote and conf.remote.port) or 30110
+    local host = (conf and conf.remote and conf.remote.host) or "127.0.0.1"
     
     timeout_ms = timeout_ms or 30000
 
@@ -92,6 +93,7 @@ function M.request(method, params, on_notification, on_response, timeout_ms)
                                 return
                             end
                         elseif msg_type == 2 then -- Notification: [2, method, params]
+                            log.debug("RPC Notification received: method=%s", tostring(decoded[2]))
                             if on_notification then
                                 vim.schedule(function() on_notification(decoded[2], decoded[3]) end)
                             end

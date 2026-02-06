@@ -261,12 +261,13 @@ async fn handle_connection(socket: TcpStream, state: Arc<AppState>) {
 }
 
 async fn process_msg(msgid: u64, method: String, params: Value, state: Arc<AppState>, tx: mpsc::Sender<Vec<u8>>) {
+    info!("Received RPC request: method={}, msgid={}", method, msgid);
     let result = match method.as_str() {
         "ping" => handle_ping(&state, &params).await,
         "setup" => handle_setup(&state, &params).await,
         "refresh" => handle_refresh(&state, &params, tx.clone()).await,
         "watch" => handle_watch(&state, &params).await,
-        "query" => handle_query(&state, &params).await,
+        "query" => handle_query(&state, &params, tx.clone(), msgid).await,
         "scan" => handle_scan(&state, &params).await,
         "status" => get_status(&state).await,
         "list_projects" => list_projects(&state).await,
@@ -412,7 +413,7 @@ async fn handle_watch(state: &AppState, params: &Value) -> anyhow::Result<Value>
 #[derive(serde::Deserialize)]
 struct ServerQueryRequest { project_root: String, #[serde(flatten)] query: QueryRequest }
 
-async fn handle_query(state: &AppState, params: &Value) -> anyhow::Result<Value> {
+async fn handle_query(state: &AppState, params: &Value, tx: mpsc::Sender<Vec<u8>>, msgid: u64) -> anyhow::Result<Value> {
     let req: ServerQueryRequest = convert_params(params)?;
     let root_unix = normalize_to_unix(&req.project_root);
     let root_path_unix = PathBuf::from(&root_unix);
@@ -423,9 +424,32 @@ async fn handle_query(state: &AppState, params: &Value) -> anyhow::Result<Value>
     };
     let db_path_native = normalize_to_native(&db_path_unix);
     let conn_arc = state.get_connection(&db_path_native)?;
+
+    // Async判定
+    let is_async = matches!(req.query, 
+        QueryRequest::GetFilesInModulesAsync { .. } | 
+        QueryRequest::SearchFilesInModulesAsync { .. } |
+        QueryRequest::GetClassesInModulesAsync { .. }
+    );
+
     tokio::task::spawn_blocking(move || {
         let conn = conn_arc.lock().unwrap();
-        unl_core::query::process_query(&conn, req.query)
+        if is_async {
+            let tx_clone = tx.clone();
+            unl_core::query::process_query_streaming(&conn, req.query, move |items| {
+                // 通知 (Notification) を作成: [type=2, method="query/partial", params={ msgid, items }]
+                let notification = (2, "query/partial", json!({ "msgid": msgid, "items": items }));
+                if let Ok(vec) = rmp_serde::to_vec(&notification) {
+                    let mut out = Vec::with_capacity(vec.len() + 4);
+                    out.extend_from_slice(&(vec.len() as u32).to_be_bytes());
+                    out.extend_from_slice(&vec);
+                    let _ = tx_clone.blocking_send(out);
+                }
+                Ok(())
+            })
+        } else {
+            unl_core::query::process_query(&conn, req.query)
+        }
     }).await?
 }
 

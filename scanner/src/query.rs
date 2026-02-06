@@ -3,6 +3,168 @@ use crate::types::QueryRequest;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 
+pub fn process_query_streaming<F>(conn: &Connection, req: QueryRequest, mut on_items: F) -> anyhow::Result<Value> 
+where F: FnMut(Vec<Value>) -> anyhow::Result<()> {
+    match req {
+        QueryRequest::GetFilesInModulesAsync { modules, extensions, filter } => {
+            if modules.is_empty() { return Ok(json!(0)); }
+            let mut total_count = 0;
+            for chunk in modules.chunks(500) {
+                let placeholders: Vec<String> = chunk.iter().map(|_| "?".to_string()).collect();
+                let mut sql = format!(
+                    "SELECT f.path, f.extension, m.name, m.root_path
+                     FROM files f
+                     JOIN modules m ON f.module_id = m.id
+                     WHERE m.name IN ({})",
+                    placeholders.join(",")
+                );
+
+                if let Some(exts) = &extensions {
+                    if !exts.is_empty() {
+                        let ext_placeholders: Vec<String> = exts.iter().map(|_| "?".to_string()).collect();
+                        sql.push_str(&format!(" AND f.extension IN ({})", ext_placeholders.join(",")));
+                    }
+                }
+                if filter.is_some() {
+                    sql.push_str(" AND f.path LIKE ?");
+                }
+                
+                let mut stmt = conn.prepare(&sql)?;
+                let mut params: Vec<&dyn ToSql> = chunk.iter().map(|s| s as &dyn ToSql).collect();
+                if let Some(exts) = &extensions { for ext in exts { params.push(ext); } }
+                if let Some(f) = &filter { params.push(f); }
+
+                let rows = stmt.query_map(rusqlite::params_from_iter(params), |row| {
+                    Ok(json!({
+                        "file_path": row.get::<_, String>(0)?,
+                        "extension": row.get::<_, String>(1)?,
+                        "module_name": row.get::<_, String>(2)?,
+                        "module_root": row.get::<_, String>(3)?,
+                    }))
+                })?;
+
+                let mut current_batch = Vec::new();
+                for r in rows {
+                    current_batch.push(r?);
+                    if current_batch.len() >= 1000 {
+                        total_count += current_batch.len();
+                        on_items(current_batch)?;
+                        current_batch = Vec::new();
+                    }
+                }
+                if !current_batch.is_empty() {
+                    total_count += current_batch.len();
+                    on_items(current_batch)?;
+                }
+            }
+            Ok(json!(total_count))
+        },
+        QueryRequest::SearchFilesInModulesAsync { modules, filter, limit } => {
+            if modules.is_empty() { return Ok(json!(0)); }
+            let limit_val = limit.unwrap_or(usize::MAX);
+            let mut total_count = 0;
+            
+            for chunk in modules.chunks(500) {
+                if total_count >= limit_val { break; }
+                
+                let remaining = limit_val - total_count;
+                let placeholders: Vec<String> = chunk.iter().map(|_| "?".to_string()).collect();
+                let sql = format!(
+                    "SELECT f.path, f.extension, m.name, m.root_path
+                     FROM files f
+                     JOIN modules m ON f.module_id = m.id
+                     WHERE m.name IN ({}) AND f.path LIKE ? LIMIT ?",
+                    placeholders.join(",")
+                );
+                
+                let filter_param = format!("%{}%", filter);
+                let mut params: Vec<&dyn ToSql> = chunk.iter().map(|s| s as &dyn ToSql).collect();
+                params.push(&filter_param);
+                let limit_param = remaining as i64;
+                params.push(&limit_param);
+                
+                let mut stmt = conn.prepare(&sql)?;
+                let rows = stmt.query_map(rusqlite::params_from_iter(params), |row| {
+                    Ok(json!({
+                        "file_path": row.get::<_, String>(0)?,
+                        "extension": row.get::<_, String>(1)?,
+                        "module_name": row.get::<_, String>(2)?,
+                        "module_root": row.get::<_, String>(3)?,
+                    }))
+                })?;
+                
+                let mut current_batch = Vec::new();
+                for r in rows {
+                    current_batch.push(r?);
+                    if current_batch.len() >= 500 {
+                        total_count += current_batch.len();
+                        on_items(current_batch)?;
+                        current_batch = Vec::new();
+                    }
+                }
+                if !current_batch.is_empty() {
+                    total_count += current_batch.len();
+                    on_items(current_batch)?;
+                }
+            }
+            Ok(json!(total_count))
+        },
+        QueryRequest::GetClassesInModulesAsync { modules, symbol_type } => {
+            if modules.is_empty() { return Ok(json!(0)); }
+            let mut total_count = 0;
+            for chunk in modules.chunks(500) {
+                let placeholders: Vec<String> = chunk.iter().map(|_| "?".to_string()).collect();
+                let mut sql = format!(
+                    "SELECT c.name as class_name, c.base_class, c.line_number, f.path as file_path, c.symbol_type, m.name as module_name
+                     FROM classes c
+                     JOIN files f ON c.file_id = f.id
+                     JOIN modules m ON f.module_id = m.id
+                     WHERE m.name IN ({})",
+                    placeholders.join(",")
+                );
+                
+                if let Some(st) = &symbol_type {
+                    match st.as_str() {
+                        "class" => sql.push_str(" AND (c.symbol_type = 'class' OR c.symbol_type = 'UCLASS' OR c.symbol_type = 'UINTERFACE')"),
+                        "struct" => sql.push_str(" AND (c.symbol_type = 'struct' OR c.symbol_type = 'USTRUCT')"),
+                        "enum" => sql.push_str(" AND (c.symbol_type = 'enum' OR c.symbol_type = 'UENUM')"),
+                        _ => sql.push_str(&format!(" AND c.symbol_type = '{}'", st)),
+                    }
+                }
+                
+                let mut stmt = conn.prepare(&sql)?;
+                let params: Vec<&dyn ToSql> = chunk.iter().map(|s| s as &dyn ToSql).collect();
+                let rows = stmt.query_map(rusqlite::params_from_iter(params.iter().cloned()), |row| {
+                    Ok(json!({
+                        "name": row.get::<_, String>(0)?,
+                        "base": row.get::<_, Option<String>>(1)?,
+                        "line": row.get::<_, i64>(2)?,
+                        "path": row.get::<_, String>(3)?,
+                        "type": row.get::<_, String>(4)?,
+                        "module": row.get::<_, String>(5)?,
+                    }))
+                })?;
+
+                let mut current_batch = Vec::new();
+                for r in rows {
+                    current_batch.push(r?);
+                    if current_batch.len() >= 1000 {
+                        total_count += current_batch.len();
+                        on_items(current_batch)?;
+                        current_batch = Vec::new();
+                    }
+                }
+                if !current_batch.is_empty() {
+                    total_count += current_batch.len();
+                    on_items(current_batch)?;
+                }
+            }
+            Ok(json!(total_count))
+        },
+        _ => process_query(conn, req)
+    }
+}
+
 pub fn process_query(conn: &Connection, req: QueryRequest) -> anyhow::Result<Value> {
     match req {
         QueryRequest::FindDerivedClasses { base_class } => {
@@ -1245,19 +1407,25 @@ pub fn process_query(conn: &Connection, req: QueryRequest) -> anyhow::Result<Val
              let rows = stmt.query_map([], |row| Ok(json!(row.get::<_, String>(0)?)))?;
              Ok(json!(rows.collect::<Result<Vec<Value>, _>>()?))
         },
-        QueryRequest::GetAllFilesMetadata => {
-             let mut stmt = conn.prepare(
-                "SELECT f.filename, f.path, m.name
-                 FROM files f JOIN modules m ON f.module_id = m.id"
-             )?;
-             let rows = stmt.query_map([], |row| {
-                 Ok(json!({
-                     "filename": row.get::<_, String>(0)?,
-                     "path": row.get::<_, String>(1)?,
-                     "module_name": row.get::<_, String>(2)?,
-                 }))
-             })?;
-             Ok(json!(rows.collect::<Result<Vec<Value>, _>>()?))
-        }
-    }
-}
+                QueryRequest::GetAllFilesMetadata => {
+                     let mut stmt = conn.prepare(
+                        "SELECT f.filename, f.path, m.name
+                         FROM files f JOIN modules m ON f.module_id = m.id"
+                     )?;
+                     let rows = stmt.query_map([], |row| {
+                         Ok(json!({
+                             "filename": row.get::<_, String>(0)?,
+                             "path": row.get::<_, String>(1)?,
+                             "module_name": row.get::<_, String>(2)?,
+                         }))
+                     })?;
+                                  Ok(json!(rows.collect::<Result<Vec<Value>, _>>()?))
+                             },
+                             QueryRequest::GetFilesInModulesAsync { .. } | 
+                             QueryRequest::SearchFilesInModulesAsync { .. } |
+                             QueryRequest::GetClassesInModulesAsync { .. } => {
+                                 Err(anyhow::anyhow!("Async queries must be processed via process_query_streaming"))
+                             }
+                         }
+                     }
+                     

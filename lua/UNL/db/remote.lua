@@ -14,13 +14,6 @@ local function get_project_root()
 end
 
 function M.request(kind, args, callback)
-    -- サーバーが起動しているかチェック (クエリ時は自動起動させない)
-    if not server.is_running() then
-        log.warn_once("UNL Server is not running. Some features may be limited. Run :UNL start or :UNL setup to enable them.")
-        if callback then callback(nil, "Server not running") end
-        return
-    end
-
     local root = get_project_root()
     if not root then 
         if callback then callback(nil, "Project root not found") end
@@ -37,18 +30,51 @@ function M.request(kind, args, callback)
         if success then
             if callback then callback(result_or_err) end
         else
-            -- 接続エラーなどの場合
-            if result_or_err and string.find(result_or_err, "Connection failed") then
-                log.warn_once("UNL Server connection failed. Please ensure the server is running with :UNL status")
-            else
-                log.error("UNL Query error (%s): %s", kind, result_or_err)
-            end
+            log.error("UNL Query error (%s): %s", kind, tostring(result_or_err))
             if callback then callback(nil, result_or_err) end
         end
     end)
 end
 
--- Wrappers (Same as before)
+function M.request_streaming(kind, args, on_partial, on_complete)
+    local root = get_project_root()
+    if not root then 
+        if on_complete then on_complete(false, "Project root not found") end
+        return 
+    end
+    
+    local params = { project_root = root, kind = kind }
+    for k, v in pairs(args or {}) do params[k] = v end
+    
+    rpc.request("query", params, function(method, notify_params)
+        if method == "query/partial" then
+            local count = (notify_params.items and #notify_params.items) or 0
+            log.debug("Remote: Partial result received. msgid=%s, count=%d", tostring(notify_params.msgid), count)
+            if on_partial then on_partial(notify_params.items) end
+        end
+    end, function(success, result_or_err)
+        if not success then
+            log.error("UNL Streaming Query error (%s): %s", kind, tostring(result_or_err))
+        end
+        if on_complete then on_complete(success, result_or_err) end
+    end)
+end
+
+-- Async Wrappers
+
+function M.get_files_in_modules_async(modules, extensions, filter, on_partial, on_complete)
+    M.request_streaming("GetFilesInModulesAsync", { modules = modules, extensions = extensions, filter = filter }, on_partial, on_complete)
+end
+
+function M.search_files_in_modules_async(modules, filter, limit, on_partial, on_complete)
+    M.request_streaming("SearchFilesInModulesAsync", { modules = modules, filter = filter, limit = limit }, on_partial, on_complete)
+end
+
+function M.get_classes_in_modules_async(modules, symbol_type, on_partial, on_complete)
+    M.request_streaming("GetClassesInModulesAsync", { modules = modules, symbol_type = symbol_type }, on_partial, on_complete)
+end
+
+-- Standard Wrappers
 
 function M.find_derived_classes(base_class, cb)
     M.request("FindDerivedClasses", { base_class = base_class }, cb)
