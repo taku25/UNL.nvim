@@ -49,6 +49,7 @@ struct ProjectContext {
 struct AppState {
     projects: Mutex<HashMap<PathBuf, ProjectContext>>,
     connections: Mutex<HashMap<String, Arc<Mutex<rusqlite::Connection>>>>,
+    active_refreshes: Mutex<HashSet<PathBuf>>,
     watcher: Mutex<notify::RecommendedWatcher>,
     registry_path: Option<PathBuf>,
     active_clients: Mutex<HashSet<u32>>,
@@ -150,6 +151,7 @@ async fn main() -> anyhow::Result<()> {
     let state = Arc::new(AppState {
         projects: Mutex::new(initial_projects),
         connections: Mutex::new(HashMap::new()),
+        active_refreshes: Mutex::new(HashSet::new()),
         watcher: Mutex::new(watcher),
         registry_path,
         active_clients: Mutex::new(HashSet::new()),
@@ -378,6 +380,30 @@ async fn handle_refresh(state: &AppState, params: &Value, tx: mpsc::Sender<Vec<u
     let mut req: RefreshRequest = convert_params(params)?;
     let root_unix = normalize_to_unix(&req.project_root);
     let root_path_unix = PathBuf::from(&root_unix);
+
+    // 1. Check if refresh is already in progress for this project
+    {
+        let mut active = state.active_refreshes.lock().unwrap();
+        if active.contains(&root_path_unix) {
+            info!("Refresh already in progress for project: {}. Skipping redundant request.", root_unix);
+            return Ok(Value::String("Refresh already in progress".to_string()));
+        }
+        active.insert(root_path_unix.clone());
+    }
+
+    // Ensure we remove the project from active_refreshes when we're done
+    struct RefreshGuard<'a> {
+        state: &'a AppState,
+        root: PathBuf,
+    }
+    impl<'a> Drop for RefreshGuard<'a> {
+        fn drop(&mut self) {
+            let mut active = self.state.active_refreshes.lock().unwrap();
+            active.remove(&self.root);
+        }
+    }
+    let _guard = RefreshGuard { state, root: root_path_unix.clone() };
+
     let db_path_unix = {
         let mut projects = state.projects.lock().unwrap();
         let mut found_key = None;
