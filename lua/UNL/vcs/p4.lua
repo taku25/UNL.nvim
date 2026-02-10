@@ -85,8 +85,7 @@ function M.refresh(start_path, on_complete)
         spawn_p4(args, start_path, function(output)
             local new_cache = {}
             if output then
-                for line in output:gmatch("[^
-]+") do
+                for line in output:gmatch("[^\r\n]+") do
                     local path_part, action = line:match("^(.*)|(.*)$")
                     if path_part and action then
                         local key = make_key(path_part)
@@ -132,8 +131,7 @@ function M.edit(path)
         vim.notify("[UNL] P4 Checked out: " .. vim.fn.fnamemodify(path, ":t"), vim.log.levels.INFO)
         return true
     else
-        vim.notify("[UNL] P4 Checkout Failed:
-" .. output, vim.log.levels.ERROR)
+        vim.notify("[UNL] P4 Checkout Failed:\n" .. output, vim.log.levels.ERROR)
         return false
     end
 end
@@ -147,8 +145,7 @@ function M.revert(path)
         vim.notify("[UNL] P4 Reverted: " .. vim.fn.fnamemodify(path, ":t"), vim.log.levels.INFO)
         return true
     else
-        vim.notify("[UNL] P4 Revert Failed:
-" .. output, vim.log.levels.ERROR)
+        vim.notify("[UNL] P4 Revert Failed:\n" .. output, vim.log.levels.ERROR)
         return false
     end
 end

@@ -47,8 +47,7 @@ end
 
 local function parse_status_output(base_path, output_str, cache_table)
     if not output_str or output_str == "" then return end
-    for line in output_str:gmatch("[^
-]+") do
+    for line in output_str:gmatch("[^\r\n]+") do
         if #line > 3 then
             local status = line:sub(1, 2):gsub("%s", "")
             local rel_path = line:sub(4)
@@ -62,8 +61,7 @@ end
 
 local function parse_unpushed_output(base_path, output_str, cache_list)
     if not output_str then return end
-    for line in output_str:gmatch("[^
-]+") do
+    for line in output_str:gmatch("[^\r\n]+") do
         if line ~= "" then
             local rel_path = line
             if rel_path:sub(1, 1) == '"' then rel_path = rel_path:sub(2, -2) end
@@ -100,8 +98,7 @@ function M.refresh(start_path, on_complete)
     end
 
     spawn_git({"rev-parse", "--show-toplevel"}, start_path, function(output)
-        local git_root = output and output:gsub("[
-]+", "") or ""
+        local git_root = output and output:gsub("[\r\n]+", "") or ""
         
         if git_root == "" then
             if on_complete then on_complete() end
@@ -145,8 +142,7 @@ function M.refresh(start_path, on_complete)
         add_job()
         spawn_git({"submodule", "status", "--recursive"}, git_root, function(sub_out)
             if sub_out and sub_out ~= "" then
-                for line in sub_out:gmatch("[^
-]+") do
+                for line in sub_out:gmatch("[^\r\n]+") do
                     local clean_line = line:match("^%W*(.+)$")
                     if clean_line then
                         local parts = {}
@@ -207,8 +203,7 @@ function M.get_file_content(path, on_success)
 
     spawn_git({"rev-parse", "--show-toplevel"}, vim.fn.fnamemodify(path, ":h"), function(git_root)
         if not git_root then return on_success(nil) end
-        git_root = git_root:gsub("[
-]+", "")
+        git_root = git_root:gsub("[\r\n]+", "")
         local root_norm = unl_path.normalize(git_root)
         local path_norm = unl_path.normalize(path)
         local rel_path = path_norm:sub(#root_norm + 2)
