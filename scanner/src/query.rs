@@ -2,10 +2,51 @@ use rusqlite::{params, Connection, OptionalExtension, ToSql};
 use crate::types::QueryRequest;
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use rayon::prelude::*;
 
 pub fn process_query_streaming<F>(conn: &Connection, req: QueryRequest, mut on_items: F) -> anyhow::Result<Value> 
 where F: FnMut(Vec<Value>) -> anyhow::Result<()> {
     match req {
+        QueryRequest::GrepAssets { pattern, project_root } => {
+            tracing::info!("Grepping assets for pattern: '{}' in {}", pattern, project_root);
+            
+            // 1. Get all relevant files from DB (filtered by extension and path)
+            // We search for .uasset and .umap in Content directory
+            let mut stmt = conn.prepare(
+                "SELECT path FROM files 
+                 WHERE (LOWER(extension) = 'uasset' OR LOWER(extension) = 'umap') 
+                 AND path LIKE '%/Content/%'"
+            )?;
+            
+            let file_paths: Vec<String> = stmt.query_map([], |row| row.get(0))?
+                .filter_map(|r| r.ok())
+                .collect();
+            
+            tracing::info!("Found {} candidate asset files in DB.", file_paths.len());
+
+            // 2. Parallel grep using Rayon
+            let pattern_bytes = pattern.as_bytes().to_vec();
+            let results: Vec<String> = file_paths.par_iter()
+                .filter(|path| {
+                    if let Ok(content) = std::fs::read(path) {
+                        content.windows(pattern_bytes.len()).any(|window| window == pattern_bytes)
+                    } else {
+                        false
+                    }
+                })
+                .cloned()
+                .collect();
+
+            tracing::info!("Grep finished. Found {} matches.", results.len());
+            
+            // Stream results in batches
+            for chunk in results.chunks(500) {
+                let items: Vec<Value> = chunk.iter().map(|p| json!(p)).collect();
+                on_items(items)?;
+            }
+            
+            Ok(json!(results.len()))
+        },
         QueryRequest::GetFilesInModulesAsync { modules, extensions, filter } => {
             if modules.is_empty() { return Ok(json!(0)); }
             let mut total_count = 0;
@@ -1423,6 +1464,7 @@ pub fn process_query(conn: &Connection, req: QueryRequest) -> anyhow::Result<Val
                              },
                              QueryRequest::GetFilesInModulesAsync { .. } | 
                              QueryRequest::SearchFilesInModulesAsync { .. } |
+                             QueryRequest::GrepAssets { .. } |
                              QueryRequest::GetClassesInModulesAsync { .. } => {
                                  Err(anyhow::anyhow!("Async queries must be processed via process_query_streaming"))
                              },
