@@ -26,6 +26,7 @@ rayon = "1.7"
 ignore = "0.4"
 regex = "1.9"
 sha2 = "0.10"
+memmap2 = "0.9"
 streaming-iterator = "0.1"
 "tree-sitter-language" = "0.1.3"
 

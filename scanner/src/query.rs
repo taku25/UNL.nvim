@@ -3,6 +3,8 @@ use crate::types::QueryRequest;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use rayon::prelude::*;
+use memmap2::Mmap;
+use std::fs::File;
 
 pub fn process_query_streaming<F>(conn: &Connection, req: QueryRequest, mut on_items: F) -> anyhow::Result<Value> 
 where F: FnMut(Vec<Value>) -> anyhow::Result<()> {
@@ -10,8 +12,7 @@ where F: FnMut(Vec<Value>) -> anyhow::Result<()> {
         QueryRequest::GrepAssets { pattern, project_root } => {
             tracing::info!("Grepping assets for pattern: '{}' in {}", pattern, project_root);
             
-            // 1. Get all relevant files from DB (filtered by extension and path)
-            // We search for .uasset and .umap in Content directory
+            // 1. DBから対象ファイルのパスを取得
             let mut stmt = conn.prepare(
                 "SELECT path FROM files 
                  WHERE (LOWER(extension) = 'uasset' OR LOWER(extension) = 'umap') 
@@ -22,24 +23,34 @@ where F: FnMut(Vec<Value>) -> anyhow::Result<()> {
                 .filter_map(|r| r.ok())
                 .collect();
             
-            tracing::info!("Found {} candidate asset files in DB.", file_paths.len());
+            let file_count = file_paths.len();
+            tracing::info!("Scanning {} asset files using mmap...", file_count);
 
-            // 2. Parallel grep using Rayon
-            let pattern_bytes = pattern.as_bytes().to_vec();
+            let pattern_bytes = pattern.as_bytes();
+            
+            // 2. mmap + rayon による高速並列検索
             let results: Vec<String> = file_paths.par_iter()
                 .filter(|path| {
-                    if let Ok(content) = std::fs::read(path) {
-                        content.windows(pattern_bytes.len()).any(|window| window == pattern_bytes)
-                    } else {
-                        false
+                    match File::open(path) {
+                        Ok(file) => {
+                            unsafe {
+                                match Mmap::map(&file) {
+                                    Ok(mmap) => {
+                                        mmap.windows(pattern_bytes.len()).any(|window| window == pattern_bytes)
+                                    },
+                                    Err(_) => false
+                                }
+                            }
+                        },
+                        Err(_) => false,
                     }
                 })
                 .cloned()
                 .collect();
 
-            tracing::info!("Grep finished. Found {} matches.", results.len());
+            tracing::info!("Grep finished. Found {} matches in {} files.", results.len(), file_count);
             
-            // Stream results in batches
+            // 3. 結果を小分けにして配信
             for chunk in results.chunks(500) {
                 let items: Vec<Value> = chunk.iter().map(|p| json!(p)).collect();
                 on_items(items)?;
@@ -1473,4 +1484,3 @@ pub fn process_query(conn: &Connection, req: QueryRequest) -> anyhow::Result<Val
         }
                          }
                      }
-                     
