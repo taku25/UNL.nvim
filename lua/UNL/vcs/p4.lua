@@ -71,7 +71,7 @@ function M.get_hash(root)
 end
 
 --- プロジェクト全体のステータス更新
-function M.refresh(start_path, on_complete)
+function M.refresh(start_path, on_complete, logger_name)
     if not start_path then return end
     
     check_availability(start_path, function(available)
@@ -122,30 +122,32 @@ end
 -- 同期アクション (自動チェックアウト用)
 -- ======================================================
 
-function M.edit(path)
+function M.edit(path, logger_name)
+    local log = require("UNL.logging").get(logger_name or "UNL")
     local key = make_key(path)
     local output = vim.fn.system("p4 edit " .. vim.fn.shellescape(path))
     
     if vim.v.shell_error == 0 then
         p4_status_cache[key] = "M"
-        vim.notify("[UNL] P4 Checked out: " .. vim.fn.fnamemodify(path, ":t"), vim.log.levels.INFO)
+        log.info("P4 Checked out: " .. vim.fn.fnamemodify(path, ":t"))
         return true
     else
-        vim.notify("[UNL] P4 Checkout Failed:\n" .. output, vim.log.levels.ERROR)
+        log.error("P4 Checkout Failed:\n" .. output)
         return false
     end
 end
 
-function M.revert(path)
+function M.revert(path, logger_name)
+    local log = require("UNL.logging").get(logger_name or "UNL")
     local key = make_key(path)
     local output = vim.fn.system("p4 revert " .. vim.fn.shellescape(path))
     
     if vim.v.shell_error == 0 then
         p4_status_cache[key] = nil
-        vim.notify("[UNL] P4 Reverted: " .. vim.fn.fnamemodify(path, ":t"), vim.log.levels.INFO)
+        log.info("P4 Reverted: " .. vim.fn.fnamemodify(path, ":t"))
         return true
     else
-        vim.notify("[UNL] P4 Revert Failed:\n" .. output, vim.log.levels.ERROR)
+        log.error("P4 Revert Failed:\n" .. output)
         return false
     end
 end

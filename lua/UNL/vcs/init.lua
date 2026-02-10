@@ -40,7 +40,7 @@ function M.get_current_hash(root)
 end
 
 --- VCSの状態を非同期で更新する
-function M.refresh(root, on_complete)
+function M.refresh(root, on_complete, logger_name)
     local pending = 0
     for i=1, 2 do -- P4, Git のみリフレッシュ対応 (SVNは現在未実装)
         if providers[i].module.refresh then pending = pending + 1 end
@@ -58,7 +58,7 @@ function M.refresh(root, on_complete)
 
     for i=1, 2 do
         if providers[i].module.refresh then
-            providers[i].module.refresh(root, check_done)
+            providers[i].module.refresh(root, check_done, logger_name)
         end
     end
 end
@@ -123,12 +123,12 @@ function M.is_p4_managed(path)
     return providers[1].module.is_managed(path)
 end
 
-function M.p4_edit(path)
-    return providers[1].module.edit(path)
+function M.p4_edit(path, logger_name)
+    return providers[1].module.edit(path, logger_name)
 end
 
-function M.p4_revert(path)
-    return providers[1].module.revert(path)
+function M.p4_revert(path, logger_name)
+    return providers[1].module.revert(path, logger_name)
 end
 
 function M.get_file_content(path, on_success)

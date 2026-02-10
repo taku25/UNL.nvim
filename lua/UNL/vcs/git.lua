@@ -86,7 +86,7 @@ function M.get_hash(root)
     return nil
 end
 
-function M.refresh(start_path, on_complete)
+function M.refresh(start_path, on_complete, logger_name)
     if not start_path then return end
 
     local git_dir = vim.fn.finddir(".git", start_path .. ";")
