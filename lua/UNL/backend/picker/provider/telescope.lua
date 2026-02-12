@@ -117,10 +117,17 @@ function M.run_static(spec, source)
 
   if spec.preview_enabled ~= false then
     local use_grep_previewer = false
-    if spec.preview_mode == "grep" then use_grep_previewer = true
+    if spec.preview_mode == "grep" then 
+      use_grep_previewer = true
     elseif source.items and #source.items > 0 then
-      local first = source.items[1]
-      if type(first) == "table" and (first.lnum or first.line or first.row) then use_grep_previewer = true end
+      -- Check first few items for line info
+      for i = 1, math.min(5, #source.items) do
+        local item = source.items[i]
+        if type(item) == "table" and (item.lnum or item.line or item.row) then
+          use_grep_previewer = true
+          break
+        end
+      end
     end
     picker_opts.previewer = use_grep_previewer and conf.grep_previewer({}) or conf.file_previewer({})
   end
@@ -222,6 +229,7 @@ function M.run_callback(spec, source)
     prompt_title = spec.title or "Dynamic Picker",
     finder = finder,
     sorter = conf.generic_sorter({}),
+    previewer = (spec.preview_enabled ~= false) and conf.file_previewer({}) or nil,
     sorting_strategy = "ascending",
     attach_mappings = function(bufnr)
       actions.select_default:replace(function()

@@ -127,7 +127,8 @@ function M.run_callback(spec, source)
     end
     if source.fn then source.fn(push) end
   end
-  fzf.fzf_exec(fzf_fn, {
+
+  local opts = {
     prompt = (spec.title or "Stack") .. "> ",
     actions = {
       ["default"] = function(selected)
@@ -136,7 +137,13 @@ function M.run_callback(spec, source)
         end
       end
     }
-  })
+  }
+
+  if spec.preview_enabled ~= false then
+    opts.previewer = "builtin" -- Use builtin previewer for common patterns (file:line)
+  end
+
+  fzf.fzf_exec(fzf_fn, opts)
 end
 
 return M

@@ -158,6 +158,7 @@ function M.run_callback(spec, source)
       end
     }
   }
+  if spec.preview_enabled ~= false then opts.preview = "file" else opts.layout = { hidden = { "preview" } } end
   Snacks.picker.pick(opts)
 end
 
