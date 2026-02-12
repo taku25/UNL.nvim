@@ -227,7 +227,6 @@ fn unwrap_container_type(t: &str) -> String {
             let wrapper = t[..start].trim();
             let inner = &t[start + 1..end];
             if wrapper == "TMap" {
-                // TMap<Key, Value> -> Value is the second argument
                 return get_template_argument(inner, 1).to_string();
             } else if wrapper == "TArray" || wrapper == "TSet" {
                 return inner.to_string();
@@ -246,18 +245,14 @@ fn get_template_argument(inner: &str, index: usize) -> &str {
             '<' => depth += 1,
             '>' => depth -= 1,
             ',' if depth == 0 => {
-                if current_index == index {
-                    return inner[start..i].trim();
-                }
+                if current_index == index { return inner[start..i].trim(); }
                 start = i + 1;
                 current_index += 1;
             }
             _ => {}
         }
     }
-    if current_index == index {
-        return inner[start..].trim();
-    }
+    if current_index == index { return inner[start..].trim(); }
     ""
 }
 
@@ -273,9 +268,13 @@ fn find_member_return_type(conn: &Connection, class_name: &str, member_name: &st
         visited.insert(cls.clone(), true);
         
         let mut stmt = conn.prepare("
-            SELECT m.return_type FROM members m JOIN classes c ON m.class_id = c.id 
-            WHERE c.name = ? AND m.name = ? 
-            ORDER BY (CASE WHEN m.return_type = 'T' OR m.return_type = 'T*' OR m.return_type = 'void' THEN 1 ELSE 0 END) ASC, length(m.return_type) DESC 
+            SELECT srt.text FROM members m 
+            JOIN classes c ON m.class_id = c.id 
+            JOIN strings sc ON c.name_id = sc.id
+            JOIN strings sm ON m.name_id = sm.id
+            LEFT JOIN strings srt ON m.return_type_id = srt.id
+            WHERE sc.text = ? AND sm.text = ? 
+            ORDER BY (CASE WHEN srt.text = 'T' OR srt.text = 'T*' OR srt.text = 'void' THEN 1 ELSE 0 END) ASC, length(srt.text) DESC 
             LIMIT 1
         ")?;
         let mut rows = stmt.query([&cls, member_name])?;
@@ -287,7 +286,12 @@ fn find_member_return_type(conn: &Connection, class_name: &str, member_name: &st
             }
         }
         
-        let mut p_stmt = conn.prepare("SELECT parent_name FROM inheritance i JOIN classes c ON i.child_id = c.id WHERE c.name = ?")?;
+        let mut p_stmt = conn.prepare("
+            SELECT si.text FROM inheritance i 
+            JOIN classes c ON i.child_id = c.id 
+            JOIN strings sc ON c.name_id = sc.id
+            JOIN strings si ON i.parent_name_id = si.id
+            WHERE sc.text = ?")?;
         let p_rows = p_stmt.query_map([&cls], |r| Ok(r.get::<_, String>(0)?))?;
         for p in p_rows { queue.push(p?); }
     }
@@ -336,7 +340,15 @@ fn resolve_typedef(conn: &Connection, type_name: &str) -> anyhow::Result<String>
     let mut current = extract_clean_type(type_name);
     if current.is_empty() || current == "T" || current == "void" { return Ok(current); }
     for _ in 0..3 {
-        let mut stmt = conn.prepare("SELECT base_class FROM classes WHERE name = ? AND symbol_type = 'typedef' ORDER BY (CASE WHEN base_class IS NOT NULL AND base_class != '' THEN 0 ELSE 1 END) ASC LIMIT 1")?;
+        // String Interning support for base_class (need to join strings if it was stored as ID, but here it might be raw text still or ID?)
+        // Let's assume symbol_type 'typedef' still stores base_class as a text ID or raw text.
+        // Actually classes table has base_class_id now.
+        let mut stmt = conn.prepare("
+            SELECT sbc.text FROM classes c 
+            JOIN strings sc ON c.name_id = sc.id
+            JOIN strings sbc ON c.base_class_id = sbc.id
+            WHERE sc.text = ? AND symbol_type = 'typedef' LIMIT 1
+        ")?;
         let mut rows = stmt.query([&current])?;
         if let Some(row) = rows.next()? {
             if let Some(base) = row.get::<_, Option<String>>(0)? {
@@ -364,11 +376,22 @@ fn fetch_members_recursive(conn: &Connection, class_name: &str) -> anyhow::Resul
         if visited.contains_key(&current) { continue; }
         visited.insert(current.clone(), true);
         
-        let mut stmt = conn.prepare("SELECT c.id FROM classes c LEFT JOIN members m ON c.id = m.class_id WHERE LOWER(c.name) = LOWER(?) GROUP BY c.id ORDER BY COUNT(m.id) DESC LIMIT 1")?;
+        let mut stmt = conn.prepare("
+            SELECT c.id FROM classes c 
+            JOIN strings sc ON c.name_id = sc.id
+            WHERE LOWER(sc.text) = LOWER(?) GROUP BY c.id LIMIT 1
+        ")?;
         let mut rows = stmt.query([&current])?;
         if let Some(row) = rows.next()? {
             let class_id: i64 = row.get(0)?;
-            let mut mem_stmt = conn.prepare("SELECT name, type, return_type, access, is_static, detail FROM members WHERE class_id = ?")?;
+            let mut mem_stmt = conn.prepare("
+                SELECT smn.text, smt.text, srt.text, access, is_static, detail 
+                FROM members m 
+                JOIN strings smn ON m.name_id = smn.id
+                JOIN strings smt ON m.type_id = smt.id
+                LEFT JOIN strings srt ON m.return_type_id = srt.id
+                WHERE class_id = ?
+            ")?;
             let mem_rows = mem_stmt.query_map([class_id], |row| {
                 let m_name: String = row.get(0)?;
                 let m_type: String = row.get(1)?;
@@ -377,13 +400,20 @@ fn fetch_members_recursive(conn: &Connection, class_name: &str) -> anyhow::Resul
                 Ok(json!({ "label": m_name, "kind": map_kind(&m_type), "detail": r_type.unwrap_or_default(), "documentation": detail.unwrap_or_default(), "insertText": m_name }))
             })?;
             for m in mem_rows { result.push(m?); }
-            let mut enum_stmt = conn.prepare("SELECT name FROM enum_values WHERE enum_id = ?")?;
+            let mut enum_stmt = conn.prepare("
+                SELECT sen.text FROM enum_values ev 
+                JOIN strings sen ON ev.name_id = sen.id
+                WHERE enum_id = ?
+            ")?;
             let enum_rows = enum_stmt.query_map([class_id], |row| {
                 let e_name: String = row.get(0)?;
                 Ok(json!({ "label": e_name, "kind": 20, "detail": "enum item", "insertText": e_name }))
             })?;
             for e in enum_rows { result.push(e?); }
-            let mut parent_stmt = conn.prepare("SELECT parent_name FROM inheritance WHERE child_id = ?")?;
+            let mut parent_stmt = conn.prepare("
+                SELECT si.text FROM inheritance i 
+                JOIN strings si ON i.parent_name_id = si.id
+                WHERE child_id = ?")?;
             let p_rows = parent_stmt.query_map([class_id], |row| Ok(row.get::<_, String>(0)?))?;
             for p in p_rows { queue.push(p?); }
         }
@@ -398,7 +428,11 @@ fn map_kind(k: &str) -> i64 {
 fn is_known_type(conn: &Connection, name: &str) -> anyhow::Result<bool> {
     let clean = extract_clean_type(name);
     if clean.is_empty() { return Ok(false); }
-    let mut stmt = conn.prepare("SELECT 1 FROM classes WHERE LOWER(name) = LOWER(?) LIMIT 1")?;
+    let mut stmt = conn.prepare("
+        SELECT 1 FROM classes c 
+        JOIN strings s ON c.name_id = s.id
+        WHERE LOWER(s.text) = LOWER(?) LIMIT 1
+    ")?;
     Ok(stmt.exists([&clean])?)
 }
 
@@ -523,30 +557,15 @@ fn extract_clean_type(raw: &str) -> String {
             if ["TObjectPtr", "TSharedPtr", "TUniquePtr", "TWeakObjectPtr", "TSubclassOf", "TSoftObjectPtr", "TSoftClassPtr", "TEnumAsByte"].contains(&wrapper) {
                 return extract_clean_type(inner);
             }
-            if ["TMap", "TArray", "TSet"].contains(&wrapper) {
-                // Preserve the whole template for containers and return immediately
-                return clean.to_string();
-            } else {
-                clean = wrapper.to_string();
-            }
+            if ["TMap", "TArray", "TSet"].contains(&wrapper) { return clean.to_string(); }
+            else { clean = wrapper.to_string(); }
         }
     }
     let keywords = ["const", "typename", "struct", "class", "enum", "virtual", "static", "inline", "FORCEINLINE"];
     for kw in keywords {
-        if let Ok(re) = regex::Regex::new(&format!(r"\b{}\b", kw)) {
-            clean = re.replace_all(&clean, "").to_string();
-        }
+        if let Ok(re) = regex::Regex::new(&format!(r"\b{}\b", kw)) { clean = re.replace_all(&clean, "").to_string(); }
     }
-    if let Ok(re) = regex::Regex::new(r"\b[A-Z0-9_]+_API\b") {
-        clean = re.replace_all(&clean, "").to_string();
-    }
+    if let Ok(re) = regex::Regex::new(r"\b[A-Z0-9_]+_API\b") { clean = re.replace_all(&clean, "").to_string(); }
     clean = clean.replace('*', " ").replace('&', " ");
-    let final_type = clean.split_whitespace()
-        .last()
-        .unwrap_or("")
-        .split("::")
-        .last()
-        .unwrap_or("")
-        .to_string();
-    final_type
+    clean.split_whitespace().last().unwrap_or("").split("::").last().unwrap_or("").to_string()
 }

@@ -9,9 +9,10 @@ where F: FnMut(Vec<Value>) -> anyhow::Result<()> {
     tracing::info!("Grepping assets for pattern: '{}'", pattern);
     
     let mut stmt = conn.prepare(
-        "SELECT path FROM files 
-         WHERE (LOWER(extension) = 'uasset' OR LOWER(extension) = 'umap') 
-         AND path LIKE '%/Content/%'"
+        "SELECT s.text FROM files f 
+         JOIN strings s ON f.path_id = s.id
+         WHERE (LOWER(f.extension) = 'uasset' OR LOWER(f.extension) = 'umap') 
+         AND s.text LIKE '%/Content/%'"
     )?;
     
     let file_paths: Vec<String> = stmt.query_map([], |row| row.get(0))?
@@ -54,7 +55,11 @@ where F: FnMut(Vec<Value>) -> anyhow::Result<()> {
 
 pub fn search_files(conn: &Connection, part: String) -> anyhow::Result<Value> {
     let mut stmt = conn.prepare(
-        "SELECT path, filename FROM files WHERE filename LIKE ? LIMIT 100"
+        "SELECT sp.text as path, sf.text as filename 
+         FROM files f 
+         JOIN strings sp ON f.path_id = sp.id
+         JOIN strings sf ON f.filename_id = sf.id
+         WHERE sf.text LIKE ? LIMIT 100"
     )?;
     let param = format!("%{}%", part);
     let rows = stmt.query_map([param], |row| {
@@ -75,7 +80,16 @@ pub fn search_files_in_modules(conn: &Connection, modules: Vec<String>, filter: 
          if all_files.len() >= limit_val { break; }
          let remaining = limit_val - all_files.len();
          let placeholders: Vec<String> = chunk.iter().map(|_| "?".to_string()).collect();
-         let sql = format!("SELECT f.path, f.extension, m.name, m.root_path FROM files f JOIN modules m ON f.module_id = m.id WHERE m.name IN ({}) AND f.path LIKE ? LIMIT ?", placeholders.join(","));
+         let sql = format!(
+            "SELECT sp.text, f.extension, sm.text, sr.text 
+             FROM files f 
+             JOIN strings sp ON f.path_id = sp.id
+             JOIN modules m ON f.module_id = m.id 
+             JOIN strings sm ON m.name_id = sm.id
+             JOIN strings sr ON m.root_path_id = sr.id
+             WHERE sm.text IN ({}) AND sp.text LIKE ? LIMIT ?", 
+            placeholders.join(",")
+         );
          let filter_param = format!("%{}%", filter);
          let mut params: Vec<&dyn ToSql> = chunk.iter().map(|s| s as &dyn ToSql).collect();
          params.push(&filter_param);
@@ -89,7 +103,15 @@ pub fn search_files_in_modules(conn: &Connection, modules: Vec<String>, filter: 
 }
 
 pub fn search_files_by_path_part(conn: &Connection, part: String) -> anyhow::Result<Value> {
-    let mut stmt = conn.prepare("SELECT f.path, f.filename, m.root_path FROM files f JOIN modules m ON f.module_id = m.id WHERE f.path LIKE ? LIMIT 50")?;
+    let mut stmt = conn.prepare(
+        "SELECT sp.text as path, sf.text as filename, sr.text as module_root 
+         FROM files f 
+         JOIN strings sp ON f.path_id = sp.id
+         JOIN strings sf ON f.filename_id = sf.id
+         JOIN modules m ON f.module_id = m.id 
+         JOIN strings sr ON m.root_path_id = sr.id
+         WHERE sp.text LIKE ? LIMIT 50"
+    )?;
     let param = format!("%{}%", part);
     let rows = stmt.query_map([param], |row| Ok(json!({ "path": row.get::<_, String>(0)?, "filename": row.get::<_, String>(1)?, "module_root": row.get::<_, String>(2)? })))?;
     Ok(json!(rows.collect::<Result<Vec<Value>, _>>()?))

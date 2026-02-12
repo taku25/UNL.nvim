@@ -3,8 +3,10 @@ use serde_json::{json, Value};
 
 pub fn load_component_data(conn: &Connection, component: String) -> anyhow::Result<Value> {
      let mut stmt = conn.prepare(
-        "SELECT m.id, m.name, m.type, m.scope, m.root_path, m.build_cs_path
+        "SELECT m.id, sm.text as name, m.type, m.scope, sr.text as root_path, m.build_cs_path
          FROM modules m
+         JOIN strings sm ON m.name_id = sm.id
+         JOIN strings sr ON m.root_path_id = sr.id
          WHERE m.scope = ? OR m.scope LIKE ?"
      )?;
      let param2 = format!("{}%", component);
@@ -25,8 +27,20 @@ pub fn load_component_data(conn: &Connection, component: String) -> anyhow::Resu
          "programs_modules": {}
      });
 
-     let mut file_stmt = conn.prepare("SELECT f.id, f.path, f.filename, f.extension, f.is_header, f.module_id FROM files f WHERE f.module_id = ?")?;
-     let mut class_stmt = conn.prepare("SELECT c.name, c.base_class, c.line_number FROM classes c WHERE c.file_id = ?")?;
+     let mut file_stmt = conn.prepare(
+        "SELECT f.id, sp.text as path, sf.text as filename, f.extension, f.is_header, f.module_id 
+         FROM files f 
+         JOIN strings sp ON f.path_id = sp.id
+         JOIN strings sf ON f.filename_id = sf.id
+         WHERE f.module_id = ?"
+     )?;
+     let mut class_stmt = conn.prepare(
+        "SELECT sc.text as name, sb.text as base_class, c.line_number 
+         FROM classes c 
+         JOIN strings sc ON c.name_id = sc.id
+         LEFT JOIN strings sb ON c.base_class_id = sb.id
+         WHERE c.file_id = ?"
+     )?;
 
      for mod_res in modules_iter {
          let (mid, mname, mtype, mroot, mpath) = mod_res?;
@@ -53,11 +67,17 @@ pub fn load_component_data(conn: &Connection, component: String) -> anyhow::Resu
 }
 
 pub fn get_module_by_name(conn: &Connection, name: String) -> anyhow::Result<Value> {
-    let mut stmt = conn.prepare("SELECT m.id, m.name, m.type, m.scope, m.root_path, m.build_cs_path FROM modules m WHERE m.name = ? LIMIT 1")?;
+    let mut stmt = conn.prepare(
+        "SELECT m.id, sm.text, m.type, m.scope, sr.text, m.build_cs_path 
+         FROM modules m 
+         JOIN strings sm ON m.name_id = sm.id
+         JOIN strings sr ON m.root_path_id = sr.id
+         WHERE sm.text = ? LIMIT 1"
+    )?;
     let mod_row = stmt.query_row([name], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(4)?, row.get::<_, Option<String>>(5)?))).optional()?;
     if let Some((mid, mname, mroot, mpath)) = mod_row {
         let mut mod_data = json!({ "name": mname, "module_root": mroot, "path": mpath, "files": { "source": [], "config": [], "shader": [], "other": [] } });
-        let mut stmt = conn.prepare("SELECT f.path, f.extension FROM files f WHERE f.module_id = ?")?;
+        let mut stmt = conn.prepare("SELECT s.text, f.extension FROM files f JOIN strings s ON f.path_id = s.id WHERE f.module_id = ?")?;
         let files_iter = stmt.query_map([mid], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
         for res in files_iter {
             let (fpath, fext) = res?;
@@ -78,13 +98,27 @@ pub fn get_components(conn: &Connection) -> anyhow::Result<Value> {
 }
 
 pub fn get_modules(conn: &Connection) -> anyhow::Result<Value> {
-     let mut stmt = conn.prepare("SELECT * FROM modules ORDER BY name ASC")?;
-     let rows = stmt.query_map([], |row| Ok(json!({ "id": row.get::<_, i64>("id")?, "name": row.get::<_, String>("name")?, "type": row.get::<_, Option<String>>("type")?, "scope": row.get::<_, Option<String>>("scope")?, "root_path": row.get::<_, String>("root_path")?, "build_cs_path": row.get::<_, Option<String>>("build_cs_path")?, "owner_name": row.get::<_, Option<String>>("owner_name")?, "component_name": row.get::<_, Option<String>>("component_name")?, "deep_dependencies": row.get::<_, Option<String>>("deep_dependencies")? })))?;
+     let mut stmt = conn.prepare(
+        "SELECT m.id, sm.text as name, m.type, m.scope, sr.text as root_path, m.build_cs_path, m.owner_name, m.component_name, m.deep_dependencies 
+         FROM modules m 
+         JOIN strings sm ON m.name_id = sm.id
+         JOIN strings sr ON m.root_path_id = sr.id
+         ORDER BY sm.text ASC"
+     )?;
+     let rows = stmt.query_map([], |row| Ok(json!({ "id": row.get::<_, i64>(0)?, "name": row.get::<_, String>(1)?, "type": row.get::<_, Option<String>>(2)?, "scope": row.get::<_, Option<String>>(3)?, "root_path": row.get::<_, String>(4)?, "build_cs_path": row.get::<_, Option<String>>(5)?, "owner_name": row.get::<_, Option<String>>(6)?, "component_name": row.get::<_, Option<String>>(7)?, "deep_dependencies": row.get::<_, Option<String>>(8)? })))?;
      Ok(json!(rows.collect::<Result<Vec<Value>, _>>()?))
 }
 
 pub fn get_module_files_by_name_and_root(conn: &Connection, name: String, root: String) -> anyhow::Result<Value> {
-     let mut stmt = conn.prepare("SELECT f.path, f.extension FROM files f JOIN modules m ON f.module_id = m.id WHERE m.name = ? AND m.root_path = ?")?;
+     let mut stmt = conn.prepare(
+        "SELECT sp.text, f.extension 
+         FROM files f 
+         JOIN strings sp ON f.path_id = sp.id
+         JOIN modules m ON f.module_id = m.id 
+         JOIN strings sm ON m.name_id = sm.id
+         JOIN strings sr ON m.root_path_id = sr.id
+         WHERE sm.text = ? AND sr.text = ?"
+     )?;
      let rows = stmt.query_map([name, root], |row| Ok(json!({ "path": row.get::<_, String>(0)?, "extension": row.get::<_, String>(1)? })))?;
      Ok(json!(rows.collect::<Result<Vec<Value>, _>>()?))
 }
