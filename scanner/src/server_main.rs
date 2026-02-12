@@ -86,27 +86,34 @@ impl AppState {
         }
 
         info!("Opening database connection: {}", db_path_native);
-        let mut conn = rusqlite::Connection::open(db_path_native)?;
         
-        // Check DB version
         let mut version_match = false;
-        if let Ok(version_str) = conn.query_row(
-            "SELECT value FROM project_meta WHERE key = 'db_version'",
-            [],
-            |row| row.get::<_, String>(0),
-        ) {
-            if let Ok(version) = version_str.parse::<i32>() {
-                if version == db::DB_VERSION {
-                    version_match = true;
+        {
+            // Try to open and check version in a limited scope
+            if let Ok(conn) = rusqlite::Connection::open(db_path_native) {
+                if let Ok(version_str) = conn.query_row(
+                    "SELECT value FROM project_meta WHERE key = 'db_version'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                ) {
+                    if let Ok(version) = version_str.parse::<i32>() {
+                        if version == db::DB_VERSION {
+                            version_match = true;
+                        }
+                    }
                 }
+                // conn is dropped here
             }
         }
 
-        if !version_match {
-            info!("DB version mismatch or missing. Re-initializing database: {}", db_path_native);
-            drop(conn);
+        if !version_match && Path::new(db_path_native).exists() {
+            info!("DB version mismatch or missing. Deleting old database: {}", db_path_native);
             let _ = std::fs::remove_file(db_path_native);
-            conn = rusqlite::Connection::open(db_path_native)?;
+        }
+
+        let conn = rusqlite::Connection::open(db_path_native)?;
+        if !version_match {
+            info!("Initializing new database schema (v{})...", db::DB_VERSION);
             db::init_db(&conn)?;
         }
 
@@ -117,9 +124,6 @@ impl AppState {
         let _ = conn.pragma_update(None, "mmap_size", "1073741824"); // 1GB mmap
         let _ = conn.pragma_update(None, "temp_store", "MEMORY");
         
-        // Warm up: read schema
-        let _ = conn.query_row("SELECT count(*) FROM sqlite_master", [], |_| Ok(()));
-
         let conn_arc = Arc::new(Mutex::new(conn));
         
         // Shadow Warm-up in background: scan all tables to fill page cache / mmap
