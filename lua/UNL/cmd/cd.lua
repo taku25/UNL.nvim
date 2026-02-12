@@ -1,6 +1,6 @@
 -- lua/UNL/cmd/cd.lua (RPC Project Switching)
 local scanner = require("UNL.scanner")
-local unl_picker = require("UNL.backend.picker")
+local unl_picker = require("UNL.picker")
 local unl_config = require("UNL.config")
 local log = require("UNL.logging").get("UNL")
 local unl_events = require("UNL.event.events")
@@ -33,7 +33,7 @@ function M.execute(opts)
 
       table.sort(picker_items, function(a, b) return a.label < b.label end)
 
-      unl_picker.pick({
+      unl_picker.open({
           kind = "unl_project_cd",
           title = "Select Project to CD",
           items = picker_items,
@@ -68,3 +68,4 @@ function M.execute(opts)
 end
 
 return M
+
