@@ -86,36 +86,9 @@ impl AppState {
         }
 
         info!("Opening database connection: {}", db_path_native);
+        db::ensure_correct_version(db_path_native)?;
         
-        let mut version_match = false;
-        {
-            // Try to open and check version in a limited scope
-            if let Ok(conn) = rusqlite::Connection::open(db_path_native) {
-                if let Ok(version_str) = conn.query_row(
-                    "SELECT value FROM project_meta WHERE key = 'db_version'",
-                    [],
-                    |row| row.get::<_, String>(0),
-                ) {
-                    if let Ok(version) = version_str.parse::<i32>() {
-                        if version == db::DB_VERSION {
-                            version_match = true;
-                        }
-                    }
-                }
-                // conn is dropped here
-            }
-        }
-
-        if !version_match && Path::new(db_path_native).exists() {
-            info!("DB version mismatch or missing. Deleting old database: {}", db_path_native);
-            let _ = std::fs::remove_file(db_path_native);
-        }
-
         let conn = rusqlite::Connection::open(db_path_native)?;
-        if !version_match {
-            info!("Initializing new database schema (v{})...", db::DB_VERSION);
-            db::init_db(&conn)?;
-        }
 
         // Performance tuning for queries
         let _ = conn.pragma_update(None, "journal_mode", "WAL");
@@ -187,13 +160,10 @@ async fn main() -> anyhow::Result<()> {
     {
         let projects = state.projects.lock().unwrap();
         let mut watcher = state.watcher.lock().unwrap();
-        for (root, ctx) in projects.iter() {
+        for (root, _ctx) in projects.iter() {
             let _ = watcher.watch(root, RecursiveMode::Recursive);
-            let db_path_native = normalize_to_native(&ctx.db_path);
-            match state.get_connection(&db_path_native) {
-                Ok(_) => info!("Pre-warmed connection for project: {:?}", root),
-                Err(e) => tracing::error!("Failed to pre-warm connection for {:?}: {}", root, e),
-            }
+            // 起動時の get_connection (プリウォーム) を削除
+            // これにより、開いていないプロジェクトのバージョンチェックは行われなくなる
         }
     }
 

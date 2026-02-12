@@ -140,6 +140,7 @@ pub fn run_refresh(req: RefreshRequest, reporter: Arc<dyn ProgressReporter>) -> 
 
     reporter.report("db_sync", 0, 100, "Updating database structure...");
     let db_path = Path::new(&db_path_native);
+    db::ensure_correct_version(&db_path_native)?; // ★ 追加: 実行前にバージョンを強制
     let mut conn = Connection::open(db_path)?;
     conn.busy_timeout(std::time::Duration::from_millis(10000))?;
     db::init_db(&conn)?;

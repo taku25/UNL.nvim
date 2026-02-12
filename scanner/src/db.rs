@@ -4,7 +4,40 @@ use std::collections::HashMap;
 use rusqlite::{params, Connection};
 use crate::types::{ParseResult, ProgressReporter};
 
-pub const DB_VERSION: i32 = 3;
+pub const DB_VERSION: i32 = 4;
+
+/// 指定されたDBファイルが最新バージョンであることを保証する。
+/// バージョンが合わない場合はファイルを削除して初期化する。
+pub fn ensure_correct_version(db_path: &str) -> anyhow::Result<()> {
+    let mut version_match = false;
+    {
+        if let Ok(conn) = rusqlite::Connection::open(db_path) {
+            if let Ok(version_str) = conn.query_row(
+                "SELECT value FROM project_meta WHERE key = 'db_version'",
+                [],
+                |row| row.get::<_, String>(0),
+            ) {
+                if let Ok(version) = version_str.parse::<i32>() {
+                    if version == DB_VERSION {
+                        version_match = true;
+                    }
+                }
+            }
+        }
+    }
+
+    if !version_match && Path::new(db_path).exists() {
+        tracing::info!("DB version mismatch or missing. Re-initializing: {}", db_path);
+        let _ = std::fs::remove_file(db_path);
+        let conn = rusqlite::Connection::open(db_path)?;
+        init_db(&conn)?;
+    } else if !Path::new(db_path).exists() {
+        let conn = rusqlite::Connection::open(db_path)?;
+        init_db(&conn)?;
+    }
+
+    Ok(())
+}
 
 pub fn init_db(conn: &Connection) -> rusqlite::Result<()> {
     conn.busy_timeout(std::time::Duration::from_millis(5000))?;
