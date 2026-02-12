@@ -198,6 +198,90 @@ unl.db.search_files_in_modules({"Core", "Engine"}, "Actor", 100, function(files)
 end)
 ```
 
+## 🎨 統合ピッカー API (Unified Picker API)
+
+`require("UNL.picker").open(spec)` を使用すると、ユーザーの環境設定（Telescope, fzf-lua, Snacks 等）に応じて最適なピッカーを表示できます。プラグイン開発者はバックエンドの違いを意識することなく、一貫したAPIでリッチなUIを提供できます。
+
+### 基本的な使い方
+
+```lua
+local unl_picker = require("UNL.picker")
+
+unl_picker.open({
+  title = "Select Module",
+  items = { "Core", "Engine", "Project" }, -- 静的なリスト
+  on_confirm = function(selection)
+    print("Selected: " .. selection)
+  end,
+})
+```
+
+### Spec (オプション) の仕様
+
+`open` 関数に渡すテーブル (`spec`) の主要なフィールドは以下の通りです。
+
+| フィールド | 型 | 説明 |
+| :--- | :--- | :--- |
+| `title` | `string` | ピッカーのタイトル。 |
+| `source` | `table` | データのソース定義（後述）。 |
+| `items` | `table` | `source.type = "static"` のショートハンド。項目のリスト。 |
+| `on_confirm` | `function` | 項目が確定された時のコールバック。引数には選択された項目（またはそのリスト）が渡されます。 |
+| `multiselect` | `string/bool` | 複数選択モード。`"loop"` (安全なループUI), `"native"` (ピッカー固有のUI), `"none"` (単一選択) を指定可能。 |
+| `preview_enabled`| `boolean` | プレビューを表示するかどうか。 |
+| `devicons_enabled`| `boolean` | アイコンを表示するかどうか。 |
+
+### Source タイプのバリエーション
+
+`source` フィールドを指定することで、様々なデータ形式に対応できます。
+
+*   **`static`**: 固定のリストを表示します。
+    ```lua
+    source = { type = "static", items = { { label = "Item 1", value = 1 }, ... } }
+    ```
+*   **`grep`**: `live_grep` のような動的検索を実行します。
+    ```lua
+    source = { 
+      type = "grep", 
+      search_paths = { "Source/Runtime" }, 
+      include_extensions = { "h", "cpp" } 
+    }
+    ```
+*   **`job`**: 外部コマンド（`fd` 等）を実行し、その標準出力をリストとして表示します。
+    ```lua
+    source = { type = "job", command = { "fd", "--type", "f", "." } }
+    ```
+*   **`callback`**: 関数を通じて動的に項目を流し込みます。
+    ```lua
+    source = {
+      type = "callback",
+      fn = function(push)
+        push({ "Item A", "Item B" }) -- 一括追加
+        -- 非同期での追加もサポート
+        some_async_request(function(data) push(data) end)
+      end
+    }
+    ```
+
+### 独自のピッカー実装の注入
+
+ユーザーは設定の `ui.picker.mode` に関数を渡すことで、UNLがサポートしていないピッカー（`mini.pick`, `vim-clap` 等）を透過的に利用できます。
+
+```lua
+require('UNL').setup({
+  ui = {
+    picker = {
+      mode = function(spec)
+        -- spec を解釈して独自のロジックを実行
+        require('mini.pick').start({
+          source = { items = spec.items, name = spec.title },
+          callback = spec.on_confirm
+        })
+      end
+    }
+  }
+})
+```
+
 ## 📜 ライセンス (License)
 
 MIT License

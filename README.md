@@ -208,6 +208,92 @@ end)
 
 -----
 
+## 🎨 Unified Picker API
+
+Use `require("UNL.picker").open(spec)` to display the best picker based on the user's environment (Telescope, fzf-lua, Snacks, etc.). This allows plugin developers to provide a consistent rich UI without worrying about backend differences.
+
+### Basic Usage
+
+```lua
+local unl_picker = require("UNL.picker")
+
+unl_picker.open({
+  title = "Select Module",
+  items = { "Core", "Engine", "Project" }, -- Static list
+  on_confirm = function(selection)
+    print("Selected: " .. selection)
+  end,
+})
+```
+
+### Spec (Options) Definition
+
+The `spec` table passed to `open()` supports the following fields:
+
+| Field | Type | Description |
+| :--- | :--- | :--- |
+| `title` | `string` | The title of the picker. |
+| `source` | `table` | Data source definition (see below). |
+| `items` | `table` | Shorthand for `source.type = "static"`. A list of items. |
+| `on_confirm` | `function` | Callback when an item is confirmed. Receives the selection. |
+| `multiselect` | `string/bool` | Selection mode: `"loop"` (safe looping UI), `"native"` (backend native UI), or `"none"` (single selection). |
+| `preview_enabled`| `boolean` | Whether to enable the previewer. |
+| `devicons_enabled`| `boolean` | Whether to show icons. |
+
+### Source Type Variations
+
+You can handle different data formats by specifying the `source` field:
+
+*   **`static`**: Displays a fixed list.
+    ```lua
+    source = { type = "static", items = { { label = "Item 1", value = 1 }, ... } }
+    ```
+*   **`grep`**: Performs a dynamic search like `live_grep`.
+    ```lua
+    source = { 
+      type = "grep", 
+      search_paths = { "Source/Runtime" }, 
+      include_extensions = { "h", "cpp" } 
+    }
+    ```
+*   **`job`**: Runs an external command (e.g., `fd`) and lists its output.
+    ```lua
+    source = { type = "job", command = { "fd", "--type", "f", "." } }
+    ```
+*   **`callback`**: Dynamically push items via a function.
+    ```lua
+    source = {
+      type = "callback",
+      fn = function(push)
+        push({ "Item A", "Item B" }) -- Push a list
+        -- Supports asynchronous updates
+        some_async_request(function(data) push(data) end)
+      end
+    }
+    ```
+
+### Injecting Custom Pickers
+
+Users can use a completely custom picker implementation by passing a function to `ui.picker.mode`.
+
+```lua
+require('UNL').setup({
+  ui = {
+    picker = {
+      mode = function(spec)
+        -- Interpret the spec and show your preferred UI (e.g., mini.pick)
+        require('mini.pick').start({
+          source = { items = spec.items, name = spec.title },
+          callback = spec.on_confirm
+        })
+      end
+    }
+  }
+})
+```
+
+-----
+
 ## 📜 License
 
 MIT License

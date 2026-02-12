@@ -37,6 +37,19 @@ function M.run_with_fallback(opts)
   local conf = opts.conf or {}
   local mode = conf.mode or "auto"
   
+  -- ★ 修正: mode が関数の場合、カスタムピッカーとして直接実行する
+  if type(mode) == "function" then
+    log.debug("%s: Using custom picker function from configuration.", opts.picker_type_name)
+    local ok, err = pcall(mode, opts.spec)
+    if ok then
+      return
+    else
+      log.error("%s: Custom picker function failed: %s", opts.picker_type_name, tostring(err))
+      -- 失敗した場合は auto モードとしてフォールバックを試みる
+      mode = "auto"
+    end
+  end
+  
   -- 2. mode に基づいて、試行するプロバイダーのリストを構築
   local prefer_chain = {}
   if mode == "auto" then

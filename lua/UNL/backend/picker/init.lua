@@ -25,8 +25,24 @@ end
 function M.pick(spec)
   M.load_providers(spec)
   
+  -- Backward compatibility
+  if not spec.on_confirm and spec.on_submit then
+    spec.on_confirm = spec.on_submit
+  end
+  if not spec.source then
+    if spec.items then
+      spec.source = { type = "static", items = spec.items }
+    elseif spec.exec_cmd then
+      spec.source = { type = "job", command = spec.exec_cmd }
+    elseif spec.start then
+      spec.source = { type = "callback", fn = spec.start }
+    end
+  end
+
   -- 1. picker用の設定を取得
-  local conf = spec.conf.ui.picker or unl_config.get("UNL").ui.picker
+  local conf = (spec.conf and spec.conf.ui and (spec.conf.ui.picker or spec.conf.ui.grep_picker or spec.conf.ui.find_picker))
+    or (spec.conf and spec.conf.mode and spec.conf)
+    or unl_config.get("UNL").ui.picker
   
   -- 2. factoryに設定オブジェクトをそのまま渡す
   unl_picker_factory.run_with_fallback({

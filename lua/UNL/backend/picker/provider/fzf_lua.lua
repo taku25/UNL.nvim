@@ -1,4 +1,5 @@
 -- lua/UNL/backend/picker/provider/fzf_lua.lua
+-- Unified fzf-lua provider for UNL.nvim
 
 local M = { name = "fzf-lua" }
 
@@ -7,107 +8,135 @@ function M.available()
 end
 
 function M.run(spec)
-  local fzf_lua = require("fzf-lua")
-  local log = require("UNL.logging").get("UNL")
-  local builtin = require("fzf-lua.previewer.builtin")
   spec = spec or {}
+  local source = spec.source or { type = "static", items = spec.items }
+  
+  if source.type == "static" then
+    return M.run_static(spec, source)
+  elseif source.type == "grep" then
+    return M.run_grep(spec, source)
+  elseif source.type == "callback" then
+    return M.run_callback(spec, source)
+  elseif source.type == "job" then
+    return M.run_job(spec, source)
+  end
+end
 
+function M.run_job(spec, source)
+  local fzf = require("fzf-lua")
+  local cmd = source.command
+  if type(cmd) == "table" then cmd = table.concat(cmd, " ") end
+  
+  fzf.fzf_exec(cmd, {
+    prompt = spec.title or "Find> ",
+    cwd = spec.cwd or vim.loop.cwd(),
+    actions = {
+      ["default"] = function(selected)
+        if selected and #selected > 0 and spec.on_confirm then
+          vim.schedule(function() spec.on_confirm(selected[1]) end)
+        end
+      end
+    }
+  })
+end
+
+function M.run_static(spec, source)
+  local fzf = require("fzf-lua")
+  local builtin = require("fzf-lua.previewer.builtin")
+  
   local display_items = {}
-  local display_to_processed_item = {}
+  local lookup = {}
 
-  if spec.items then
-    local entry_maker_to_use = spec.entry_maker or function(item)
-      local value, display, filename, lnum, col
-      if type(item) == 'table' then
-        value = item.value or item
-        display = item.display or item.label or item.name or tostring(value)
-        filename = item.filename or item.file_path
-        
-        -- ★★★ 修正: 行番号・列番号のエイリアスに対応 ★★★
-        lnum = item.lnum or item.line or item.row
-        col = item.col
-      else
-        value = item
-        display = tostring(item)
-        filename = tostring(item)
-      end
-      if type(value) == 'table' and string.match(display, "^table: 0x") then
-        display = value.display or value.label or value.name or display
-      end
-      
-      -- 数値型に変換しておく
-      if lnum then lnum = tonumber(lnum) end
-      if col then col = tonumber(col) end
-
-      return { value = value, display = display, filename = filename, lnum = lnum, col = col }
+  for _, item in ipairs(source.items or {}) do
+    local value, display, filename, lnum, col
+    if type(item) == 'table' then
+      value, display = item.value or item, item.display or item.label or item.name or tostring(item.value or item)
+      filename, lnum, col = item.filename or item.file_path, item.lnum or item.line or item.row, item.col
+    else
+      value, display, filename = item, tostring(item), tostring(item)
     end
-
-    for _, item in ipairs(spec.items) do
-      local processed = entry_maker_to_use(item)
-      local display_key = processed.display or ""
-      table.insert(display_items, display_key)
-      display_to_processed_item[display_key] = processed
-    end
+    
+    local processed = { value = value, filename = filename, lnum = tonumber(lnum), col = tonumber(col) }
+    table.insert(display_items, display)
+    lookup[display] = processed
   end
 
-  local fzf_opts = {
+  local opts = {
     prompt = spec.title or "Select Item> ",
     cwd = spec.cwd or vim.loop.cwd(),
-    -- FzfLuaはデフォルトでマルチ選択が可能だが、呼び出し元の意図に合わせて制御したい場合はここで行う
-    -- (fzf-luaのAPI仕様上、完全にシングルモードにするオプションはないが、header等で案内は可能)
+    multiselect = (spec.multiselect == "native" or spec.multiselect == true),
     actions = {
-      ["default"] = function(selected_list)
-        if not selected_list then selected_list = {} end
-        
+      ["default"] = function(selected)
+        if not selected or #selected == 0 then return end
         local results = {}
-        for _, display_key in ipairs(selected_list) do
-          local item = display_to_processed_item[display_key]
-          if item then table.insert(results, item.value) end
+        for _, key in ipairs(selected) do if lookup[key] then table.insert(results, lookup[key].value) end end
+        if spec.on_confirm then
+          local is_multi = (spec.multiselect == "native" or spec.multiselect == true)
+          vim.schedule(function() spec.on_confirm(is_multi and results or results[1]) end)
         end
-
-        if spec.on_submit then
-          if spec.multi_select then
-            vim.schedule(function() spec.on_submit(results) end)
-          else
-            vim.schedule(function() spec.on_submit(#results > 0 and results[1] or nil) end)
-          end
-        end
-      end,
-      ["ctrl-c"] = function() if spec.on_cancel then vim.schedule(spec.on_cancel) end end,
-    },
+      end
+    }
   }
 
   if spec.preview_enabled ~= false then
-    local GenericFzfPreviewer = builtin.buffer_or_file:extend()
-
-    function GenericFzfPreviewer:new(o, opts, fzf_win)
-      GenericFzfPreviewer.super.new(self, o, opts, fzf_win)
-      setmetatable(self, GenericFzfPreviewer)
-      return self
+    local Prev = builtin.buffer_or_file:extend()
+    function Prev:new(o, opts, f_win) Prev.super.new(self, o, opts, f_win); setmetatable(self, Prev); return self end
+    function Prev:parse_entry(entry)
+      local it = lookup[entry]
+      return it and { path = it.filename, line = it.lnum, col = it.col } or {}
     end
-    
-    function GenericFzfPreviewer:parse_entry(entry_str)
-      local item = display_to_processed_item[entry_str]
-      if item and item.filename and type(item.filename) == 'string' then
-        return {
-          path = item.filename,
-          line = item.lnum, -- ここにはエイリアス解決済みの値が入っている
-          col = item.col,
-        }
+    opts.previewer = Prev
+  end
+
+  fzf.fzf_exec(display_items, opts)
+end
+
+function M.run_grep(spec, source)
+  local fzf = require("fzf-lua")
+  local args = { "--vimgrep", "--line-number", "--column", "--smart-case", "--no-heading", "--hidden" }
+  for _, dir in ipairs(source.exclude_directories or {}) do table.insert(args, "--glob"); table.insert(args, "!" .. dir) end
+  for _, ext in ipairs(source.include_extensions or {}) do table.insert(args, "-g"); table.insert(args, "*." .. ext) end
+  
+  fzf.live_grep({
+    prompt = spec.title or "Live Grep> ",
+    search_dirs = source.search_paths,
+    rg_opts = table.concat(args, " "),
+    actions = {
+      ["default"] = function(selected)
+        local e = selected[1]
+        if not e then return end
+        local f, l, c = e:match("^([^:]+):(%d+):(%d+):.*$")
+        if f and l and spec.on_confirm then
+          vim.schedule(function() spec.on_confirm({ filename = f, lnum = tonumber(l), col = tonumber(c) }) end)
+        end
       end
-      return {}
-    end
-    
-    fzf_opts.previewer = GenericFzfPreviewer
-  end
+    }
+  })
+end
 
-  if #display_items > 0 then
-    fzf_lua.fzf_exec(display_items, fzf_opts)
-  elseif spec.exec_cmd then
-    fzf_lua.fzf_exec(spec.exec_cmd, fzf_opts)
-  else
-    log.warn("fzf-lua provider: No items or exec_cmd provided.")
+function M.run_callback(spec, source)
+  local fzf = require("fzf-lua")
+  local fzf_fn = function(cb)
+    local push = function(items)
+      if not items then return end
+      local to_add = (type(items) == "table" and items[1] ~= nil) and items or {items}
+      for _, it in ipairs(to_add) do
+        local line = (type(it) == "table") and (it.display or it.label or it.filename or tostring(it.value)) or tostring(it)
+        cb(line)
+      end
+    end
+    if source.fn then source.fn(push) end
   end
+  fzf.fzf_exec(fzf_fn, {
+    prompt = (spec.title or "Stack") .. "> ",
+    actions = {
+      ["default"] = function(selected)
+        if selected and #selected > 0 and spec.on_confirm then
+          vim.schedule(function() spec.on_confirm(selected[1]) end)
+        end
+      end
+    }
+  })
 end
 
 return M
