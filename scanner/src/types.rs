@@ -214,7 +214,14 @@ pub enum QueryRequest {
         pattern: String,
         project_root: String,
     },
-    ParseBuffer { content: String, file_path: Option<String> },
+    ParseBuffer { 
+        content: String, 
+        file_path: Option<String>,
+        #[serde(default)]
+        line: Option<u32>,
+        #[serde(default)]
+        character: Option<u32>,
+    },
     UpdateMemberReturnType { class_name: String, member_name: String, return_type: String },
     GetTargetFiles,
     GetAllFilePaths,

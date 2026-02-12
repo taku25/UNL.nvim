@@ -288,7 +288,7 @@ pub fn process_query(conn: &Connection, req: QueryRequest) -> anyhow::Result<Val
              Ok(json!(res))
         },
         QueryRequest::GetFileSymbols { file_path } => class::get_file_symbols(conn, file_path),
-        QueryRequest::ParseBuffer { content, file_path } => buffer::parse_buffer(content, file_path),
+        QueryRequest::ParseBuffer { content, file_path, line, character } => buffer::parse_buffer(content, file_path, line, character),
         QueryRequest::UpdateMemberReturnType { .. } => {
              // String Interning対応の実装を保留
              Err(anyhow::anyhow!("UpdateMemberReturnType is not yet updated for String Interning"))

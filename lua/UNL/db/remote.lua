@@ -244,21 +244,30 @@ function M.get_file_symbols(file_path, cb)
     M.request("GetFileSymbols", { file_path = file_path }, cb)
 end
 
-function M.parse_buffer(bufnr, cb)
-    bufnr = bufnr or vim.api.nvim_get_current_buf()
-    if not vim.api.nvim_buf_is_valid(bufnr) then
-        if cb then cb(nil, "Invalid buffer") end
-        return
+function M.parse_buffer(bufnr_or_opts, cb)
+    local params = {}
+    
+    if type(bufnr_or_opts) == "table" then
+        -- オプションテーブルが渡された場合
+        params.content = bufnr_or_opts.content
+        params.file_path = bufnr_or_opts.file_path
+        params.line = bufnr_or_opts.line
+        params.character = bufnr_or_opts.character
+    else
+        -- バッファ番号が渡された場合（またはnilの場合）
+        local bufnr = bufnr_or_opts or vim.api.nvim_get_current_buf()
+        if not vim.api.nvim_buf_is_valid(bufnr) then
+            if cb then cb(nil, "Invalid buffer") end
+            return
+        end
+
+        local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+        params.content = table.concat(lines, "\n")
+        local file_path = vim.api.nvim_buf_get_name(bufnr)
+        params.file_path = (file_path ~= "") and file_path or nil
     end
 
-    local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
-    local content = table.concat(lines, "\n")
-    local file_path = vim.api.nvim_buf_get_name(bufnr)
-
-    M.request("ParseBuffer", {
-        content = content,
-        file_path = (file_path ~= "") and file_path or nil
-    }, cb)
+    M.request("ParseBuffer", params, cb)
 end
 
 function M.update_member_return_type(class_name, member_name, return_type, cb)
