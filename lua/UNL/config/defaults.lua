@@ -9,14 +9,6 @@ local M = {
       mode = "auto",
       prefer = { "telescope", "fzf-lua", "snacks" }
     },
-    find_picker = {
-      mode = "auto",
-      prefer = { "telescope", "fzf-lua", "snacks" }
-    },
-    dynamic_picker = {
-      mode = "auto",
-      prefer = { "telescope", "fzf-lua", "snacks" }
-    },
     filer = {
       mode = "auto",
       prefer = { "nvim-tree", "neo-tree", "native", "dummy"  },
