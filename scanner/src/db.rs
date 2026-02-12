@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use rusqlite::{params, Connection};
 use crate::types::{ParseResult, ProgressReporter};
 
-pub const DB_VERSION: i32 = 2;
+pub const DB_VERSION: i32 = 3;
 
 pub fn init_db(conn: &Connection) -> rusqlite::Result<()> {
     conn.busy_timeout(std::time::Duration::from_millis(5000))?;
@@ -90,15 +90,18 @@ pub fn init_db(conn: &Connection) -> rusqlite::Result<()> {
             return_type_id INTEGER,
             is_static INTEGER,
             line_number INTEGER,
+            file_id INTEGER,
             FOREIGN KEY(class_id) REFERENCES classes(id) ON DELETE CASCADE,
             FOREIGN KEY(name_id) REFERENCES strings(id),
             FOREIGN KEY(type_id) REFERENCES strings(id),
-            FOREIGN KEY(return_type_id) REFERENCES strings(id)
+            FOREIGN KEY(return_type_id) REFERENCES strings(id),
+            FOREIGN KEY(file_id) REFERENCES files(id) ON DELETE CASCADE
         )",
         [],
     )?;
     conn.execute("CREATE INDEX IF NOT EXISTS idx_members_class_id ON members(class_id)", [])?;
     conn.execute("CREATE INDEX IF NOT EXISTS idx_members_name_id ON members(name_id)", [])?;
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_members_file_id ON members(file_id)", [])?;
 
     // 5. Enum Values
     conn.execute(
@@ -209,7 +212,7 @@ pub fn save_to_db(conn: &mut Connection, results: &[ParseResult], reporter: Arc<
             let mut stmt_class_id = tx.prepare("SELECT id FROM classes WHERE name_id = ? AND file_id = ? LIMIT 1")?;
             let mut stmt_inheritance = tx.prepare("INSERT OR IGNORE INTO inheritance (child_id, parent_name_id) VALUES (?, ?)")?;
             let mut stmt_enum = tx.prepare("INSERT OR IGNORE INTO enum_values (enum_id, name_id) VALUES (?, ?)")?;
-            let mut stmt_member = tx.prepare("INSERT OR IGNORE INTO members (class_id, name_id, type_id, flags, access, detail, return_type_id, is_static, line_number) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")?;
+            let mut stmt_member = tx.prepare("INSERT OR IGNORE INTO members (class_id, name_id, type_id, flags, access, detail, return_type_id, is_static, line_number, file_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")?;
 
             for (i, result) in batch.iter().enumerate() {
                 let global_i = current_idx + i;
@@ -283,7 +286,7 @@ pub fn save_to_db(conn: &mut Connection, results: &[ParseResult], reporter: Arc<
                                     };
 
                                     let _ = stmt_member.execute(params![
-                                        class_id, mem_name_id, type_id, mem.flags, mem.access, mem.detail, rt_id, is_static, mem.line as i64
+                                        class_id, mem_name_id, type_id, mem.flags, mem.access, mem.detail, rt_id, is_static, mem.line as i64, file_id
                                     ]);
                                 }
                             }

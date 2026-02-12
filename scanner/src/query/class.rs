@@ -73,7 +73,7 @@ pub fn get_recursive_parent_classes(conn: &Connection, child_class: String) -> a
           SELECT p.id, spc.text as name, c.level + 1
           FROM classes p
           JOIN strings spc ON p.name_id = spc.id
-          JOIN inheritance i ON p.id = i.child_id -- This join was slightly wrong in logic before, but we follow parent_name_id
+          JOIN inheritance i ON p.id = i.child_id
           JOIN strings si ON i.parent_name_id = si.id
           JOIN parents_cte c ON si.text = c.name
         )
@@ -322,40 +322,145 @@ pub fn get_class_members_recursive(conn: &Connection, class_name: String, namesp
 
 pub fn get_file_symbols(conn: &Connection, file_path: String) -> anyhow::Result<Value> {
     let normalized_path = if std::path::MAIN_SEPARATOR == '\\' { file_path.replace('\\', "/") } else { file_path.clone() };
+    
+    // 1. Get current file info
+    let file_info = conn.query_row(
+        "SELECT f.filename_id, f.module_id FROM files f 
+         JOIN strings s ON f.path_id = s.id 
+         WHERE LOWER(s.text) = LOWER(?)",
+        [&normalized_path],
+        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+    ).optional()?;
+
+    let (filename_id, module_id) = match file_info {
+        Some(info) => info,
+        None => return Ok(json!([])),
+    };
+
+    // 2. Get the stem (filename without extension)
+    let filename: String = conn.query_row("SELECT text FROM strings WHERE id = ?", [filename_id], |r| r.get(0))?;
+    let stem = filename.split('.').next().unwrap_or(&filename);
+
+    // 3. Find all files in the same module with the same stem (e.g. MyActor.h, MyActor.cpp)
     let mut stmt = conn.prepare(
-        "SELECT c.id, sc.text, c.symbol_type, c.line_number, sns.text, sb.text, c.end_line_number, sm.text, sr.text 
-         FROM classes c 
-         JOIN strings sc ON c.name_id = sc.id
-         LEFT JOIN strings sns ON c.namespace_id = sns.id
-         LEFT JOIN strings sb ON c.base_class_id = sb.id
-         JOIN files f ON c.file_id = f.id 
+        "SELECT f.id, sp.text as full_path, sm.text as module_name, sr.text as module_root 
+         FROM files f 
          JOIN strings sp ON f.path_id = sp.id
-         LEFT JOIN modules m ON f.module_id = m.id 
-         LEFT JOIN strings sm ON m.name_id = sm.id
-         LEFT JOIN strings sr ON m.root_path_id = sr.id
-         WHERE LOWER(sp.text) = LOWER(?)"
+         JOIN strings sn ON f.filename_id = sn.id
+         JOIN modules m ON f.module_id = m.id
+         JOIN strings sm ON m.name_id = sm.id
+         JOIN strings sr ON m.root_path_id = sr.id
+         WHERE f.module_id = ? AND sn.text LIKE ?"
     )?;
-    let class_rows = stmt.query_map([&normalized_path], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, i64>(3)?, row.get::<_, Option<String>>(4)?, row.get::<_, Option<String>>(5)?, row.get::<_, Option<i64>>(6)?, row.get::<_, Option<String>>(7)?, row.get::<_, Option<String>>(8)?)))?;
+    let target_like = format!("{}%", stem);
+    let related_files: Vec<(i64, String, String, String)> = stmt.query_map(params![module_id, target_like], |row| {
+        Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+    })?.filter_map(|r| r.ok()).collect();
+
+    if related_files.is_empty() { return Ok(json!([])); }
+
+    let file_ids: Vec<i64> = related_files.iter().map(|f| f.0).collect();
+    let placeholders: Vec<String> = file_ids.iter().map(|_| "?".to_string()).collect();
+    let sql_ids = placeholders.join(",");
+
+    // 4. Find all class_ids associated with these files
+    let mut stmt = conn.prepare(&format!(
+        "SELECT DISTINCT class_id FROM (
+            SELECT id as class_id FROM classes WHERE file_id IN ({})
+            UNION
+            SELECT class_id FROM members WHERE file_id IN ({})
+        )", sql_ids, sql_ids
+    ))?;
+    let mut params_ids: Vec<&dyn ToSql> = Vec::new();
+    for id in &file_ids { params_ids.push(id); }
+    for id in &file_ids { params_ids.push(id); }
+    
+    let class_ids: Vec<i64> = stmt.query_map(rusqlite::params_from_iter(params_ids), |row| row.get(0))?
+        .filter_map(|r| r.ok()).collect();
+
     let mut results = Vec::new();
-    for r in class_rows {
-        let (cid, cname, ctype, cline, cns, cbase, cend, mname, mroot) = r?;
-        let mut class_info = json!({ "name": cname, "kind": ctype, "line": cline, "end_line": cend.unwrap_or(cline), "namespace": cns, "base_class": cbase, "file_path": file_path, "module_name": mname, "module_root": mroot, "fields": { "public": [], "protected": [], "private": [] }, "methods": { "public": [], "protected": [], "private": [] } });
+
+    for cid in class_ids {
+        // 5. Fetch full class info
+        let class_info = conn.query_row(
+            "SELECT sc.text as name, c.symbol_type, c.line_number, sns.text as namespace, sb.text as base_class, c.end_line_number, sm.text as module_name, sr.text as module_root, sp.text as file_path
+             FROM classes c 
+             JOIN strings sc ON c.name_id = sc.id
+             LEFT JOIN strings sns ON c.namespace_id = sns.id
+             LEFT JOIN strings sb ON c.base_class_id = sb.id
+             JOIN files f ON c.file_id = f.id
+             JOIN strings sp ON f.path_id = sp.id
+             LEFT JOIN modules m ON f.module_id = m.id
+             LEFT JOIN strings sm ON m.name_id = sm.id
+             LEFT JOIN strings sr ON m.root_path_id = sr.id
+             WHERE c.id = ?",
+            [cid],
+            |row| Ok(json!({
+                "name": row.get::<_, String>(0)?,
+                "kind": row.get::<_, String>(1)?,
+                "line": row.get::<_, i64>(2)?,
+                "namespace": row.get::<_, Option<String>>(3)?,
+                "base_class": row.get::<_, Option<String>>(4)?,
+                "end_line": row.get::<_, Option<i64>>(5)?,
+                "module_name": row.get::<_, Option<String>>(6)?,
+                "module_root": row.get::<_, Option<String>>(7)?,
+                "file_path": row.get::<_, String>(8)?,
+                "fields": { "public": [], "protected": [], "private": [] },
+                "methods": { "public": [], "protected": [], "private": [] }
+            }))
+        ).optional()?;
+
+        let mut class_json = match class_info {
+            Some(info) => info,
+            None => continue,
+        };
+
+        let current_class_name = class_json["name"].as_str().unwrap_or("").to_string();
+
+        // 6. Fetch ALL members for this class (from ALL files related to this class)
         let mut mem_stmt = conn.prepare(
-            "SELECT sn.text, st.text, flags, access, detail, srt.text, is_static, line_number 
+            "SELECT sn.text as name, st.text as type, m.flags, m.access, m.detail, srt.text as return_type, m.is_static, m.line_number, sp.text as file_path
              FROM members m
              JOIN strings sn ON m.name_id = sn.id
              JOIN strings st ON m.type_id = st.id
              LEFT JOIN strings srt ON m.return_type_id = srt.id
-             WHERE class_id = ? ORDER BY sn.text"
+             JOIN files f ON m.file_id = f.id
+             JOIN strings sp ON f.path_id = sp.id
+             WHERE m.class_id = ? ORDER BY m.line_number"
         )?;
-        let mem_rows = mem_stmt.query_map([cid], |row| Ok(json!({ "name": row.get::<_, String>(0)?, "kind": row.get::<_, String>(1)?, "flags": row.get::<_, Option<String>>(2)?, "access": row.get::<_, Option<String>>(3)?, "detail": row.get::<_, Option<String>>(4)?, "return_type": row.get::<_, Option<String>>(5)?, "is_static": row.get::<_, i64>(6)? == 1, "file_path": file_path, "line": row.get::<_, i64>(7)? })))?;
+
+        let mem_rows = mem_stmt.query_map([cid], |row| {
+            let m_type: String = row.get(1)?;
+            let access = row.get::<_, Option<String>>(3).unwrap_or(Some("public".to_string())).unwrap_or("public".to_string()).to_lowercase();
+            let m_name: String = row.get(0)?;
+            
+            // Picker表示用にクラス名をカッコで付与するヒントを追加
+            let display_name = format!("{} ({})", m_name, current_class_name);
+
+            Ok((access, m_type, json!({
+                "name": m_name,
+                "display": display_name,
+                "kind": row.get::<_, String>(1)?,
+                "flags": row.get::<_, Option<String>>(2)?,
+                "access": row.get::<_, Option<String>>(3)?,
+                "detail": row.get::<_, Option<String>>(4)?,
+                "return_type": row.get::<_, Option<String>>(5)?,
+                "is_static": row.get::<_, i64>(6)? == 1,
+                "line": row.get::<_, i64>(7)?,
+                "file_path": row.get::<_, String>(8)?
+            })))
+        })?;
+
         for m_res in mem_rows {
-            let m = m_res?;
-            let access = m["access"].as_str().unwrap_or("public").to_lowercase();
-            let target = if m["kind"].as_str().unwrap_or("").to_lowercase().contains("function") { "methods" } else { "fields" };
-            class_info[target].as_object_mut().unwrap().entry(access).or_insert(json!([])).as_array_mut().unwrap().push(m);
+            let (access, m_type, m_json) = m_res?;
+            let target = if m_type.to_lowercase().contains("function") { "methods" } else { "fields" };
+            if let Some(map) = class_json[target].as_object_mut() {
+                map.entry(access).or_insert(json!([])).as_array_mut().unwrap().push(m_json);
+            }
         }
-        results.push(class_info);
+
+        results.push(class_json);
     }
+
     Ok(json!(results))
 }

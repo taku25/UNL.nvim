@@ -249,6 +249,7 @@ pub fn run_refresh(req: RefreshRequest, reporter: Arc<dyn ProgressReporter>) -> 
             let filename = Path::new(&path).file_name().and_then(|s| s.to_str()).unwrap_or("unknown");
             let path_id = get_id(&tx, &mut string_cache, &path)?;
             let filename_id = get_id(&tx, &mut string_cache, filename)?;
+            // INSERT OR REPLACE files
             tx.execute("INSERT OR REPLACE INTO files (path_id, filename_id, extension, mtime, module_id, is_header) VALUES (?, ?, ?, ?, ?, 0)", params![path_id, filename_id, ext, mtime as i64, mod_id])?;
         }
         tx.commit()?;
