@@ -85,9 +85,31 @@ impl AppState {
             return Ok(Arc::clone(conn));
         }
 
-        info!("Opening new database connection: {}", db_path_native);
-        let conn = rusqlite::Connection::open(db_path_native)?;
+        info!("Opening database connection: {}", db_path_native);
+        let mut conn = rusqlite::Connection::open(db_path_native)?;
         
+        // Check DB version
+        let mut version_match = false;
+        if let Ok(version_str) = conn.query_row(
+            "SELECT value FROM project_meta WHERE key = 'db_version'",
+            [],
+            |row| row.get::<_, String>(0),
+        ) {
+            if let Ok(version) = version_str.parse::<i32>() {
+                if version == db::DB_VERSION {
+                    version_match = true;
+                }
+            }
+        }
+
+        if !version_match {
+            info!("DB version mismatch or missing. Re-initializing database: {}", db_path_native);
+            drop(conn);
+            let _ = std::fs::remove_file(db_path_native);
+            conn = rusqlite::Connection::open(db_path_native)?;
+            db::init_db(&conn)?;
+        }
+
         // Performance tuning for queries
         let _ = conn.pragma_update(None, "journal_mode", "WAL");
         let _ = conn.pragma_update(None, "synchronous", "NORMAL");
