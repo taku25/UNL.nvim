@@ -140,6 +140,11 @@ function M.parse_buffer(bufnr, callback)
     remote.parse_buffer(bufnr, callback)
 end
 
+--- アセットファイルを検索する (非同期)
+function M.grep_assets(pattern, on_partial, on_complete)
+    remote.grep_assets(pattern, on_partial, on_complete)
+end
+
 --- メンバーの戻り値型を更新 (書き込み操作)
 function M.update_member_return_type(class_name, member_name, return_type, callback)
     remote.update_member_return_type(class_name, member_name, return_type, callback)

@@ -74,6 +74,10 @@ function M.get_classes_in_modules_async(modules, symbol_type, on_partial, on_com
     M.request_streaming("GetClassesInModulesAsync", { modules = modules, symbol_type = symbol_type }, on_partial, on_complete)
 end
 
+function M.grep_assets(pattern, on_partial, on_complete)
+    M.request_streaming("GrepAssets", { pattern = pattern }, on_partial, on_complete)
+end
+
 -- Standard Wrappers
 
 function M.find_derived_classes(base_class, cb)

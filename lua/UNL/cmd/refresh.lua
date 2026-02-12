@@ -14,6 +14,11 @@ local rpc = require("UNL.rpc")
 local server_manager = require("UNL.scanner.server")
 local vcs = require("UNL.vcs")
 
+local M = {}
+
+-- 実行中のリフレッシュをプロジェクトルート単位で管理
+local active_refreshes = {}
+
 function M.execute(opts, on_complete)
     opts = opts or {}
     
@@ -23,7 +28,8 @@ function M.execute(opts, on_complete)
             return
         end
 
-        local project_info = finder.project.find_project(vim.loop.cwd())
+        local cwd = vim.loop.cwd()
+        local project_info = finder.project.find_project(cwd)
         if not (project_info and project_info.uproject) then
             log.error("Could not find a .uproject file.")
             if on_complete then on_complete(false) end
@@ -31,6 +37,17 @@ function M.execute(opts, on_complete)
         end
         
         local project_root = vim.fn.fnamemodify(project_info.uproject, ":h")
+        local project_root_norm = path_util.normalize(project_root)
+
+        -- すでに実行中の場合はスキップ
+        if active_refreshes[project_root_norm] then
+            log.debug("Refresh already in progress for: %s. Skipping redundant request.", project_root_norm)
+            if on_complete then on_complete(true) end
+            return
+        end
+
+        active_refreshes[project_root_norm] = true
+        
         local engine_root = finder.engine.find_engine_root(project_info.uproject, {})
         local current_vcs = vcs.get_current_hash(project_root)
         
@@ -41,7 +58,7 @@ function M.execute(opts, on_complete)
 
         local req = {
             type = "refresh",
-            project_root = path_util.normalize(project_root),
+            project_root = project_root_norm,
             engine_root = engine_root and path_util.normalize(engine_root) or nil,
             db_path = path_util.get_db_path(project_root), 
             scope = opts.scope or "Full",
@@ -81,6 +98,8 @@ function M.execute(opts, on_complete)
                 progress:stage_update(stage, current, message)
             end
         end, function(success, result_or_err)
+            active_refreshes[project_root_norm] = nil -- 完了時にロックを解除
+            
             progress:finish(success)
             if success then
                 log.debug("Refresh completed successfully.")

@@ -210,6 +210,10 @@ pub enum QueryRequest {
     GetModuleDirsByNameAndRoot { name: String, root: String },
     GetClassFilePath { class_name: String },
     GetFileSymbols { file_path: String },
+    GrepAssets {
+        pattern: String,
+        project_root: String,
+    },
     ParseBuffer { content: String, file_path: Option<String> },
     UpdateMemberReturnType { class_name: String, member_name: String, return_type: String },
     GetTargetFiles,

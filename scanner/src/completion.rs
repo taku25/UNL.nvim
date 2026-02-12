@@ -206,8 +206,59 @@ fn resolve_expression_type(
             }
             Ok(None)
         }
+        "subscript_expression" => {
+            if let Some(obj_node) = node.child_by_field_name("argument") {
+                if let Some(obj_type) = resolve_expression_type(conn, obj_node, root, content, cursor_row)? {
+                    let unwrapped = unwrap_container_type(&obj_type);
+                    tracing::info!("Subscript detected: container type '{}' -> element type '{}'", obj_type, unwrapped);
+                    return Ok(Some(unwrapped));
+                }
+            }
+            Ok(None)
+        }
         _ => Ok(None)
     }
+}
+
+fn unwrap_container_type(t: &str) -> String {
+    let t = t.trim();
+    if let Some(start) = t.find('<') {
+        if let Some(end) = t.rfind('>') {
+            let wrapper = t[..start].trim();
+            let inner = &t[start + 1..end];
+            if wrapper == "TMap" {
+                // TMap<Key, Value> -> Value is the second argument
+                return get_template_argument(inner, 1).to_string();
+            } else if wrapper == "TArray" || wrapper == "TSet" {
+                return inner.to_string();
+            }
+        }
+    }
+    t.to_string()
+}
+
+fn get_template_argument(inner: &str, index: usize) -> &str {
+    let mut depth = 0;
+    let mut current_index = 0;
+    let mut start = 0;
+    for (i, c) in inner.char_indices() {
+        match c {
+            '<' => depth += 1,
+            '>' => depth -= 1,
+            ',' if depth == 0 => {
+                if current_index == index {
+                    return inner[start..i].trim();
+                }
+                start = i + 1;
+                current_index += 1;
+            }
+            _ => {}
+        }
+    }
+    if current_index == index {
+        return inner[start..].trim();
+    }
+    ""
 }
 
 fn find_member_return_type(conn: &Connection, class_name: &str, member_name: &str) -> anyhow::Result<Option<String>> {
@@ -472,7 +523,12 @@ fn extract_clean_type(raw: &str) -> String {
             if ["TObjectPtr", "TSharedPtr", "TUniquePtr", "TWeakObjectPtr", "TSubclassOf", "TSoftObjectPtr", "TSoftClassPtr", "TEnumAsByte"].contains(&wrapper) {
                 return extract_clean_type(inner);
             }
-            clean = wrapper.to_string();
+            if ["TMap", "TArray", "TSet"].contains(&wrapper) {
+                // Preserve the whole template for containers and return immediately
+                return clean.to_string();
+            } else {
+                clean = wrapper.to_string();
+            }
         }
     }
     let keywords = ["const", "typename", "struct", "class", "enum", "virtual", "static", "inline", "FORCEINLINE"];
