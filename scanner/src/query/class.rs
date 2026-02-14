@@ -363,16 +363,11 @@ pub fn get_file_symbols(conn: &Connection, file_path: String) -> anyhow::Result<
     let placeholders: Vec<String> = file_ids.iter().map(|_| "?".to_string()).collect();
     let sql_ids = placeholders.join(",");
 
-    // 4. Find all class_ids associated with these files
+    // 4. Find all class_ids associated with these files (Classes only)
     let mut stmt = conn.prepare(&format!(
-        "SELECT DISTINCT class_id FROM (
-            SELECT id as class_id FROM classes WHERE file_id IN ({})
-            UNION
-            SELECT class_id FROM members WHERE file_id IN ({})
-        )", sql_ids, sql_ids
+        "SELECT id FROM classes WHERE file_id IN ({})", sql_ids
     ))?;
     let mut params_ids: Vec<&dyn ToSql> = Vec::new();
-    for id in &file_ids { params_ids.push(id); }
     for id in &file_ids { params_ids.push(id); }
     
     let class_ids: Vec<i64> = stmt.query_map(rusqlite::params_from_iter(params_ids), |row| row.get(0))?
