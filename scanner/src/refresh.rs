@@ -11,6 +11,23 @@ use tree_sitter::Query;
 use crate::types::{RefreshRequest, ModuleDef, ComponentDef, ProgressReporter, InputFile, ParseResult};
 use crate::{scanner, db};
 
+#[derive(serde::Deserialize, Debug)]
+#[allow(non_snake_case)]
+struct UeBuildVersion {
+    MajorVersion: i32,
+    MinorVersion: i32,
+    PatchVersion: i32,
+    BranchName: String,
+}
+
+fn get_ue_version(engine_root: &Path) -> Option<UeBuildVersion> {
+    let version_path = engine_root.join("Engine/Build/Build.version");
+    if let Ok(content) = fs::read_to_string(version_path) {
+        return serde_json::from_str(&content).ok();
+    }
+    None
+}
+
 pub fn run_refresh(req: RefreshRequest, reporter: Arc<dyn ProgressReporter>) -> anyhow::Result<()> {
     let db_path_str = req.db_path.as_ref().ok_or_else(|| anyhow::anyhow!("DB path required for refresh"))?;
     
@@ -23,6 +40,12 @@ pub fn run_refresh(req: RefreshRequest, reporter: Arc<dyn ProgressReporter>) -> 
     let db_path_native = normalize_to_native(db_path_str);
 
     tracing::info!("Starting refresh. Project: {:?}, DB: {}", project_root, db_path_native);
+
+    // UEバージョンの取得
+    let ue_version = engine_root.as_ref().and_then(|r| get_ue_version(r));
+    if let Some(ref v) = ue_version {
+        tracing::info!("Detected Unreal Engine Version: {}.{}.{} ({})", v.MajorVersion, v.MinorVersion, v.PatchVersion, v.BranchName);
+    }
 
     if !project_root.exists() { return Err(anyhow::anyhow!("Project root does not exist: {:?}", project_root)); }
 
@@ -144,6 +167,14 @@ pub fn run_refresh(req: RefreshRequest, reporter: Arc<dyn ProgressReporter>) -> 
     let mut conn = Connection::open(db_path)?;
     conn.busy_timeout(std::time::Duration::from_millis(10000))?;
     db::init_db(&conn)?;
+
+    // ★ 追加: UEバージョンの保存
+    if let Some(v) = ue_version {
+        let _ = conn.execute("INSERT OR REPLACE INTO project_meta (key, value) VALUES ('ue_version_major', ?)", [v.MajorVersion.to_string()]);
+        let _ = conn.execute("INSERT OR REPLACE INTO project_meta (key, value) VALUES ('ue_version_minor', ?)", [v.MinorVersion.to_string()]);
+        let _ = conn.execute("INSERT OR REPLACE INTO project_meta (key, value) VALUES ('ue_version_patch', ?)", [v.PatchVersion.to_string()]);
+        let _ = conn.execute("INSERT OR REPLACE INTO project_meta (key, value) VALUES ('ue_version_branch', ?)", [v.BranchName]);
+    }
 
     let mut string_cache: HashMap<String, i64> = HashMap::new();
     let get_id = |tx: &rusqlite::Transaction, cache: &mut HashMap<String, i64>, text: &str| -> rusqlite::Result<i64> {
