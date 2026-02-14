@@ -114,5 +114,19 @@ pub fn search_files_by_path_part(conn: &Connection, part: String) -> anyhow::Res
     )?;
     let param = format!("%{}%", part);
     let rows = stmt.query_map([param], |row| Ok(json!({ "path": row.get::<_, String>(0)?, "filename": row.get::<_, String>(1)?, "module_root": row.get::<_, String>(2)? })))?;
-    Ok(json!(rows.collect::<Result<Vec<Value>, _>>()?))
-}
+        Ok(json!(rows.collect::<Result<Vec<Value>, _>>()?))
+    }
+    
+    pub fn get_assets(conn: &Connection) -> anyhow::Result<Value> {
+        let mut stmt = conn.prepare(
+            "SELECT sp.text as path 
+             FROM files f 
+             JOIN strings sp ON f.path_id = sp.id
+             WHERE (LOWER(f.extension) = 'uasset' OR LOWER(f.extension) = 'umap')
+             AND sp.text NOT LIKE '%/__ExternalActors__/%'
+             AND sp.text NOT LIKE '%/__ExternalObjects__/%'"
+        )?;
+        let rows = stmt.query_map([], |row| Ok(row.get::<_, String>(0)?))?;
+        Ok(json!(rows.collect::<Result<Vec<String>, _>>()?))
+    }
+    

@@ -6,7 +6,8 @@ local function _normalize(p)
   p = ok and np or p
   -- UNC の先頭はそのまま (//server/share) を許容
   -- バックスラッシュ統一 (normalize で大半は変わるが念のため)
-  p = p:gsub("\\", "/")
+  -- サーバー側の normalize_path_key に合わせて小文字化
+  p = p:gsub("\\", "/"):lower()
   -- 末尾スラッシュ除去（ルートは残す）
   if #p > 1 then
     p = p:gsub("/+$", "")

@@ -78,6 +78,18 @@ function M.grep_assets(pattern, on_partial, on_complete)
     M.request_streaming("GrepAssets", { pattern = pattern }, on_partial, on_complete)
 end
 
+function M.get_asset_usages(asset_path, callback)
+    M.request("GetAssetUsages", { asset_path = asset_path }, callback)
+end
+
+function M.get_asset_dependencies(asset_path, callback)
+    M.request("GetAssetDependencies", { asset_path = asset_path }, callback)
+end
+
+function M.get_assets(callback)
+    M.request("GetAssets", {}, callback)
+end
+
 -- Standard Wrappers
 
 function M.find_derived_classes(base_class, cb)
@@ -241,7 +253,8 @@ function M.get_class_file_path(class_name, cb)
 end
 
 function M.get_file_symbols(file_path, cb)
-    M.request("GetFileSymbols", { file_path = file_path }, cb)
+    local norm_path = file_path:gsub("\\", "/")
+    M.request("GetFileSymbols", { file_path = norm_path }, cb)
 end
 
 function M.parse_buffer(bufnr_or_opts, cb)

@@ -212,7 +212,6 @@ pub enum QueryRequest {
     GetFileSymbols { file_path: String },
     GrepAssets {
         pattern: String,
-        project_root: String,
     },
     ParseBuffer { 
         content: String, 
@@ -232,6 +231,13 @@ pub enum QueryRequest {
         character: u32,
         file_path: Option<String>,
     },
+    GetAssetUsages {
+        asset_path: String,
+    },
+    GetAssetDependencies {
+        asset_path: String,
+    },
+    GetAssets,
 }
 
 use std::io::{self, Write};

@@ -10,7 +10,7 @@ pub mod buffer;
 pub fn process_query_streaming<F>(conn: &Connection, req: QueryRequest, mut on_items: F) -> anyhow::Result<Value> 
 where F: FnMut(Vec<Value>) -> anyhow::Result<()> {
     match req {
-        QueryRequest::GrepAssets { pattern, .. } => asset::grep_assets(conn, pattern, on_items),
+        QueryRequest::GrepAssets { pattern } => asset::grep_assets(conn, pattern, on_items),
         QueryRequest::GetFilesInModulesAsync { modules, extensions, filter } => {
             if modules.is_empty() { return Ok(json!(0)); }
             let mut total_count = 0;
@@ -165,6 +165,7 @@ pub fn process_query(conn: &Connection, req: QueryRequest) -> anyhow::Result<Val
              Ok(json!(res_mem))
         },
         QueryRequest::FindClassByName { name } => class::find_class_by_name(conn, name),
+        QueryRequest::GetAssets => asset::get_assets(conn),
         QueryRequest::SearchClassesPrefix { prefix, limit } => class::search_classes_prefix(conn, prefix, limit),
         QueryRequest::GetClasses { extra_where, params: input_params } => {
              let mut sql = "SELECT c.id, sc.text as name, sb.text as base_class, c.symbol_type, sp.text as path, sm.text as module_name 
@@ -312,6 +313,9 @@ pub fn process_query(conn: &Connection, req: QueryRequest) -> anyhow::Result<Val
         QueryRequest::GetFilesInModulesAsync { .. } | 
         QueryRequest::SearchFilesInModulesAsync { .. } |
         QueryRequest::GetClassesInModulesAsync { .. } => Err(anyhow::anyhow!("Async queries must be processed via process_query_streaming")),
-        QueryRequest::GetCompletions { content, line, character, file_path } => crate::completion::process_completion(conn, &content, line, character, file_path),
-    }
-}
+                QueryRequest::GetCompletions { content, line, character, file_path } => crate::completion::process_completion(conn, &content, line, character, file_path),
+                QueryRequest::GetAssetUsages { .. } => Ok(serde_json::json!([])),
+                QueryRequest::GetAssetDependencies { .. } => Ok(serde_json::json!([])),
+            }
+        }
+        

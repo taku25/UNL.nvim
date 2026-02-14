@@ -145,6 +145,21 @@ function M.grep_assets(pattern, on_partial, on_complete)
     remote.grep_assets(pattern, on_partial, on_complete)
 end
 
+--- 指定したアセットを使用しているアセット一覧を取得
+function M.get_asset_usages(asset_path, callback)
+    remote.get_asset_usages(asset_path, callback)
+end
+
+--- 指定したアセットが依存しているアセット一覧を取得
+function M.get_asset_dependencies(asset_path, callback)
+    remote.get_asset_dependencies(asset_path, callback)
+end
+
+--- プロジェクト内の全アセット一覧を取得
+function M.get_assets(callback)
+    remote.get_assets(callback)
+end
+
 --- メンバーの戻り値型を更新 (書き込み操作)
 function M.update_member_return_type(class_name, member_name, return_type, callback)
     remote.update_member_return_type(class_name, member_name, return_type, callback)

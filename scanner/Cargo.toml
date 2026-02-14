@@ -15,6 +15,10 @@ path = "src/main.rs"
 name = "unl-server"
 path = "src/server_main.rs"
 
+[[bin]]
+name = "test_uasset"
+path = "src/bin/test_uasset.rs"
+
 [dependencies]
 tree-sitter = "0.26.5"
 tree-sitter-unreal-cpp = { git = "https://github.com/taku25/tree-sitter-unreal-cpp", rev = "7bbb85f1fcc6e109c90cea2167e88a5a472910d3" }
@@ -39,3 +43,4 @@ rmp-serde = "1.1"
 serde_bytes = "0.11"
 rmpv = { version = "1.0", features = ["with-serde"] }
 sysinfo = "0.30"
+byteorder = "1.4"

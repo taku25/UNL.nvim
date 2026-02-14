@@ -11,23 +11,44 @@ local finder = require("UNL.finder")
 
 local M = {}
 
+local active_starts = {}
+
 function M.execute(opts)
     opts = opts or {}
     
+    -- プロジェクトルートを取得して、既に開始処理中ならスキップ
+    local cwd = vim.loop.cwd()
+    local project_info = finder.project.find_project(cwd)
+    if not (project_info and project_info.uproject) then
+        local buf_path = vim.api.nvim_buf_get_name(0)
+        if buf_path ~= "" then
+            project_info = finder.project.find_project(vim.fn.fnamemodify(buf_path, ":p:h"))
+        end
+    end
+
+    if project_info and project_info.uproject then
+        local root_norm = path_util.normalize(vim.fn.fnamemodify(project_info.uproject, ":h"))
+        if active_starts[root_norm] then
+            log.debug("Start already in progress for %s. Skipping.", root_norm)
+            return
+        end
+        active_starts[root_norm] = true
+    end
+
     server_manager.start()
     
     local retries = 30
     local function poll_and_setup()
         rpc.request("ping", { pid = vim.loop.os_getpid() }, nil, function(ok, _)
             if ok then
-                -- Try to find project
-                local cwd = vim.loop.cwd()
-                local project_info = finder.project.find_project(cwd)
-                
+                -- Try to find project again (in case it wasn't found before)
                 if not (project_info and project_info.uproject) then
-                    local buf_path = vim.api.nvim_buf_get_name(0)
-                    if buf_path ~= "" then
-                        project_info = finder.project.find_project(vim.fn.fnamemodify(buf_path, ":p:h"))
+                    project_info = finder.project.find_project(vim.loop.cwd())
+                    if not (project_info and project_info.uproject) then
+                        local buf_path = vim.api.nvim_buf_get_name(0)
+                        if buf_path ~= "" then
+                            project_info = finder.project.find_project(vim.fn.fnamemodify(buf_path, ":p:h"))
+                        end
                     end
                 end
 
@@ -44,7 +65,10 @@ function M.execute(opts)
                 local db_path = path_util.get_db_path(project_root)
                 
                 rpc.request("list_projects", {}, nil, function(list_ok, projects)
-                    if not list_ok then return end
+                    if not list_ok then 
+                        active_starts[project_root_norm] = nil
+                        return 
+                    end
 
                     local is_registered = false
                     local last_vcs = nil
@@ -77,6 +101,8 @@ function M.execute(opts)
                         else
                              log.debug("UNL Server is ready for project: %s", project_root)
                         end
+                        -- 一旦完了とみなす (vcs_changed の場合でも refresh 内で管理される)
+                        active_starts[project_root_norm] = nil
                         return
                     end
 
@@ -85,6 +111,7 @@ function M.execute(opts)
                         local refresh_opts = vim.tbl_extend("force", opts, { scope = "Full" })
                         refresh.execute(refresh_opts)
                         watch.execute(opts)
+                        active_starts[project_root_norm] = nil
                         return
                     end
 
@@ -95,11 +122,18 @@ function M.execute(opts)
                             local refresh_opts = vim.tbl_extend("force", opts, { scope = "Full" })
                             refresh.execute(refresh_opts)
                         end
+                        active_starts[project_root_norm] = nil
                     end)
                 end)
             elseif retries > 0 then
                 retries = retries - 1
                 vim.defer_fn(poll_and_setup, 500)
+            else
+                -- Timeout
+                if project_info and project_info.uproject then
+                    local root_norm = path_util.normalize(vim.fn.fnamemodify(project_info.uproject, ":h"))
+                    active_starts[root_norm] = nil
+                end
             end
         end)
     end
