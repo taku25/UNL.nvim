@@ -21,5 +21,10 @@ fn main() -> anyhow::Result<()> {
         println!("Asset Ref: {}", import);
     }
 
+    println!("\n--- Functions ({}) ---", parser.functions.len());
+    for func in &parser.functions {
+        println!("Function: {}", func);
+    }
+
     Ok(())
 }

@@ -13,6 +13,7 @@ pub struct UAssetParser {
     pub name_map: Vec<String>,
     pub import_map: Vec<UObjectImport>,
     pub imports: Vec<String>,
+    pub functions: Vec<String>,
     pub parent_class: Option<String>,
     pub asset_name: String,
 }
@@ -23,6 +24,7 @@ impl UAssetParser {
             name_map: Vec::new(),
             import_map: Vec::new(),
             imports: Vec::new(),
+            functions: Vec::new(),
             parent_class: None,
             asset_name: String::new(),
         }
@@ -54,11 +56,16 @@ impl UAssetParser {
             if let Some(imp) = self.import_map.get(idx) {
                 let mut obj_name = imp.object_name.clone();
                 if obj_name.starts_with("Default__") { obj_name = obj_name.replace("Default__", ""); }
+                
                 if imp.outer_index != 0 {
                     let outer = self.resolve_path(imp.outer_index);
                     if outer.starts_with('/') {
-                        if outer.contains('.') { return outer; }
-                        return format!("{}.{}", outer, obj_name);
+                        // If it's a script/package path, use dot or colon
+                        let separator = if imp.class_name == "Function" { ":" } else { "." };
+                        if outer.contains(':') || (outer.contains('.') && separator == ".") {
+                             return format!("{}{}{}", outer, separator, obj_name);
+                        }
+                        return format!("{}{}{}", outer, separator, obj_name);
                     }
                     return format!("{}/{}", outer, obj_name);
                 }
@@ -152,7 +159,11 @@ impl UAssetParser {
         for i in 0..self.import_map.len() {
             let path = self.resolve_path(-(i as i32) - 1);
             if path.starts_with('/') {
-                self.imports.push(path);
+                if self.import_map[i].class_name == "Function" {
+                    self.functions.push(path);
+                } else {
+                    self.imports.push(path);
+                }
             }
         }
 

@@ -56,10 +56,10 @@ pub async fn handle_asset_scan(state: Arc<AppState>, project_root: String) {
                         filename.starts_with("DA_") || filename.starts_with("DT_");
 
                     if is_essential {
-                        if let Ok((parent, imports)) = parse_asset_file(path) {
+                        if let Ok((parent, imports, functions)) = parse_asset_file(path) {
                             count += 1;
                             let asset_path = to_asset_path(path);
-                            add_to_graph(&mut graph, asset_path, parent, imports);
+                            add_to_graph(&mut graph, asset_path, parent, imports, functions);
                         } else {
                             error_count += 1;
                         }
@@ -86,22 +86,22 @@ pub async fn update_single_asset(state: Arc<AppState>, project_root: &str, file_
     let path_clone = file_path.to_path_buf();
     
     let parse_res = tokio::task::spawn_blocking(move || {
-        parse_asset_file(&path_clone).map(|(p, i)| (to_asset_path(&path_clone), p, i))
+        parse_asset_file(&path_clone).map(|(p, i, f)| (to_asset_path(&path_clone), p, i, f))
     }).await;
 
-    if let Ok(Ok((asset_path, parent, imports))) = parse_res {
+    if let Ok(Ok((asset_path, parent, imports, functions))) = parse_res {
         let mut graphs = state.asset_graphs.lock().unwrap();
         if let Some(graph) = graphs.get_mut(&root_key) {
-            add_to_graph(graph, asset_path, parent, imports);
+            add_to_graph(graph, asset_path, parent, imports, functions);
             info!("Incremental asset update: {}", file_path.display());
         }
     }
 }
 
-fn parse_asset_file(path: &Path) -> anyhow::Result<(Option<String>, Vec<String>)> {
+fn parse_asset_file(path: &Path) -> anyhow::Result<(Option<String>, Vec<String>, Vec<String>)> {
     let parse_res = std::panic::catch_unwind(move || {
         let mut parser = UAssetParser::new();
-        parser.parse(path).map(|_| (parser.parent_class, parser.imports))
+        parser.parse(path).map(|_| (parser.parent_class, parser.imports, parser.functions))
     });
     match parse_res {
         Ok(res) => res,
@@ -109,13 +109,16 @@ fn parse_asset_file(path: &Path) -> anyhow::Result<(Option<String>, Vec<String>)
     }
 }
 
-fn add_to_graph(graph: &mut AssetGraph, asset_path: String, parent: Option<String>, imports: Vec<String>) {
+fn add_to_graph(graph: &mut AssetGraph, asset_path: String, parent: Option<String>, imports: Vec<String>, functions: Vec<String>) {
     let asset_path_lower = asset_path.to_lowercase();
     if let Some(p) = parent {
         graph.derived.entry(p.to_lowercase()).or_default().insert(asset_path_lower.clone());
     }
     for import in imports {
         graph.references.entry(import.to_lowercase()).or_default().insert(asset_path_lower.clone());
+    }
+    for func in functions {
+        graph.functions.entry(func.to_lowercase()).or_default().insert(asset_path_lower.clone());
     }
 }
 

@@ -45,6 +45,7 @@ pub struct ProjectContext {
 pub struct AssetGraph {
     pub references: HashMap<String, HashSet<String>>,
     pub derived: HashMap<String, HashSet<String>>,
+    pub functions: HashMap<String, HashSet<String>>,
 }
 
 pub struct AppState {

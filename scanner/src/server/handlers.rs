@@ -211,13 +211,19 @@ pub async fn handle_query(state: Arc<AppState>, params: &Value, tx: mpsc::Sender
                     for name in &try_names {
                         let dot_name = format!(".{}", name);
                         for (k, v) in &graph.references {
-                            if k.ends_with(&dot_name) || *k == *name {
+                            if k.ends_with(&dot_name) || *k == **name {
                                 for x in v { result_refs.insert(x.clone()); }
                             }
                         }
                         for (k, v) in &graph.derived {
-                            if k.ends_with(&dot_name) || *k == *name {
+                            if k.ends_with(&dot_name) || *k == **name {
                                 for x in v { result_derived.insert(x.clone()); }
+                            }
+                        }
+                        // Function Call Matching
+                        for (k, v) in &graph.functions {
+                            if k.ends_with(&dot_name) || *k == **name || k.contains(&format!(":{}", name)) {
+                                for x in v { result_refs.insert(x.clone()); }
                             }
                         }
                     }
