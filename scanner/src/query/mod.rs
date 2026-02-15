@@ -165,7 +165,6 @@ pub fn process_query(conn: &Connection, req: QueryRequest) -> anyhow::Result<Val
              Ok(json!(res_mem))
         },
         QueryRequest::FindClassByName { name } => class::find_class_by_name(conn, name),
-        QueryRequest::GetAssets => asset::get_assets(conn),
         QueryRequest::SearchClassesPrefix { prefix, limit } => class::search_classes_prefix(conn, prefix, limit),
         QueryRequest::GetClasses { extra_where, params: input_params } => {
              let mut sql = "SELECT c.id, sc.text as name, sb.text as base_class, c.symbol_type, sp.text as path, sm.text as module_name 
@@ -315,7 +314,7 @@ pub fn process_query(conn: &Connection, req: QueryRequest) -> anyhow::Result<Val
         QueryRequest::GetClassesInModulesAsync { .. } => Err(anyhow::anyhow!("Async queries must be processed via process_query_streaming")),
                 QueryRequest::GetCompletions { content, line, character, file_path } => crate::completion::process_completion(conn, &content, line, character, file_path),
                 QueryRequest::GetAssetUsages { .. } => Ok(serde_json::json!([])),
-                QueryRequest::GetAssetDependencies { .. } => Ok(serde_json::json!([])),
-            }
-        }
-        
+                                QueryRequest::GetAssetDependencies { .. } => Ok(serde_json::json!([])), 
+                                QueryRequest::GetAssets => Err(anyhow::anyhow!("GetAssets must be handled by the server state")),
+                            }
+                        }        

@@ -313,6 +313,22 @@ pub async fn handle_query(state: Arc<AppState>, params: &Value, tx: mpsc::Sender
                 }
                 Ok(json!(results))
             }
+            QueryRequest::GetAssets => {
+                let graphs = state.asset_graphs.lock().unwrap();
+                if let Some(graph) = graphs.get(&root_key) {
+                    let mut all_assets: HashSet<String> = HashSet::new();
+                    for assets in graph.references.values() {
+                        for a in assets { all_assets.insert(a.clone()); }
+                    }
+                    for assets in graph.derived.values() {
+                        for a in assets { all_assets.insert(a.clone()); }
+                    }
+                    let mut result: Vec<String> = all_assets.into_iter().collect();
+                    result.sort();
+                    return Ok(json!(result));
+                }
+                Ok(json!([]))
+            }
             _ => {
                 if is_async {
                     let tx_clone = tx.clone();
