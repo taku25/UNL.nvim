@@ -34,23 +34,29 @@ impl UAssetParser {
         let length = reader.read_i32::<LittleEndian>()?;
         if length == 0 { return Ok(String::new()); }
         if length > 0 {
-            if length > 4096 { return Err(anyhow::anyhow!("String too long")); }
+            if length > 2048 { return Err(anyhow::anyhow!("String too long")); }
             let mut buf = vec![0u8; length as usize];
             reader.read_exact(&mut buf)?;
+            if buf.is_empty() { return Ok(String::new()); }
             let s = String::from_utf8_lossy(&buf[..buf.len() - 1]).to_string();
             Ok(s)
         } else {
             let u16_len = -length;
-            if u16_len > 4096 { return Err(anyhow::anyhow!("String too long")); }
+            if u16_len > 2048 { return Err(anyhow::anyhow!("String too long")); }
             let mut buf = vec![0u16; u16_len as usize];
             for i in 0..u16_len { buf[i as usize] = reader.read_u16::<LittleEndian>()?; }
+            if buf.is_empty() { return Ok(String::new()); }
             let s = String::from_utf16_lossy(&buf[..buf.len() - 1]);
             Ok(s)
         }
     }
 
     fn resolve_path(&self, index: i32) -> String {
-        if index == 0 { return "None".to_string(); }
+        self.resolve_path_recursive(index, 0)
+    }
+
+    fn resolve_path_recursive(&self, index: i32, depth: i32) -> String {
+        if index == 0 || depth > 10 { return "None".to_string(); }
         if index < 0 {
             let idx = (-index - 1) as usize;
             if let Some(imp) = self.import_map.get(idx) {
@@ -58,13 +64,9 @@ impl UAssetParser {
                 if obj_name.starts_with("Default__") { obj_name = obj_name.replace("Default__", ""); }
                 
                 if imp.outer_index != 0 {
-                    let outer = self.resolve_path(imp.outer_index);
+                    let outer = self.resolve_path_recursive(imp.outer_index, depth + 1);
                     if outer.starts_with('/') {
-                        // If it's a script/package path, use dot or colon
                         let separator = if imp.class_name == "Function" { ":" } else { "." };
-                        if outer.contains(':') || (outer.contains('.') && separator == ".") {
-                             return format!("{}{}{}", outer, separator, obj_name);
-                        }
                         return format!("{}{}{}", outer, separator, obj_name);
                     }
                     return format!("{}/{}", outer, obj_name);
@@ -77,132 +79,120 @@ impl UAssetParser {
 
     pub fn parse<P: AsRef<Path>>(&mut self, path: P) -> anyhow::Result<()> {
         let mut file = File::open(path)?;
+        let file_size = file.metadata()?.len();
         let mut reader = BufReader::new(&mut file);
 
         let tag = reader.read_u32::<LittleEndian>()?;
-        if tag != 0x9E2A83C1 { return Err(anyhow::anyhow!("Invalid tag")); }
+        if tag != 0x9E2A83C1 && tag != 0xC1832A9E { return Err(anyhow::anyhow!("Invalid tag")); }
 
-        let legacy_version = reader.read_i32::<LittleEndian>()?;
-        let _ue3 = reader.read_i32::<LittleEndian>()?;
-        let ver_ue4 = reader.read_i32::<LittleEndian>()?;
-        let ver_ue5 = if legacy_version <= -8 { reader.read_i32::<LittleEndian>()? } else { 0 };
-        
-        // --- 1. Find Summary Header by searching for PackageName string ---
-        let mut found_summary = false;
-        let mut package_full_path = String::new();
-        // Scan a wide range (0x40 to 0x400) because UE5 headers can be large
-        for search_pos in (0x40..0x400).step_by(1) {
-            let _ = reader.seek(SeekFrom::Start(search_pos));
-            if let Ok(s_len) = reader.read_i32::<LittleEndian>() {
-                if s_len > 10 && s_len < 512 {
-                    let mut buf = vec![0u8; s_len as usize];
-                    if reader.read_exact(&mut buf).is_ok() {
-                        if buf[0] == b'/' {
-                            let name = String::from_utf8_lossy(&buf[..buf.len()-1]);
-                            if name.starts_with("/Game/") || name.starts_with("/Engine/") || name.starts_with("/Plugin/") {
-                                package_full_path = name.to_string();
-                                let _ = reader.seek(SeekFrom::Start(search_pos - 4));
-                                found_summary = true;
-                                break;
-                            }
-                        }
-                    }
-                }
+        let legacy_ver = reader.read_i32::<LittleEndian>()?;
+        if legacy_ver != -4 { let _ = reader.read_i32::<LittleEndian>(); }
+        let _ue4_ver = reader.read_i32::<LittleEndian>()?;
+        let ue5_ver = if legacy_ver <= -8 { reader.read_i32::<LittleEndian>()? } else { 0 };
+        let _licensee_ver = reader.read_i32::<LittleEndian>()?;
+
+        if ue5_ver >= 7 {
+            let _ = reader.seek(SeekFrom::Current(20)); // SavedHash
+            let _ = reader.read_i32::<LittleEndian>(); // TotalHeaderSize
+        }
+
+        if legacy_ver <= -2 {
+            let count = reader.read_i32::<LittleEndian>()?;
+            if count > 0 && count < 2000 {
+                let _ = reader.seek(SeekFrom::Current(count as i64 * 20));
             }
         }
-        if !found_summary { return Err(anyhow::anyhow!("Summary header not found")); }
 
+        if ue5_ver < 7 { let _ = reader.read_i32::<LittleEndian>(); }
+        
+        let package_full_path = match Self::read_string(&mut reader) {
+            Ok(s) => s,
+            Err(_) => return Err(anyhow::anyhow!("Failed to read PackageName")),
+        };
         self.asset_name = package_full_path.split('/').last().unwrap_or("").to_string();
 
-        let _ths = reader.read_i32::<LittleEndian>()?;
-        let _pn = Self::read_string(&mut reader)?;
         let package_flags = reader.read_u32::<LittleEndian>()?;
         let name_count = reader.read_i32::<LittleEndian>()?;
         let name_offset = reader.read_i32::<LittleEndian>()?;
 
-        if ver_ue5 >= 1008 { let _ = reader.read_i32::<LittleEndian>(); let _ = reader.read_i32::<LittleEndian>(); }
-        let has_editor_data = (package_flags & 0x80000000) == 0;
-        if ver_ue4 >= 516 && has_editor_data { let _ = Self::read_string(&mut reader); }
-        if ver_ue4 >= 459 { let _ = reader.read_i32::<LittleEndian>(); let _ = reader.read_i32::<LittleEndian>(); }
+        if ue5_ver >= 4 { let _ = reader.seek(SeekFrom::Current(8)); }
+        if (package_flags & 0x80000000) == 0 { let _ = Self::read_string(&mut reader); }
+        let _ = reader.seek(SeekFrom::Current(8)); // GatherableTextData
 
         let export_count = reader.read_i32::<LittleEndian>()?;
         let export_offset = reader.read_i32::<LittleEndian>()?;
         let import_count = reader.read_i32::<LittleEndian>()?;
         let import_offset = reader.read_i32::<LittleEndian>()?;
 
+        if name_offset <= 0 || import_offset <= 0 || (import_offset as u64) >= file_size {
+             return Err(anyhow::anyhow!("Invalid map offsets"));
+        }
+
         // --- 2. Parse Name Map ---
-        reader.seek(SeekFrom::Start(name_offset as u64))?;
+        let _ = reader.seek(SeekFrom::Start(name_offset as u64));
         for _ in 0..name_count {
-            if let Ok(s) = Self::read_string(&mut reader) {
-                if ver_ue4 >= 504 { let _ = reader.read_u32::<LittleEndian>(); }
-                self.name_map.push(s);
-            }
+            if let Ok(sn) = Self::read_string(&mut reader) {
+                self.name_map.push(sn);
+                let _ = reader.read_u32::<LittleEndian>();
+            } else { break; }
         }
 
         // --- 3. Parse Import Map ---
-        reader.seek(SeekFrom::Start(import_offset as u64))?;
+        let _ = reader.seek(SeekFrom::Start(import_offset as u64));
         for _ in 0..import_count {
             let _cp = reader.read_i64::<LittleEndian>()?;
             let cn_idx = reader.read_i64::<LittleEndian>()? as i32;
             let outer = reader.read_i32::<LittleEndian>()?;
             let obj_idx = reader.read_i64::<LittleEndian>()? as i32;
+            
+            // UE4.25+ PackageName
+            if (package_flags & 0x80000000) == 0 { let _ = reader.read_i64::<LittleEndian>(); }
+            // UE5.3+ bImportOptional
+            if ue5_ver >= 12 { let _ = reader.read_u32::<LittleEndian>(); }
 
             let obj_name = self.name_map.get(obj_idx as usize).cloned().unwrap_or_default();
             let cls_name = self.name_map.get(cn_idx as usize).cloned().unwrap_or_default();
             self.import_map.push(UObjectImport { object_name: obj_name, class_name: cls_name, outer_index: outer });
-
-            if ver_ue4 >= 520 && has_editor_data { let _ = reader.read_i64::<LittleEndian>(); }
-            if ver_ue5 >= 1003 { let _ = reader.read_u32::<LittleEndian>(); }
         }
 
-        // --- 4. Resolve all imports to full paths ---
+        // --- 4. Resolve imports ---
         for i in 0..self.import_map.len() {
             let path = self.resolve_path(-(i as i32) - 1);
             if path.starts_with('/') {
-                if self.import_map[i].class_name == "Function" {
-                    self.functions.push(path);
-                } else {
-                    self.imports.push(path);
-                }
+                if self.import_map[i].class_name == "Function" { self.functions.push(path); }
+                else { self.imports.push(path); }
             }
         }
 
-        // --- 5. Parse Export Map (Resolve Parent) ---
-        if export_count > 0 {
-            reader.seek(SeekFrom::Start(export_offset as u64))?;
+        // --- 5. Resolve Parent from Export Map ---
+        if export_count > 0 && export_offset > 0 {
+            let _ = reader.seek(SeekFrom::Start(export_offset as u64));
             for _ in 0..export_count {
                 let class_idx = reader.read_i32::<LittleEndian>()?;
                 let super_idx = reader.read_i32::<LittleEndian>()?;
-                let _tmp = reader.read_i32::<LittleEndian>()?;
-                let _out = reader.read_i32::<LittleEndian>()?;
-                let _obj_name_idx = reader.read_i64::<LittleEndian>()?;
-                let _obj_flags = reader.read_u32::<LittleEndian>()?;
-
-                let class_type = if class_idx < 0 {
-                    self.import_map.get((-class_idx - 1) as usize).map(|i| i.object_name.clone()).unwrap_or_default()
-                } else { String::new() };
-
-                // Correct identification of Blueprint main class
-                if class_type.contains("GeneratedClass") || class_type == "LinkedAnimGraphLibrary" {
-                    if super_idx != 0 {
-                        let resolved = self.resolve_path(super_idx);
-                        self.parent_class = Some(resolved);
-                        break;
+                
+                // DATA ASSET / BP PARENT DETECTION IMPROVED
+                // For most assets, the first export's ClassIndex points to its class.
+                // If it's a Blueprint, we want the SuperIndex.
+                // If it's a DataAsset, we want the ClassIndex.
+                if class_idx < 0 {
+                    let class_type = self.import_map.get((-class_idx - 1) as usize).map(|i| i.object_name.clone()).unwrap_or_default();
+                    
+                    if class_type.contains("GeneratedClass") {
+                        if super_idx != 0 {
+                            self.parent_class = Some(self.resolve_path(super_idx));
+                            break;
+                        }
+                    } else {
+                        // For DataAssets, the "class" is the parent native class
+                        let path = self.resolve_path(class_idx);
+                        if path.starts_with('/') {
+                            self.parent_class = Some(path);
+                            break;
+                        }
                     }
                 }
-
-                // Skip remainder of FObjectExport
-                let mut skip = if ver_ue4 >= 511 { 16 } else { 8 }; // SerialSize, SerialOffset
-                skip += 12; // bForcedExport, bNotForClient, bNotForServer
-                if ver_ue5 < 1005 { skip += 16; } // Guid
-                if ver_ue5 >= 1006 { skip += 4; } // bIsInheritedInstance
-                skip += 4; // PackageFlags
-                if ver_ue4 >= 365 { skip += 4; } // bNotAlwaysLoadedForEditorGame
-                if ver_ue4 >= 485 { skip += 4; } // bIsAsset
-                if ver_ue5 >= 1003 { skip += 4; } // bGeneratePublicHash
-                if ver_ue4 >= 507 { skip += 20; } // Dependencies
-                if ver_ue5 >= 1010 { skip += 16; } // ScriptSerialization
-                let _ = reader.seek(SeekFrom::Current(skip));
+                break;
             }
         }
 

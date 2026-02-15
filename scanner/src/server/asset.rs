@@ -1,6 +1,6 @@
 use std::sync::{Arc};
 use std::path::{Path, PathBuf};
-use tracing::{info, debug};
+use tracing::{info, warn, debug};
 use crate::server::state::{AppState, AssetGraph};
 use crate::uasset::UAssetParser;
 use crate::server::utils::{normalize_path_key};
@@ -56,12 +56,16 @@ pub async fn handle_asset_scan(state: Arc<AppState>, project_root: String) {
                         filename.starts_with("DA_") || filename.starts_with("DT_");
 
                     if is_essential {
-                        if let Ok((parent, imports, functions)) = parse_asset_file(path) {
-                            count += 1;
-                            let asset_path = to_asset_path(path);
-                            add_to_graph(&mut graph, asset_path, parent, imports, functions);
-                        } else {
-                            error_count += 1;
+                        match parse_asset_file(path) {
+                            Ok((parent, imports, functions)) => {
+                                count += 1;
+                                let asset_path = to_asset_path(path);
+                                add_to_graph(&mut graph, asset_path, parent, imports, functions);
+                            }
+                            Err(e) => {
+                                error_count += 1;
+                                warn!("Failed to parse asset: {:?}. Error: {}", path, e);
+                            }
                         }
                         if count > 0 && count % 1000 == 0 { debug!("Still scanning assets... {} found.", count); }
                     }
