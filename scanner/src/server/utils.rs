@@ -17,7 +17,7 @@ pub fn normalize_to_native(s: &str) -> String {
 }
 
 pub fn normalize_path_key(s: &str) -> String {
-    let mut normalized = s.replace('\\', "/").to_lowercase();
+    let mut normalized = s.replace('\\', "/");
     while normalized.ends_with('/') && normalized.len() > 3 {
         normalized.pop();
     }
