@@ -160,6 +160,11 @@ function M.get_assets(callback)
     remote.get_assets(callback)
 end
 
+--- 指定したシンボル名が C++ 内で使用されている箇所を検索
+function M.find_symbol_usages(symbol_name, callback)
+    remote.find_symbol_usages(symbol_name, callback)
+end
+
 --- メンバーの戻り値型を更新 (書き込み操作)
 function M.update_member_return_type(class_name, member_name, return_type, callback)
     remote.update_member_return_type(class_name, member_name, return_type, callback)

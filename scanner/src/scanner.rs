@@ -31,6 +31,14 @@ pub const QUERY_STR: &str = r#"
   (unreal_function_declaration) @ufunc_node
   (field_declaration) @field_node
   (enumerator name: (identifier) @enum_val_name) @enum_item
+
+  (call_expression
+    function: [
+      (identifier) @call_name
+      (field_expression field: (field_identifier) @call_name)
+    ]
+  ) @call_expr
+  (field_expression field: (field_identifier) @call_name) @field_expr
 "#;
 
 pub fn process_file(input: &InputFile, language: &tree_sitter::Language, query: &Query) -> anyhow::Result<ParseResult> {
@@ -53,16 +61,16 @@ pub fn process_file(input: &InputFile, language: &tree_sitter::Language, query: 
         }
     }
 
-    let classes = parse_content(&content, &input.path, language, query)?;
+    let (classes, calls) = parse_content(&content, &input.path, language, query)?;
 
     Ok(ParseResult {
         path: input.path.clone(), status: "parsed".to_string(), mtime: input.mtime,
-        data: Some(ParseData { classes, parser: "treesitter".to_string(), new_hash }),
+        data: Some(ParseData { classes, calls, parser: "treesitter".to_string(), new_hash }),
         module_id: input.module_id,
     })
 }
 
-pub fn parse_content(content: &str, _path: &str, language: &tree_sitter::Language, query: &Query) -> anyhow::Result<Vec<ClassInfo>> {
+pub fn parse_content(content: &str, _path: &str, language: &tree_sitter::Language, query: &Query) -> anyhow::Result<(Vec<ClassInfo>, Vec<crate::types::CallInfo>)> {
     let content_bytes = content.as_bytes();
     let mut parser = Parser::new();
     parser.set_language(&language).unwrap();
@@ -73,6 +81,7 @@ pub fn parse_content(content: &str, _path: &str, language: &tree_sitter::Languag
     let mut captures = cursor.captures(query, root, content_bytes);
     
     let mut classes: Vec<ClassInfo> = Vec::new();
+    let mut calls: Vec<crate::types::CallInfo> = Vec::new();
     let mut members: Vec<(MemberInfo, usize, usize)> = Vec::new();
 
     while let Some((m, capture_index)) = captures.next() {
@@ -80,6 +89,17 @@ pub fn parse_content(content: &str, _path: &str, language: &tree_sitter::Languag
         let capture_name = &query.capture_names()[capture.index as usize];
         let node = capture.node;
         
+        if *capture_name == "call_name" {
+            let name = get_node_text(&node, content_bytes).to_string();
+            if !name.is_empty() {
+                calls.push(crate::types::CallInfo {
+                    name,
+                    line: node.start_position().row + 1,
+                });
+            }
+            continue;
+        }
+
         if *capture_name == "class_name" || *capture_name == "struct_name" || *capture_name == "enum_name" {
             let has_body = if let Some(parent) = node.parent() {
                 parent.child_by_field_name("body").is_some()
@@ -425,7 +445,7 @@ pub fn parse_content(content: &str, _path: &str, language: &tree_sitter::Languag
         if let Some(idx) = best_class_idx { classes[idx].members.push(member); }
     }
     
-    Ok(classes)
+    Ok((classes, calls))
 }
 
 // --- Internal Helpers ---

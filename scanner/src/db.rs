@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use rusqlite::{params, Connection};
 use crate::types::{ParseResult, ProgressReporter};
 
-pub const DB_VERSION: i32 = 4;
+pub const DB_VERSION: i32 = 5;
 
 /// 指定されたDBファイルが最新バージョンであることを保証する。
 /// バージョンが合わない場合はファイルを削除して初期化する。
@@ -188,6 +188,21 @@ pub fn init_db(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute("CREATE INDEX IF NOT EXISTS idx_components_type ON components(type)", [])?;
     conn.execute("CREATE INDEX IF NOT EXISTS idx_components_owner ON components(owner_name)", [])?;
 
+    // 9. Symbol Calls (For Find Usages in C++)
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS symbol_calls (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            file_id INTEGER NOT NULL,
+            line INTEGER NOT NULL,
+            name_id INTEGER NOT NULL,
+            FOREIGN KEY(file_id) REFERENCES files(id) ON DELETE CASCADE,
+            FOREIGN KEY(name_id) REFERENCES strings(id)
+        )",
+        [],
+    )?;
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_symbol_calls_name_id ON symbol_calls(name_id)", [])?;
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_symbol_calls_file_id ON symbol_calls(file_id)", [])?;
+
     // Set DB version
     conn.execute(
         "INSERT OR REPLACE INTO project_meta (key, value) VALUES ('db_version', ?)",
@@ -246,6 +261,7 @@ pub fn save_to_db(conn: &mut Connection, results: &[ParseResult], reporter: Arc<
             let mut stmt_inheritance = tx.prepare("INSERT OR IGNORE INTO inheritance (child_id, parent_name_id) VALUES (?, ?)")?;
             let mut stmt_enum = tx.prepare("INSERT OR IGNORE INTO enum_values (enum_id, name_id) VALUES (?, ?)")?;
             let mut stmt_member = tx.prepare("INSERT OR IGNORE INTO members (class_id, name_id, type_id, flags, access, detail, return_type_id, is_static, line_number, file_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")?;
+            let mut stmt_call = tx.prepare("INSERT INTO symbol_calls (file_id, line, name_id) VALUES (?, ?, ?)")?;
 
             for (i, result) in batch.iter().enumerate() {
                 let global_i = current_idx + i;
@@ -279,6 +295,12 @@ pub fn save_to_db(conn: &mut Connection, results: &[ParseResult], reporter: Arc<
 
                 if file_res.is_ok() {
                     let file_id: i64 = tx.last_insert_rowid();
+
+                    // Save Symbol Calls (C++ usages)
+                    for call in &data.calls {
+                        let call_name_id = get_or_create_string(&tx, &mut string_cache, &call.name)?;
+                        let _ = stmt_call.execute(params![file_id, call.line as i64, call_name_id]);
+                    }
 
                     for cls in &data.classes {
                         let cls_name_id = get_or_create_string(&tx, &mut string_cache, &cls.class_name)?;

@@ -459,3 +459,26 @@ pub fn get_file_symbols(conn: &Connection, file_path: String) -> anyhow::Result<
 
     Ok(json!(results))
 }
+
+pub fn find_symbol_usages(conn: &Connection, symbol_name: String, limit: Option<usize>) -> anyhow::Result<Value> {
+    let mut stmt = conn.prepare(
+        "SELECT sp.text as path, c.line
+         FROM symbol_calls c
+         JOIN strings ss ON c.name_id = ss.id
+         JOIN files f ON c.file_id = f.id
+         JOIN strings sp ON f.path_id = sp.id
+         WHERE ss.text = ?
+         LIMIT ?"
+    )?;
+    
+    let lim = limit.unwrap_or(500) as i64;
+    let rows = stmt.query_map(params![symbol_name, lim], |row| {
+        Ok(json!({
+            "path": row.get::<_, String>(0)?,
+            "line": row.get::<_, i64>(1)?,
+        }))
+    })?;
+    
+    let res: Result<Vec<Value>, _> = rows.collect();
+    Ok(json!(res?))
+}

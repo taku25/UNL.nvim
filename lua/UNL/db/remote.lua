@@ -90,6 +90,10 @@ function M.get_assets(callback)
     M.request("GetAssets", {}, callback)
 end
 
+function M.find_symbol_usages(symbol_name, cb)
+    M.request("FindSymbolUsages", { symbol_name = symbol_name }, cb)
+end
+
 -- Standard Wrappers
 
 function M.find_derived_classes(base_class, cb)

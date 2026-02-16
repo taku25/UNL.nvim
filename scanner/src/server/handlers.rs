@@ -54,11 +54,17 @@ pub async fn handle_setup(state: Arc<AppState>, params: &Value) -> anyhow::Resul
 
     let root_key = normalize_path_key(&req.project_root);
     let db_path_native_clone = db_path_native.clone();
-    tokio::task::spawn_blocking(move || {
-        let conn = rusqlite::Connection::open(&db_path_native_clone)?;
-        db::init_db(&conn)?;
-        Ok::<_, anyhow::Error>(())
+    let was_empty = tokio::task::spawn_blocking(move || {
+        let mut is_new = false;
+        if let Ok(conn) = rusqlite::Connection::open(&db_path_native_clone) {
+            // Check if classes table is empty
+            if let Ok(count) = conn.query_row("SELECT COUNT(*) FROM classes", [], |r| r.get::<_, i64>(0)) {
+                if count == 0 { is_new = true; }
+            }
+        }
+        Ok::<bool, anyhow::Error>(is_new)
     }).await??;
+
     {
         let mut projects = state.projects.lock().unwrap();
         projects.insert(root_key.clone(), ProjectContext { db_path: normalize_to_unix(&req.db_path), vcs_hash: req.vcs_hash.clone(), _last_refresh: Instant::now() });
@@ -72,7 +78,7 @@ pub async fn handle_setup(state: Arc<AppState>, params: &Value) -> anyhow::Resul
         handle_asset_scan(state_clone, root_clone).await;
     });
 
-    Ok(serde_json::json!({ "status": "ok" }))
+    Ok(serde_json::json!({ "status": "ok", "needs_full_refresh": was_empty }))
 }
 
 pub async fn handle_refresh(state: &AppState, params: &Value, tx: mpsc::Sender<Vec<u8>>) -> anyhow::Result<Value> {

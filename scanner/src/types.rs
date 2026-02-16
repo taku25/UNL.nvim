@@ -72,8 +72,15 @@ pub struct ParseResult {
 #[derive(Serialize, Debug, Clone)]
 pub struct ParseData {
     pub classes: Vec<ClassInfo>,
+    pub calls: Vec<CallInfo>,
     pub parser: String,
     pub new_hash: String,
+}
+
+#[derive(Serialize, Clone, Debug)]
+pub struct CallInfo {
+    pub name: String,
+    pub line: usize,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -238,6 +245,7 @@ pub enum QueryRequest {
         asset_path: String,
     },
     GetAssets,
+    FindSymbolUsages { symbol_name: String, limit: Option<usize> },
 }
 
 use std::io::{self, Write};

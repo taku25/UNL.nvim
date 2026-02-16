@@ -93,34 +93,25 @@ function M.execute(opts)
                     
                     local current_vcs = vcs.get_current_hash(project_root)
 
-                    if is_registered and db_exists then
-                        local vcs_changed = (current_vcs ~= last_vcs) and (current_vcs ~= nil)
-                        if vcs_changed then
-                             log.info("VCS changed for %s. Refreshing...", project_root)
-                             refresh.execute(opts)
-                        else
-                             log.debug("UNL Server is ready for project: %s", project_root)
-                        end
-                        -- 一旦完了とみなす (vcs_changed の場合でも refresh 内で管理される)
-                        active_starts[project_root_norm] = nil
-                        return
-                    end
-
-                    if is_registered and not db_exists then
-                        log.info("Database missing for %s. Starting full refresh...", project_root)
-                        local refresh_opts = vim.tbl_extend("force", opts, { scope = "Full" })
-                        refresh.execute(refresh_opts)
-                        watch.execute(opts)
-                        active_starts[project_root_norm] = nil
-                        return
-                    end
-
                     log.info("Registering and initializing project: %s", project_root)
-                    setup.execute(opts, function(setup_success)
-                        if setup_success then
+                    setup.execute(opts, function(setup_res)
+                        if type(setup_res) == "table" and setup_res.status == "ok" then
                             watch.execute(opts)
-                            local refresh_opts = vim.tbl_extend("force", opts, { scope = "Full" })
-                            refresh.execute(refresh_opts)
+                            
+                            -- VCSが変わっている、またはDBが空(needs_full_refresh)の場合にリフレッシュ
+                            local vcs_changed = is_registered and (current_vcs ~= last_vcs) and (current_vcs ~= nil)
+                            
+                            if setup_res.needs_full_refresh or vcs_changed then
+                                if vcs_changed then
+                                    log.info("VCS changed for %s. Refreshing...", project_root)
+                                else
+                                    log.info("Database empty or re-initialized. Starting full refresh...")
+                                end
+                                local refresh_opts = vim.tbl_extend("force", opts, { scope = "Full" })
+                                refresh.execute(refresh_opts)
+                            else
+                                log.debug("UNL Server is ready for project: %s", project_root)
+                            end
                         end
                         active_starts[project_root_norm] = nil
                     end)
