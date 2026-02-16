@@ -9,7 +9,9 @@ function M.available()
 end
 
 local function normalize_path(p)
-  if not p then return nil end
+  if not p then
+    return nil
+  end
   return p:gsub("\\", "/"):gsub("//+", "/")
 end
 
@@ -26,7 +28,9 @@ local function to_snacks_item(item)
     label = item.display or item.label or item.name or ""
     value = item.value or item
     local val_str = tostring(item.value or "")
-    if val_str:find("\t") then path = val_str:match("[^\t]+$") end
+    if val_str:find("\t") then
+      path = val_str:match("[^\t]+$")
+    end
   else
     label = tostring(item)
     path = label:match("[^\t]+$") or label
@@ -48,40 +52,64 @@ end
 function M.run(spec)
   spec = spec or {}
   local source = spec.source or { type = "static", items = spec.items }
-  if source.type == "static" then return M.run_static(spec, source)
-  elseif source.type == "grep" then return M.run_grep(spec, source)
-  elseif source.type == "callback" then return M.run_callback(spec, source)
-  elseif source.type == "job" then return M.run_job(spec, source) end
+  if source.type == "static" then
+    return M.run_static(spec, source)
+  elseif source.type == "grep" then
+    return M.run_grep(spec, source)
+  elseif source.type == "callback" then
+    return M.run_callback(spec, source)
+  elseif source.type == "job" then
+    return M.run_job(spec, source)
+  end
 end
 
 function M.run_static(spec, source)
   local Snacks = require("snacks")
   local items = {}
-  for _, it in ipairs(source.items or {}) do table.insert(items, to_snacks_item(it)) end
-  
-  Snacks.picker.pick({
+  for _, it in ipairs(source.items or {}) do
+    table.insert(items, to_snacks_item(it))
+  end
+
+  local snacks_opts = {
     title = spec.title or "Select",
     items = items,
     format = "file",
     multi = (spec.multiselect == "native" or spec.multiselect == true),
-    preview = (spec.preview_enabled ~= false) and "file" or "none",
     confirm = function(picker, item)
-      if not item then return end
+      if not item then
+        return
+      end
       picker:close()
       if spec.on_confirm then
         vim.schedule(function()
           local is_multi = (spec.multiselect == "native" or spec.multiselect == true)
           if is_multi then
             local sel = picker:selected()
-            if #sel == 0 then sel = {item} end
+            if #sel == 0 then
+              sel = { item }
+            end
             local res = {}
-            for _, s in ipairs(sel) do table.insert(res, s.value) end
+            for _, s in ipairs(sel) do
+              table.insert(res, s.value)
+            end
             spec.on_confirm(res)
-          else spec.on_confirm(item.value) end
+          else
+            spec.on_confirm(item.value)
+          end
         end)
       end
-    end
-  })
+    end,
+  }
+
+  if spec.preview_enabled ~= false then
+    snacks_opts.preview = "file"
+  end
+
+  if spec.preview_enabled == false then
+    snacks_opts.layout = { hidden = { "preview" } }
+  end
+
+  Snacks.picker.pick(snacks_opts)
 end
 
 function M.run_grep(spec, source)
@@ -93,15 +121,21 @@ function M.run_grep(spec, source)
     confirm = function(picker, item)
       if item and item.file and item.pos then
         picker:close()
-        if spec.on_confirm then vim.schedule(function() spec.on_confirm({ filename = normalize_path(item.file), lnum = item.pos[1], col = item.pos[2] }) end) end
-      else picker:close() end
-    end
+        if spec.on_confirm then
+          vim.schedule(function()
+            spec.on_confirm({ filename = normalize_path(item.file), lnum = item.pos[1], col = item.pos[2] })
+          end)
+        end
+      else
+        picker:close()
+      end
+    end,
   })
 end
 
 function M.run_callback(spec, source)
   local Snacks = require("snacks")
-  
+
   Snacks.picker.pick({
     title = spec.title or "Dynamic Picker",
     format = "file",
@@ -111,17 +145,21 @@ function M.run_callback(spec, source)
       return function(cb)
         local task = ctx.async
         local push = function(items)
-          if task:aborted() then return end
-          local to_add = (type(items) == "table" and items[1] ~= nil) and items or {items}
+          if task:aborted() then
+            return
+          end
+          local to_add = (type(items) == "table" and items[1] ~= nil) and items or { items }
           for _, it in ipairs(to_add) do
             cb(to_snacks_item(it))
           end
           -- データを流し込んだ後にタスクをレジュームして画面を更新させる
           task:resume()
         end
-        
-        if source.fn then source.fn(push) end
-        
+
+        if source.fn then
+          source.fn(push)
+        end
+
         -- ピッカーが閉じられるまでタスクを終了させず、サスペンド状態で待機する
         while not task:aborted() do
           task:suspend()
@@ -129,21 +167,29 @@ function M.run_callback(spec, source)
       end
     end,
     confirm = function(picker, item)
-      if not item then return end
+      if not item then
+        return
+      end
       picker:close()
       if spec.on_confirm then
         vim.schedule(function()
           local is_multi = (spec.multiselect == "native" or spec.multiselect == true)
           if is_multi then
             local sel = picker:selected()
-            if #sel == 0 then sel = {item} end
+            if #sel == 0 then
+              sel = { item }
+            end
             local res = {}
-            for _, s in ipairs(sel) do table.insert(res, s.value) end
+            for _, s in ipairs(sel) do
+              table.insert(res, s.value)
+            end
             spec.on_confirm(res)
-          else spec.on_confirm(item.value) end
+          else
+            spec.on_confirm(item.value)
+          end
         end)
       end
-    end
+    end,
   })
 end
 
@@ -152,7 +198,9 @@ function M.run_job(spec, source)
   local cmd = source.command
   local args = {}
   if type(cmd) == "table" then
-    for i = 2, #cmd do table.insert(args, cmd[i]) end
+    for i = 2, #cmd do
+      table.insert(args, cmd[i])
+    end
     cmd = cmd[1]
   end
   Snacks.picker.pick({
@@ -164,9 +212,11 @@ function M.run_job(spec, source)
     confirm = function(picker, item)
       if item and spec.on_confirm then
         picker:close()
-        vim.schedule(function() spec.on_confirm(item.text) end)
+        vim.schedule(function()
+          spec.on_confirm(item.text)
+        end)
       end
-    end
+    end,
   })
 end
 
