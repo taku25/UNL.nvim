@@ -45,7 +45,7 @@ impl UAssetParser {
             if u16_len > 2048 { return Err(anyhow::anyhow!("String too long")); }
             let mut buf = vec![0u16; u16_len as usize];
             for i in 0..u16_len { buf[i as usize] = reader.read_u16::<LittleEndian>()?; }
-            if buf.is_empty() { return Ok(String::new()); }
+            if buf.len() < 1 { return Ok(String::new()); }
             let s = String::from_utf16_lossy(&buf[..buf.len() - 1]);
             Ok(s)
         }
@@ -140,19 +140,17 @@ impl UAssetParser {
         // --- 3. Parse Import Map ---
         let _ = reader.seek(SeekFrom::Start(import_offset as u64));
         for _ in 0..import_count {
-            let _cp = reader.read_i64::<LittleEndian>()?;
-            let cn_idx = reader.read_i64::<LittleEndian>()? as i32;
-            let outer = reader.read_i32::<LittleEndian>()?;
-            let obj_idx = reader.read_i64::<LittleEndian>()? as i32;
+            let _class_package = reader.read_i64::<LittleEndian>()?;
+            let class_name_idx = reader.read_i64::<LittleEndian>()? as i32;
+            let outer_index = reader.read_i32::<LittleEndian>()?;
+            let object_name_idx = reader.read_i64::<LittleEndian>()? as i32;
             
-            // UE4.25+ PackageName
             if (package_flags & 0x80000000) == 0 { let _ = reader.read_i64::<LittleEndian>(); }
-            // UE5.3+ bImportOptional
             if ue5_ver >= 12 { let _ = reader.read_u32::<LittleEndian>(); }
 
-            let obj_name = self.name_map.get(obj_idx as usize).cloned().unwrap_or_default();
-            let cls_name = self.name_map.get(cn_idx as usize).cloned().unwrap_or_default();
-            self.import_map.push(UObjectImport { object_name: obj_name, class_name: cls_name, outer_index: outer });
+            let obj_name = self.name_map.get(object_name_idx as usize).cloned().unwrap_or_default();
+            let cls_name = self.name_map.get(class_name_idx as usize).cloned().unwrap_or_default();
+            self.import_map.push(UObjectImport { object_name: obj_name, class_name: cls_name, outer_index: outer_index });
         }
 
         // --- 4. Resolve imports ---
@@ -164,36 +162,55 @@ impl UAssetParser {
             }
         }
 
-        // --- 5. Resolve Parent from Export Map ---
+        // --- 5. Resolve Parent Class from Export Map ---
         if export_count > 0 && export_offset > 0 {
             let _ = reader.seek(SeekFrom::Start(export_offset as u64));
+            let mut bp_parent = None;
+            let mut fallback_parent = None;
+            
             for _ in 0..export_count {
+                let entry_start = reader.stream_position().unwrap();
                 let class_idx = reader.read_i32::<LittleEndian>()?;
                 let super_idx = reader.read_i32::<LittleEndian>()?;
+                let _tmp = reader.read_i32::<LittleEndian>()?;
+                let outer_idx = reader.read_i32::<LittleEndian>()?;
+                let object_name_idx = reader.read_i64::<LittleEndian>()?;
                 
-                // DATA ASSET / BP PARENT DETECTION IMPROVED
-                // For most assets, the first export's ClassIndex points to its class.
-                // If it's a Blueprint, we want the SuperIndex.
-                // If it's a DataAsset, we want the ClassIndex.
+                // Identify the main class of the asset (Blueprint or DataAsset)
                 if class_idx < 0 {
-                    let class_type = self.import_map.get((-class_idx - 1) as usize).map(|i| i.object_name.clone()).unwrap_or_default();
-                    
-                    if class_type.contains("GeneratedClass") {
+                    let _object_name = self.name_map.get(object_name_idx as usize).cloned().unwrap_or_default();
+                    let _class_type = if class_idx < 0 {
+                        self.import_map.get((-class_idx - 1) as usize).map(|i| i.object_name.clone()).unwrap_or_default()
+                    } else { String::new() };
+
+                    // LOGIC: A Blueprint's main class is often named 'BlueprintGeneratedClass'.
+                    // If we find it, its SuperIndex is the definitive C++ parent.
+                    if _class_type.contains("GeneratedClass") {
                         if super_idx != 0 {
-                            self.parent_class = Some(self.resolve_path(super_idx));
-                            break;
+                            bp_parent = Some(self.resolve_path(super_idx));
+                            break; 
                         }
-                    } else {
-                        // For DataAssets, the "class" is the parent native class
+                    }
+                    
+                    // Fallback: If it's a root object (Outer == 0) and has a valid class, track it.
+                    if fallback_parent.is_none() && outer_idx == 0 && class_idx < 0 {
                         let path = self.resolve_path(class_idx);
-                        if path.starts_with('/') {
-                            self.parent_class = Some(path);
-                            break;
+                        if path.starts_with('/') && !path.contains("BlueprintGeneratedClass") {
+                            fallback_parent = Some(path);
                         }
                     }
                 }
-                break;
+
+                // Correctly skip the rest of this FObjectExport entry
+                let mut skip = if ue5_ver >= 7 { 16 } else { 8 };
+                skip += 12;
+                if ue5_ver < 7 { skip += 16; }
+                skip += 12;
+                if ue5_ver >= 1 { skip += 4; }
+                if ue5_ver >= 7 { skip += 36; }
+                let _ = reader.seek(SeekFrom::Start(entry_start + 32 + skip));
             }
+            self.parent_class = bp_parent.or(fallback_parent);
         }
 
         Ok(())
