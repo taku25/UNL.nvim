@@ -34,18 +34,16 @@ impl UAssetParser {
         let length = reader.read_i32::<LittleEndian>()?;
         if length == 0 { return Ok(String::new()); }
         if length > 0 {
-            if length > 2048 { return Err(anyhow::anyhow!("String too long")); }
+            if length > 2048 { return Err(anyhow::anyhow!("String too long: {}", length)); }
             let mut buf = vec![0u8; length as usize];
             reader.read_exact(&mut buf)?;
-            if buf.is_empty() { return Ok(String::new()); }
             let s = String::from_utf8_lossy(&buf[..buf.len() - 1]).to_string();
             Ok(s)
         } else {
             let u16_len = -length;
-            if u16_len > 2048 { return Err(anyhow::anyhow!("String too long")); }
+            if u16_len > 2048 { return Err(anyhow::anyhow!("String too long: {}", u16_len)); }
             let mut buf = vec![0u16; u16_len as usize];
             for i in 0..u16_len { buf[i as usize] = reader.read_u16::<LittleEndian>()?; }
-            if buf.len() < 1 { return Ok(String::new()); }
             let s = String::from_utf16_lossy(&buf[..buf.len() - 1]);
             Ok(s)
         }
@@ -87,11 +85,11 @@ impl UAssetParser {
 
         let legacy_ver = reader.read_i32::<LittleEndian>()?;
         if legacy_ver != -4 { let _ = reader.read_i32::<LittleEndian>(); }
-        let _ue4_ver = reader.read_i32::<LittleEndian>()?;
+        let ue4_ver = reader.read_i32::<LittleEndian>()?;
         let ue5_ver = if legacy_ver <= -8 { reader.read_i32::<LittleEndian>()? } else { 0 };
         let _licensee_ver = reader.read_i32::<LittleEndian>()?;
 
-        if ue5_ver >= 7 {
+        if legacy_ver <= -9 { // UE5.6+
             let _ = reader.seek(SeekFrom::Current(20)); // SavedHash
             let _ = reader.read_i32::<LittleEndian>(); // TotalHeaderSize
         }
@@ -103,7 +101,7 @@ impl UAssetParser {
             }
         }
 
-        if ue5_ver < 7 { let _ = reader.read_i32::<LittleEndian>(); }
+        if legacy_ver > -9 { let _ = reader.read_i32::<LittleEndian>(); } // TotalHeaderSize for pre-5.6
         
         let package_full_path = match Self::read_string(&mut reader) {
             Ok(s) => s,
@@ -123,6 +121,21 @@ impl UAssetParser {
         let export_offset = reader.read_i32::<LittleEndian>()?;
         let import_count = reader.read_i32::<LittleEndian>()?;
         let import_offset = reader.read_i32::<LittleEndian>()?;
+
+        // SKIP additional Summary fields to reach the next part correctly
+        // DependsOffset (4)
+        let _ = reader.read_i32::<LittleEndian>();
+        // SoftPackageReferences (8)
+        if ue4_ver >= 515 { let _ = reader.seek(SeekFrom::Current(8)); }
+        // SearchableNamesOffset (4)
+        if ue4_ver >= 516 { let _ = reader.read_i32::<LittleEndian>(); }
+        // ThumbnailTableOffset (4)
+        let _ = reader.read_i32::<LittleEndian>();
+
+        // UE 5.0 - 5.5: Guid (16 bytes)
+        if legacy_ver > -9 {
+            let _ = reader.seek(SeekFrom::Current(16));
+        }
 
         if name_offset <= 0 || import_offset <= 0 || (import_offset as u64) >= file_size {
              return Err(anyhow::anyhow!("Invalid map offsets"));
@@ -162,12 +175,10 @@ impl UAssetParser {
             }
         }
 
-        // --- 5. Resolve Parent Class from Export Map ---
+        // --- 5. Resolve Parent ---
         if export_count > 0 && export_offset > 0 {
             let _ = reader.seek(SeekFrom::Start(export_offset as u64));
             let mut bp_parent = None;
-            let mut fallback_parent = None;
-            
             for _ in 0..export_count {
                 let entry_start = reader.stream_position().unwrap();
                 let class_idx = reader.read_i32::<LittleEndian>()?;
@@ -176,32 +187,18 @@ impl UAssetParser {
                 let outer_idx = reader.read_i32::<LittleEndian>()?;
                 let object_name_idx = reader.read_i64::<LittleEndian>()?;
                 
-                // Identify the main class of the asset (Blueprint or DataAsset)
-                if class_idx < 0 {
-                    let _object_name = self.name_map.get(object_name_idx as usize).cloned().unwrap_or_default();
-                    let _class_type = if class_idx < 0 {
-                        self.import_map.get((-class_idx - 1) as usize).map(|i| i.object_name.clone()).unwrap_or_default()
-                    } else { String::new() };
-
-                    // LOGIC: A Blueprint's main class is often named 'BlueprintGeneratedClass'.
-                    // If we find it, its SuperIndex is the definitive C++ parent.
-                    if _class_type.contains("GeneratedClass") {
-                        if super_idx != 0 {
-                            bp_parent = Some(self.resolve_path(super_idx));
-                            break; 
-                        }
-                    }
-                    
-                    // Fallback: If it's a root object (Outer == 0) and has a valid class, track it.
-                    if fallback_parent.is_none() && outer_idx == 0 && class_idx < 0 {
-                        let path = self.resolve_path(class_idx);
-                        if path.starts_with('/') && !path.contains("BlueprintGeneratedClass") {
-                            fallback_parent = Some(path);
-                        }
+                let object_name = self.name_map.get(object_name_idx as usize).cloned().unwrap_or_default();
+                
+                if object_name == self.asset_name || object_name == format!("{}_C", self.asset_name) {
+                    if super_idx != 0 { bp_parent = Some(self.resolve_path(super_idx)); break; }
+                }
+                if bp_parent.is_none() && outer_idx == 0 && class_idx < 0 {
+                    let path = self.resolve_path(class_idx);
+                    if path.starts_with("/Script/") && !path.contains("BlueprintGeneratedClass") {
+                        bp_parent = Some(path);
                     }
                 }
 
-                // Correctly skip the rest of this FObjectExport entry
                 let mut skip = if ue5_ver >= 7 { 16 } else { 8 };
                 skip += 12;
                 if ue5_ver < 7 { skip += 16; }
@@ -210,7 +207,7 @@ impl UAssetParser {
                 if ue5_ver >= 7 { skip += 36; }
                 let _ = reader.seek(SeekFrom::Start(entry_start + 32 + skip));
             }
-            self.parent_class = bp_parent.or(fallback_parent);
+            self.parent_class = bp_parent;
         }
 
         Ok(())
