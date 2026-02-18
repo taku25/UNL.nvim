@@ -114,6 +114,10 @@ function M.create(spec)
               break
             end
           end
+          if opts[arg_def.name] == nil and arg_def.default ~= nil then
+            opts[arg_def.name] = (type(arg_def.default) == "function") and arg_def.default()
+              or arg_def.default
+          end
         elseif arg_def.variadic then
           if has_variadic ~= nil then
             get_logger().error(
@@ -152,6 +156,9 @@ function M.create(spec)
               command_def.desc or ""
             )
             return
+          elseif opts[arg_def.name] == nil and arg_def.default ~= nil then
+            opts[arg_def.name] = (type(arg_def.default) == "function") and arg_def.default()
+              or arg_def.default
           end
         end
       end
@@ -197,6 +204,17 @@ function M.create(spec)
           command_def.desc or ""
         )
         return
+      end
+      if has_variadic and opts[has_variadic.name] == nil and has_variadic.default ~= nil then
+        if type(has_variadic.default) == "function" then
+          opts[has_variadic.name] = has_variadic.default()
+        else
+          local vals = {}
+          for v in string.gmatch(has_variadic.default, "([^,]+)") do
+            table.insert(vals, v)
+          end
+          opts[has_variadic.name] = vals
+        end
       end
     else
       opts["args"] = { unpack(args.fargs, 2) }
