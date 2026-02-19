@@ -70,11 +70,10 @@ function M.run_static(spec, source)
     table.insert(items, to_snacks_item(it))
   end
 
-  Snacks.picker.pick({
+  local snacks_opts = {
     title = spec.title or "Select",
     items = items,
     format = "file",
-    preview = (spec.preview_enabled ~= false) and "file" or "none",
     confirm = function(picker, item)
       if not item then
         return
@@ -99,7 +98,17 @@ function M.run_static(spec, source)
         end)
       end
     end,
-  })
+  }
+
+  if spec.preview_enabled ~= false then
+    snacks_opts.preview = "file"
+  end
+
+  if spec.preview_enabled == false then
+    snacks_opts.layout = { hidden = { "preview" } }
+  end
+
+  Snacks.picker.pick(snacks_opts)
 end
 
 function M.run_grep(spec, source)
@@ -126,10 +135,9 @@ end
 function M.run_callback(spec, source)
   local Snacks = require("snacks")
 
-  Snacks.picker.pick({
+  local snacks_opts = {
     title = spec.title or "Dynamic Picker",
     format = "file",
-    preview = (spec.preview_enabled ~= false) and "file" or "none",
     finder = function(_, ctx)
       return function(cb)
         local task = ctx.async
@@ -179,7 +187,17 @@ function M.run_callback(spec, source)
         end)
       end
     end,
-  })
+  }
+
+  if spec.preview_enabled ~= false then
+    snacks_opts.preview = "file"
+  end
+
+  if spec.preview_enabled == false then
+    snacks_opts.layout = { hidden = { "preview" } }
+  end
+
+  Snacks.picker.pick(snacks_opts)
 end
 
 function M.run_job(spec, source)
