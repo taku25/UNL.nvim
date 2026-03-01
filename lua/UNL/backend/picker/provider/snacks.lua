@@ -95,11 +95,11 @@ local behaviour = {
           if spec.format and spec.format == "text" then
             item.base = item.text
             item.checked = default_check
-            item.text = (item.checked and " " or "󰆢 ") .. item.base
+            item.text = (item.checked and "󰄲 " or " ") .. item.base
           elseif (not spec.format) or spec.format == "file" then
             item.base = item.file
             item.checked = default_check
-            item.file = (item.checked and " " or "󰆢 ") .. item.base
+            item.file = (item.checked and "󰄲 " or " ") .. item.base
           end
         end
         table.insert(opts.items, 1, to_snacks_item("* Confirm selection"))
@@ -121,10 +121,10 @@ local behaviour = {
         else
           item.checked = not item.checked
           if spec.format and spec.format == "text" then
-            item.text = (item.checked and " " or "󰆢 ") .. item.base
+            item.text = (item.checked and "󰄲 " or " ") .. item.base
           elseif (not spec.format) or spec.format == "file" then
-            item.file = (item.checked and " " or "󰆢 ") .. item.base
-            item._path = (item.checked and " " or "󰆢 ") .. item.base
+            item.file = (item.checked and "󰄲 " or " ") .. item.base
+            item._path = (item.checked and "󰄲 " or " ") .. item.base
           end
           picker.list:update({ force = true })
         end
@@ -196,11 +196,11 @@ local behaviour = {
           if spec.format and spec.format == "text" then
             item.base = item.text
             item.checked = default_check
-            item.text = (item.checked and " " or "󰆢 ") .. item.base
+            item.text = (item.checked and "󰄲 " or " ") .. item.base
           elseif (not spec.format) or spec.format == "file" then
             item.base = item.file
             item.checked = default_check
-            item.file = (item.checked and " " or "󰆢 ") .. item.base
+            item.file = (item.checked and "󰄲 " or " ") .. item.base
           end
         end
         table.insert(opts.items, 1, to_snacks_item("* Confirm selection"))
@@ -222,10 +222,10 @@ local behaviour = {
         else
           item.checked = not item.checked
           if spec.format and spec.format == "text" then
-            item.text = (item.checked and " " or "󰆢 ") .. item.base
+            item.text = (item.checked and "󰄲 " or " ") .. item.base
           elseif (not spec.format) or spec.format == "file" then
-            item.file = (item.checked and " " or "󰆢 ") .. item.base
-            item._path = (item.checked and " " or "󰆢 ") .. item.base
+            item.file = (item.checked and "󰄲 " or " ") .. item.base
+            item._path = (item.checked and "󰄲 " or " ") .. item.base
           end
           picker.list:update({ force = true })
         end
