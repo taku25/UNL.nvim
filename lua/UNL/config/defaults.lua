@@ -4,14 +4,19 @@ local M = {
     picker = {
       mode = "auto",
       prefer = { "telescope", "fzf-lua", "snacks", "native", "dummy" },
+      behaviour = {
+        single = "native",
+        multiselect = "native", -- native or loop
+        multiselect_empty = "confirm_item", -- confirm_item, native, loop
+      },
     },
     grep_picker = {
       mode = "auto",
-      prefer = { "telescope", "fzf-lua", "snacks" }
+      prefer = { "telescope", "fzf-lua", "snacks" },
     },
     filer = {
       mode = "auto",
-      prefer = { "nvim-tree", "neo-tree", "native", "dummy"  },
+      prefer = { "nvim-tree", "neo-tree", "native", "dummy" },
     },
     progress = {
       mode = "auto",
@@ -22,7 +27,7 @@ local M = {
     debug_log = {
       position = "right",
       size = 0.4, -- 画面右側に40%の幅
-    }, 
+    },
   },
 
   safe_open = {
@@ -32,7 +37,7 @@ local M = {
       "alpha",
       "starter",
       "snacks_dashboard",
-    },    -- A list of buffer types to avoid.
+    }, -- A list of buffer types to avoid.
     -- See `:help buftype` for more options.
     prevent_in_buftypes = {
       "quickfix",
@@ -56,7 +61,7 @@ local M = {
     notify = { level = "error", prefix = "[UNL]" },
     file = { enable = true, max_kb = 512, rotate = 3, filename = "unl.log" },
     perf = { enabled = false, patterns = { "^refresh" }, level = "trace" },
-    debug = { enable = true, },
+    debug = { enable = true },
   },
 
   cache = { dirname = "UNL_cache" },
