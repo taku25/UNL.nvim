@@ -92,11 +92,11 @@ local behaviour = {
       if opts.items then
         local default_check = spec.default_selected and true or false
         for _, item in ipairs(opts.items) do
-          if spec.format and spec.format == "text" then
+          if not spec.devicons_enabled then
             item.base = item.text
             item.checked = default_check
             item.text = (item.checked and "󰄲 " or " ") .. item.base
-          elseif (not spec.format) or spec.format == "file" then
+          else
             item.base = item.file
             item.checked = default_check
             item.file = (item.checked and "󰄲 " or " ") .. item.base
@@ -120,9 +120,9 @@ local behaviour = {
           end
         else
           item.checked = not item.checked
-          if spec.format and spec.format == "text" then
+          if not spec.devicons_enabled then
             item.text = (item.checked and "󰄲 " or " ") .. item.base
-          elseif (not spec.format) or spec.format == "file" then
+          else
             item.file = (item.checked and "󰄲 " or " ") .. item.base
             item._path = (item.checked and "󰄲 " or " ") .. item.base
           end
@@ -193,11 +193,11 @@ local behaviour = {
       if opts.items then
         local default_check = spec.default_selected and true or false
         for _, item in ipairs(opts.items) do
-          if spec.format and spec.format == "text" then
+          if not spec.devicons_enabled then
             item.base = item.text
             item.checked = default_check
             item.text = (item.checked and "󰄲 " or " ") .. item.base
-          elseif (not spec.format) or spec.format == "file" then
+          else
             item.base = item.file
             item.checked = default_check
             item.file = (item.checked and "󰄲 " or " ") .. item.base
@@ -221,9 +221,9 @@ local behaviour = {
           end
         else
           item.checked = not item.checked
-          if spec.format and spec.format == "text" then
+          if not spec.devicons_enabled then
             item.text = (item.checked and "󰄲 " or " ") .. item.base
-          elseif (not spec.format) or spec.format == "file" then
+          else
             item.file = (item.checked and "󰄲 " or " ") .. item.base
             item._path = (item.checked and "󰄲 " or " ") .. item.base
           end
@@ -247,7 +247,7 @@ local function prepare_source(spec)
     local snacks_opts = {
       title = spec.title or "Select",
       items = items,
-      format = spec.format or "file",
+      format = spec.devicons_enabled and "file" or "text",
       handle_item = function(item)
         if item and spec.on_confirm then
           return item.value
@@ -272,6 +272,7 @@ local function prepare_source(spec)
       title = spec.title or "Live Grep",
       dirs = source.search_paths and vim.tbl_map(normalize_path, source.search_paths) or nil,
       exclude = source.exclude_directories,
+      format = spec.devicons_enabled and "file" or "text",
       handle_item = function(item)
         if item and item.file and item.pos and spec.on_confirm then
           return {
@@ -282,9 +283,6 @@ local function prepare_source(spec)
         end
       end,
     }
-    if spec.format then
-      snacks_opts.format = spec.format
-    end
 
     return {
       opts = snacks_opts,
@@ -293,7 +291,7 @@ local function prepare_source(spec)
   elseif source.type == "callback" then
     local snacks_opts = {
       title = spec.title or "Dynamic Picker",
-      format = spec.format or "file",
+      format = spec.devicons_enabled and "file" or "text",
       finder = function(_, ctx)
         return function(cb)
           local task = ctx.async
@@ -350,6 +348,7 @@ local function prepare_source(spec)
     local snacks_opts = {
       title = spec.title or "Find",
       finder = "proc",
+      format = spec.devicons_enabled and "file" or "text",
       cmd = cmd,
       args = args,
       cwd = normalize_path(spec.cwd),
@@ -359,9 +358,6 @@ local function prepare_source(spec)
         end
       end,
     }
-    if spec.format then
-      snacks_opts.format = spec.format
-    end
 
     return {
       opts = snacks_opts,
