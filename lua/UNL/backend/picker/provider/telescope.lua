@@ -52,7 +52,8 @@ end
 
 local behaviour = {
   single = {
-    native = function(opts, spec)
+    native = function(picker, spec)
+      local opts = picker.opts
       local actions = require("telescope.actions")
       local action_state = require("telescope.actions.state")
       opts.attach_mappings = function(prompt_bufnr)
@@ -70,7 +71,8 @@ local behaviour = {
     end,
   },
   multiselect = {
-    native = function(opts, spec)
+    native = function(picker, spec)
+      local opts = picker.opts
       local actions = require("telescope.actions")
       local action_state = require("telescope.actions.state")
       opts.attach_mappings = function(prompt_bufnr)
@@ -102,9 +104,74 @@ local behaviour = {
         return true
       end
     end,
+    loop = function(picker, spec)
+      local opts = picker.opts
+      local actions = require("telescope.actions")
+      local action_state = require("telescope.actions.state")
+      if opts.finder.results then
+        local default_check = spec.default_selected and true or false
+        for _, item in ipairs(opts.finder.results) do
+          if type(item.display) == "function" then
+            item.base = item.display_text
+            item.checked = default_check
+            item.display_text = (item.checked and "󰄲 " or " ") .. item.base
+          else
+            item.base = item.display
+            item.checked = default_check
+            item.display = (item.checked and "󰄲 " or " ") .. item.base
+          end
+        end
+        table.insert(opts.finder.results, 1, opts.finder.entry_maker("* Confirm selection"))
+      end
+      opts.attach_mappings = function(prompt_bufnr)
+        actions.select_default:replace(function()
+          -- local picker = action_state.get_current_picker(prompt_bufnr)
+          local e = action_state.get_selected_entry()
+          local picker = action_state.get_current_picker(prompt_bufnr)
+          if (type(e.display) == "function" and e.display_text or e.display) == "* Confirm selection" then
+            actions.close(prompt_bufnr)
+            local results = {}
+            for _, entry in ipairs(picker.finder.results) do
+              if
+                (type(entry.display) == "function" and entry.display_text or entry.display)
+                ~= "* Confirm selection"
+              then
+                if entry.checked then
+                  table.insert(results, opts.handle_item(entry))
+                end
+              end
+            end
+            if spec.on_confirm then
+              vim.schedule(function()
+                spec.on_confirm(results)
+              end)
+            end
+            return
+          else
+            e.checked = not e.checked
+            if type(e.display) == "function" then
+              e.display_text = (e.checked and "󰄲 " or " ") .. e.base
+            else
+              e.display = (e.checked and "󰄲 " or " ") .. e.base
+            end
+            local cur_row = picker:get_selection_row()
+            picker:refresh()
+            picker:set_selection(cur_row)
+          end
+        end)
+        -- local default_check = spec.default_selected and true or false
+        -- if default_check then
+        -- 	vim.schedule(function()
+        -- 		actions.select_all(prompt_bufnr)
+        -- 	end)
+        -- end
+        return true
+      end
+    end,
   },
   multiselect_empty = {
-    native = function(opts, spec)
+    native = function(picker, spec)
+      local opts = picker.opts
       local actions = require("telescope.actions")
       local action_state = require("telescope.actions.state")
       opts.attach_mappings = function(prompt_bufnr)
@@ -130,7 +197,8 @@ local behaviour = {
         return true
       end
     end,
-    confirm_item = function(opts, spec)
+    confirm_item = function(picker, spec)
+      local opts = picker.opts
       local actions = require("telescope.actions")
       local action_state = require("telescope.actions.state")
       table.insert(opts.finder.results, 1, opts.finder.entry_maker("* Confirm selection"))
@@ -168,6 +236,7 @@ local behaviour = {
     end,
   },
 }
+behaviour.multiselect_empty.loop = behaviour.multiselect.loop
 
 local prepare_source = function(spec)
   local source = spec.source or { type = "static", items = spec.items }
@@ -426,23 +495,14 @@ function M.run(spec)
     return
   end
 
-  if
-    (mode == "multiselect" or mode == "multiselect_empty")
-    and type(spec.conf.ui.picker.behaviour[mode]) == "string"
-    and spec.conf.ui.picker.behaviour[mode] == "loop"
-  then
-    log.error("Loop behaviour is not available for telescope.")
-    return
-  end
-
   if type(spec.conf.ui.picker.behaviour[mode]) == "function" then
-    spec.conf.ui.picker.behaviour[mode](picker.opts, spec)
+    spec.conf.ui.picker.behaviour[mode](picker, spec)
   elseif
     type(spec.conf.ui.picker.behaviour[mode]) == "string"
     and behaviour[mode][spec.conf.ui.picker.behaviour[mode]]
     and type(behaviour[mode][spec.conf.ui.picker.behaviour[mode]]) == "function"
   then
-    behaviour[mode][spec.conf.ui.picker.behaviour[mode]](picker.opts, spec)
+    behaviour[mode][spec.conf.ui.picker.behaviour[mode]](picker, spec)
   else
     log.error("Unknown behaviour '%s' for multiselect mode '%s'.", spec.conf.ui.picker.behaviour[mode], mode)
     return

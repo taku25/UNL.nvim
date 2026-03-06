@@ -318,7 +318,7 @@ require("UNL").setup({
   ui = {
     picker = {
       behaviour = {
-        single = function (opts, spec)
+        single = function (picker, spec)
           ...
         end
       }
@@ -327,7 +327,7 @@ require("UNL").setup({
 })
 ```
 
-`spec` is a table containing the arguments in the call to `require("UNL.picker").open({...})`. `opts` is a table holding the arguments that will be provided to the picker. The function should modify `opts` to obtain the desired behaviours. Examples can be found inside `lua/UNL/backend/picker/provider`.
+`spec` is a table containing the arguments in the call to `require("UNL.picker").open({...})`. `picker` is the table returned by `prepare_source`. The function should modify `picker.opts` to obtain the desired behaviours. Examples can be found inside `lua/UNL/backend/picker/provider/{snacks,telescope,fzf_lua}.lua`.
 
 -----
 

@@ -60,7 +60,8 @@ end
 
 local behaviour = {
   single = {
-    native = function(opts, spec)
+    native = function(picker, spec)
+      local opts = picker.opts
       if not opts.is_grep then
         opts.field_index = "{s}"
       end
@@ -80,7 +81,8 @@ local behaviour = {
     end,
   },
   multiselect = {
-    native = function(opts, spec)
+    native = function(picker, spec)
+      local opts = picker.opts
       opts.field_index = "{+}"
       if not opts["fzf_opts"] then
         opts["fzf_opts"] = {}
@@ -114,9 +116,98 @@ local behaviour = {
         opts.keymap.fzf["load"] = "select-all"
       end
     end,
+    loop = function(picker, spec)
+      local opts = picker.opts
+      local default_check = spec.default_selected and true or false
+      if opts.display_items then
+        if type(opts.display_items) == "function" then
+          if opts.check_status == nil then
+            opts.check_status = {}
+          end
+          local old_cb = opts.display_items
+          opts.display_items = function(fzf_cb)
+            local checked_wrapper = function(item)
+              if opts.check_status[item] == nil then
+                opts.check_status[item] = default_check
+              end
+              fzf_cb((opts.check_status[item] and "󰄲 " or " ") .. item)
+            end
+            to_fzf_item("* Confirm items", opts.lookup)
+            fzf_cb("* Confirm items")
+            old_cb(checked_wrapper)
+          end
+        elseif type(opts.display_items) == "table" then
+          opts.display_items = {}
+          for key, val in pairs(opts.lookup) do
+            if key ~= "* Confirm items" then
+              if val.checked == nil then
+                val.checked = default_check
+              end
+              table.insert(opts.display_items, (val.checked and "󰄲 " or " ") .. key)
+            end
+          end
+          if opts.lookup["* Confirm items"] == nil then
+            to_fzf_item("* Confirm items", opts.lookup)
+          end
+          table.insert(opts.display_items, 1, "* Confirm items")
+        end
+      end
+      opts.actions = {
+        ["default"] = function(selected)
+          if not selected then
+            return
+          end
+
+          if selected[1] == "* Confirm items" then
+            local res = {}
+            if type(opts.display_items) == "function" then
+              for key, _ in pairs(opts.lookup) do
+                if opts.check_status[key] then
+                  table.insert(res, opts.handle_item(key))
+                end
+              end
+            elseif type(opts.display_items) == "table" then
+              for key, val in pairs(opts.lookup) do
+                if val.checked then
+                  table.insert(res, opts.handle_item(key))
+                end
+              end
+            end
+            if spec.on_confirm then
+              vim.schedule(function()
+                spec.on_confirm(res)
+              end)
+            end
+          else
+            local item = selected[1]:match("[^ %s]* (.+)")
+            if type(opts.display_items) == "function" then
+              opts.check_status[item] = not opts.check_status[item]
+            elseif type(opts.display_items) == "table" then
+              opts.lookup[item].checked = not opts.lookup[item].checked
+              opts.display_items = {}
+              for key, val in pairs(opts.lookup) do
+                if key ~= "* Confirm items" then
+                  if val.checked == nil then
+                    val.checked = default_check
+                  end
+                  table.insert(opts.display_items, (val.checked and "󰄲 " or " ") .. key)
+                end
+              end
+              table.insert(opts.display_items, 1, "* Confirm items")
+            end
+            opts.__FZF_VERSION = nil
+            opts.__call_fn = nil
+            opts.__call_opts = nil
+            opts.__resume_key = nil
+            picker.picker(opts)
+          end
+        end,
+      }
+    end,
   },
   multiselect_empty = {
-    confirm_item = function(opts, spec)
+    confirm_item = function(picker, spec)
+      local opts = picker.opts
       opts.field_index = "{+}"
       if not opts["fzf_opts"] then
         opts["fzf_opts"] = {}
@@ -174,6 +265,7 @@ local behaviour = {
   },
 }
 behaviour.multiselect_empty.native = behaviour.multiselect_empty.confirm_item
+behaviour.multiselect_empty.loop = behaviour.multiselect.loop
 
 local function prepare_source(spec)
   local source = spec.source or { type = "static", items = spec.items }
@@ -358,23 +450,14 @@ function M.run(spec)
     return
   end
 
-  if
-    (mode == "multiselect" or mode == "multiselect_empty")
-    and type(spec.conf.ui.picker.behaviour[mode]) == "string"
-    and spec.conf.ui.picker.behaviour[mode] == "loop"
-  then
-    log.error("Loop behaviour is not available for fzf-lua.")
-    return
-  end
-
   if type(spec.conf.ui.picker.behaviour[mode]) == "function" then
-    spec.conf.ui.picker.behaviour[mode](picker.opts, spec)
+    spec.conf.ui.picker.behaviour[mode](picker, spec)
   elseif
     type(spec.conf.ui.picker.behaviour[mode]) == "string"
     and behaviour[mode][spec.conf.ui.picker.behaviour[mode]]
     and type(behaviour[mode][spec.conf.ui.picker.behaviour[mode]]) == "function"
   then
-    behaviour[mode][spec.conf.ui.picker.behaviour[mode]](picker.opts, spec)
+    behaviour[mode][spec.conf.ui.picker.behaviour[mode]](picker, spec)
   else
     log.error("Unknown behaviour '%s' for multiselect mode '%s'.", spec.conf.ui.picker.behaviour[mode], mode)
     return

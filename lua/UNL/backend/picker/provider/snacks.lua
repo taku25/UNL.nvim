@@ -51,7 +51,8 @@ end
 
 local behaviour = {
   single = {
-    native = function(opts, spec)
+    native = function(picker, spec)
+      local opts = picker.opts
       opts.confirm = function(picker, item)
         picker:close()
         if spec.on_confirm and item then
@@ -63,7 +64,8 @@ local behaviour = {
     end,
   },
   multiselect = {
-    native = function(opts, spec)
+    native = function(picker, spec)
+      local opts = picker.opts
       opts.confirm = function(picker, item)
         picker:close()
         if spec.on_confirm and item then
@@ -88,7 +90,8 @@ local behaviour = {
         end
       end
     end,
-    loop = function(opts, spec)
+    loop = function(picker, spec)
+      local opts = picker.opts
       if opts.items then
         local default_check = spec.default_selected and true or false
         for _, item in ipairs(opts.items) do
@@ -132,7 +135,8 @@ local behaviour = {
     end,
   },
   multiselect_empty = {
-    confirm_item = function(opts, spec)
+    confirm_item = function(picker, spec)
+      local opts = picker.opts
       if opts.items then
         table.insert(opts.items, 1, to_snacks_item("* Confirm selection"))
       end
@@ -167,7 +171,8 @@ local behaviour = {
         end
       end
     end,
-    native = function(opts, spec)
+    native = function(picker, spec)
+      local opts = picker.opts
       opts.confirm = function(picker, item)
         picker:close()
         if spec.on_confirm and item then
@@ -189,50 +194,9 @@ local behaviour = {
         end
       end
     end,
-    loop = function(opts, spec)
-      if opts.items then
-        local default_check = spec.default_selected and true or false
-        for _, item in ipairs(opts.items) do
-          if not spec.devicons_enabled then
-            item.base = item.text
-            item.checked = default_check
-            item.text = (item.checked and "󰄲 " or " ") .. item.base
-          else
-            item.base = item.file
-            item.checked = default_check
-            item.file = (item.checked and "󰄲 " or " ") .. item.base
-          end
-        end
-        table.insert(opts.items, 1, to_snacks_item("* Confirm selection"))
-      end
-      opts.confirm = function(picker, item)
-        if opts.handle_item(item) == "* Confirm selection" then
-          picker:close()
-          if spec.on_confirm and item then
-            vim.schedule(function()
-              local res = {}
-              for _, list_item in ipairs(picker.list.items) do
-                if list_item.checked then
-                  table.insert(res, opts.handle_item(list_item))
-                end
-              end
-              spec.on_confirm(res)
-            end)
-          end
-        else
-          item.checked = not item.checked
-          if not spec.devicons_enabled then
-            item.text = (item.checked and "󰄲 " or " ") .. item.base
-          else
-            item.file = (item.checked and "󰄲 " or " ") .. item.base
-            item._path = (item.checked and "󰄲 " or " ") .. item.base
-          end
-          picker.list:update({ force = true })
-        end
-      end
-    end,
   },
 }
+behaviour.multiselect_empty.loop = behaviour.multiselect.loop
 
 local function prepare_source(spec)
   local source = spec.source or { type = "static", items = spec.items }
@@ -386,13 +350,13 @@ function M.run(spec)
     return
   end
   if type(spec.conf.ui.picker.behaviour[mode]) == "function" then
-    spec.conf.ui.picker.behaviour[mode](picker.opts, spec)
+    spec.conf.ui.picker.behaviour[mode](picker, spec)
   elseif
     type(spec.conf.ui.picker.behaviour[mode]) == "string"
     and behaviour[mode][spec.conf.ui.picker.behaviour[mode]]
     and type(behaviour[mode][spec.conf.ui.picker.behaviour[mode]]) == "function"
   then
-    behaviour[mode][spec.conf.ui.picker.behaviour[mode]](picker.opts, spec)
+    behaviour[mode][spec.conf.ui.picker.behaviour[mode]](picker, spec)
   else
     log.error("Unknown behaviour '%s' for multiselect mode '%s'.", spec.conf.ui.picker.behaviour[mode], mode)
     return
