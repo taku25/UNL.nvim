@@ -6,6 +6,7 @@ local server_manager = require("UNL.scanner.server")
 local log = require("UNL.logging").get("UNL")
 local rpc = require("UNL.rpc")
 local vcs = require("UNL.vcs")
+local vcs_poller = require("UNL.vcs.poller")
 local path_util = require("UNL.path")
 local finder = require("UNL.finder")
 
@@ -108,9 +109,14 @@ function M.execute(opts)
                                     log.info("Database empty or re-initialized. Starting full refresh...")
                                 end
                                 local refresh_opts = vim.tbl_extend("force", opts, { scope = "Full" })
-                                refresh.execute(refresh_opts)
+                                refresh.execute(refresh_opts, function()
+                                    -- Full refresh 完了後にポーラーを起動（最新ハッシュで）
+                                    vcs_poller.start(project_root_norm, current_vcs)
+                                end)
                             else
                                 log.debug("UNL Server is ready for project: %s", project_root)
+                                -- リフレッシュ不要 → 既存ハッシュでポーラー起動
+                                vcs_poller.start(project_root_norm, current_vcs)
                             end
                         end
                         active_starts[project_root_norm] = nil

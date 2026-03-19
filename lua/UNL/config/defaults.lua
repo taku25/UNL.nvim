@@ -59,6 +59,20 @@ local M = {
     debug = { enable = true, },
   },
 
+  vcs = {
+    auto_refresh = {
+      enabled = true,
+      -- FocusGained でVCSハッシュをチェックするか
+      on_focus = true,
+      -- 連続チェックを防ぐクールダウン（秒）
+      cooldown = 300,
+      -- 変更ファイル数がこの閾値を超えたら Full Refresh に切り替え
+      full_refresh_threshold = 100,
+      -- これらにマッチするファイルが含まれていたら Full Refresh（モジュール構造変更の可能性）
+      structural_patterns = { "%.uproject$", "%.Build%.cs$", "%.uplugin$", "%.Target%.cs$" },
+    },
+  },
+
   cache = { dirname = "UNL_cache" },
   project = {
     localrc_filename = ".unlrc.json",

@@ -86,6 +86,32 @@ function M.get_hash(root)
     return nil
 end
 
+--- 2つのコミット間の変更ファイルリストを非同期で取得する
+--- @param root string Git リポジトリのルートパス
+--- @param old_hash string 前回のコミットハッシュ（"git:" プレフィックス付きも可）
+--- @param new_hash string 現在のコミットハッシュ（"git:" プレフィックス付きも可）
+--- @param callback function(files: string[]|nil) 変更ファイルの絶対パスリスト
+function M.get_changed_files(root, old_hash, new_hash, callback)
+    if not root or not old_hash or not new_hash then
+        return callback(nil)
+    end
+    -- "git:abc123" → "abc123"
+    local old_ref = old_hash:gsub("^git:", "")
+    local new_ref = new_hash:gsub("^git:", "")
+
+    spawn_git({ "diff", "--name-only", "--diff-filter=ACMR", old_ref, new_ref }, root, function(output)
+        if not output then return callback(nil) end
+        local root_norm = unl_path.normalize(root)
+        local files = {}
+        for line in output:gmatch("[^\r\n]+") do
+            if line ~= "" then
+                table.insert(files, root_norm .. "/" .. line)
+            end
+        end
+        callback(files)
+    end)
+end
+
 function M.refresh(start_path, on_complete, logger_name)
     if not start_path then return end
 

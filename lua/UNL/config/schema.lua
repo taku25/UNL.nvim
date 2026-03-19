@@ -81,6 +81,16 @@ function M.validate(cfg)
   if cfg.project.search_stop_at_home == nil then cfg.project.search_stop_at_home = true end
   if cfg.project.follow_symlink == nil then cfg.project.follow_symlink = true end
 
+  -- VCS auto-refresh
+  cfg.vcs = cfg.vcs or {}
+  cfg.vcs.auto_refresh = cfg.vcs.auto_refresh or {}
+  if cfg.vcs.auto_refresh.enabled == nil then cfg.vcs.auto_refresh.enabled = true end
+  if cfg.vcs.auto_refresh.on_focus == nil then cfg.vcs.auto_refresh.on_focus = true end
+  expect(cfg.vcs.auto_refresh, "cooldown", "number", 300, errors, "vcs.auto_refresh.")
+  expect(cfg.vcs.auto_refresh, "full_refresh_threshold", "number", 100, errors, "vcs.auto_refresh.")
+  cfg.vcs.auto_refresh.structural_patterns = cfg.vcs.auto_refresh.structural_patterns
+    or { "%.uproject$", "%.Build%.cs$", "%.uplugin$", "%.Target%.cs$" }
+
   return (#errors == 0), (#errors == 0) and cfg or errors
 end
 

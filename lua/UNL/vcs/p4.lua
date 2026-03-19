@@ -174,4 +174,67 @@ function M.get_changes()
     return changes
 end
 
+--- 2つのチェンジリスト間の変更ファイルリストを非同期で取得する
+--- @param root string プロジェクトルートパス
+--- @param old_hash string 前回のハッシュ（"p4:CL" 形式）
+--- @param new_hash string 現在のハッシュ（"p4:CL" 形式）
+--- @param callback function(files: string[]|nil) 変更ファイルのローカルパスリスト
+function M.get_changed_files(root, old_hash, new_hash, callback)
+    if not root or not old_hash or not new_hash then
+        return callback(nil)
+    end
+
+    local old_cl = old_hash:gsub("^p4:", "")
+    local new_cl = new_hash:gsub("^p4:", "")
+
+    -- Step 1: depot上で変更されたファイルを取得
+    -- "..." はcwd以下のdepotマッピングに限定
+    spawn_p4({ "files", "...@>" .. old_cl .. ",@" .. new_cl }, root, function(output)
+        if not output or output == "" then return callback({}) end
+
+        -- "//depot/path/file.cpp#3 - edit change 12347 (text)" → depot path を抽出
+        local depot_paths = {}
+        local seen = {}
+        for line in output:gmatch("[^\r\n]+") do
+            local dp = line:match("^(//[^#]+)")
+            if dp and not seen[dp] then
+                seen[dp] = true
+                table.insert(depot_paths, dp)
+            end
+        end
+
+        if #depot_paths == 0 then return callback({}) end
+
+        -- Step 2: depot path → local path に変換（-ztag で安全にパース）
+        -- コマンドライン長制限を考慮してバッチ処理
+        local all_local = {}
+        local batch_size = 50
+        local pending = math.ceil(#depot_paths / batch_size)
+
+        for i = 1, #depot_paths, batch_size do
+            local args = { "-ztag", "where" }
+            for j = i, math.min(i + batch_size - 1, #depot_paths) do
+                table.insert(args, depot_paths[j])
+            end
+
+            spawn_p4(args, root, function(where_output)
+                if where_output then
+                    -- -ztag 出力: "... path C:\Projects\path\file.cpp"
+                    for line in where_output:gmatch("[^\r\n]+") do
+                        local local_path = line:match("^%.%.%. path (.+)$")
+                        if local_path then
+                            table.insert(all_local, unl_path.normalize(local_path))
+                        end
+                    end
+                end
+
+                pending = pending - 1
+                if pending == 0 then
+                    callback(all_local)
+                end
+            end)
+        end
+    end)
+end
+
 return M

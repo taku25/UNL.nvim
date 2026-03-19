@@ -102,6 +102,29 @@ function M.get_aggregated_unpushed()
     return combined
 end
 
+--- 2つのVCSリビジョン間の変更ファイルリストを非同期で取得する
+--- @param root string プロジェクトルートパス
+--- @param old_hash string 前回のハッシュ（"git:xxx" / "p4:xxx" / "svn:xxx"）
+--- @param new_hash string 現在のハッシュ
+--- @param callback function(files: string[]|nil) 変更ファイルの絶対パスリスト。未対応VCSの場合nil
+function M.get_changed_files(root, old_hash, new_hash, callback)
+    if not root or not old_hash or not new_hash then
+        return callback(nil)
+    end
+
+    -- VCSプレフィックスで適切なプロバイダーを選択
+    local prefix = old_hash:match("^(%a+):")
+    if prefix == "git" and providers[2].module.get_changed_files then
+        providers[2].module.get_changed_files(root, old_hash, new_hash, callback)
+    elseif prefix == "p4" and providers[1].module.get_changed_files then
+        providers[1].module.get_changed_files(root, old_hash, new_hash, callback)
+    elseif prefix == "svn" and providers[3].module.get_changed_files then
+        providers[3].module.get_changed_files(root, old_hash, new_hash, callback)
+    else
+        callback(nil)
+    end
+end
+
 --- パスのVCSステータスを取得する
 function M.get_status(path)
     for i=1, 2 do -- P4, Git

@@ -47,6 +47,8 @@ local M = {
 
   ON_AFTER_NEW_PROJECT = "unl:on_after_new_project",
   ON_SERVER_PROGRESS = "unl:on_server_progress",
+
+  ON_AFTER_VCS_AUTO_REFRESH = "unl:on_after_vcs_auto_refresh",
 }
 
 return M
