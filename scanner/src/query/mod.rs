@@ -6,6 +6,7 @@ pub mod asset;
 pub mod class;
 pub mod module;
 pub mod buffer;
+pub mod config;
 
 pub fn process_query_streaming<F>(conn: &Connection, req: QueryRequest, mut on_items: F) -> anyhow::Result<Value> 
 where F: FnMut(Vec<Value>) -> anyhow::Result<()> {
@@ -316,6 +317,7 @@ pub fn process_query(conn: &Connection, req: QueryRequest) -> anyhow::Result<Val
                 QueryRequest::GetAssetUsages { .. } => Ok(serde_json::json!([])),
                                         QueryRequest::GetAssetDependencies { .. } => Ok(serde_json::json!([])), 
                                         QueryRequest::GetAssets => Err(anyhow::anyhow!("GetAssets must be handled by the server state")),
+                                        QueryRequest::GetConfigData { .. } => Err(anyhow::anyhow!("GetConfigData must be handled by the server state")),
                                         QueryRequest::FindSymbolUsages { symbol_name, limit } => class::find_symbol_usages(conn, symbol_name, limit),
                                     }
                                 }

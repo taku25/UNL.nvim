@@ -162,6 +162,42 @@ pub struct UModuleJson {
     pub mod_type: String,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ConfigPlatform {
+    pub name: String,
+    pub platform: String,
+    pub is_profile: bool,
+    pub sections: Vec<ConfigSection>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ConfigSection {
+    pub name: String,
+    pub parameters: Vec<ConfigParameter>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ConfigParameter {
+    pub key: String,
+    pub value: String,
+    pub history: Vec<ConfigHistory>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ConfigHistory {
+    pub file: String,
+    pub full_path: String,
+    pub value: String,
+    pub op: String,
+    pub line: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct ConfigCache {
+    pub data: Vec<ConfigPlatform>,
+    pub is_dirty: bool,
+}
+
 #[derive(Deserialize, Serialize, Debug)]
 #[serde(tag = "kind")]
 pub enum QueryRequest {
@@ -246,6 +282,9 @@ pub enum QueryRequest {
     },
     GetAssets,
     FindSymbolUsages { symbol_name: String, limit: Option<usize> },
+    GetConfigData {
+        engine_root: Option<String>,
+    },
 }
 
 use std::io::{self, Write};

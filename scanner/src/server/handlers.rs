@@ -341,6 +341,14 @@ pub async fn handle_query(state: Arc<AppState>, params: &Value, tx: mpsc::Sender
                 }
                 Ok(json!([]))
             }
+            QueryRequest::GetConfigData { engine_root } => {
+                let data = crate::query::config::get_config_data_with_cache(
+                    &state,
+                    &req.project_root,
+                    engine_root.as_deref()
+                )?;
+                Ok(json!(data))
+            }
             _ => {
                 if is_async {
                     let tx_clone = tx.clone();

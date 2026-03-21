@@ -249,4 +249,9 @@ function M.get_completions(opts, callback)
     remote.get_completions(content, line, character, file_path, callback)
 end
 
+--- 汎用的な RPC クエリ
+function M.query(kind, args, callback)
+    remote.request(kind, args, callback)
+end
+
 return M

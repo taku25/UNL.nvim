@@ -21,6 +21,15 @@ pub async fn handle_file_change(state: Arc<AppState>, path: PathBuf) {
         let path_str = path.to_string_lossy().replace("\\", "/");
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
         
+        if ext == "ini" {
+            let mut caches = state.config_caches.lock().unwrap();
+            if let Some(cache) = caches.get_mut(&root_clone) {
+                cache.is_dirty = true;
+                tracing::info!("Config cache marked as dirty due to change in: {}", path_str);
+            }
+            return;
+        }
+
         if ext == "uasset" || ext == "umap" {
             let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
             if ext == "umap" || filename.starts_with("BP_") || filename.starts_with("ABP_") || filename.starts_with("WBP_") || filename.starts_with("AM_") || filename.starts_with("DA_") || filename.starts_with("DT_") {

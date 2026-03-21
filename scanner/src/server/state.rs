@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use tokio::sync::mpsc;
 use tracing::info;
 use serde::{Serialize, Deserialize};
-use crate::types::{Progress, ProgressReporter};
+use crate::types::{Progress, ProgressReporter, ConfigCache};
 use crate::db;
 
 pub struct RpcProgressReporter {
@@ -58,6 +58,7 @@ pub struct AppState {
     pub active_clients: Mutex<HashSet<u32>>,
     pub last_activity: Mutex<Instant>,
     pub asset_graphs: Mutex<HashMap<String, AssetGraph>>,
+    pub config_caches: Mutex<HashMap<String, ConfigCache>>,
 }
 
 impl AppState {
