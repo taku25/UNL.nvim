@@ -52,6 +52,24 @@ pub fn process_completion(
     let mut curr_opt = Some(node);
     while let Some(curr) = curr_opt {
         let p_kind = curr.kind();
+
+        // --- Added: Macro Specifiers Support ---
+        if p_kind == "unreal_macro_argument_list" || p_kind == "macro_argument_list" {
+            if let Some(parent) = curr.parent() {
+                let macro_name = get_node_text(&parent, content).trim();
+                if let Some(res) = resolve_macro_specifiers(macro_name) {
+                    return Ok(res);
+                }
+                if let Some(grand) = parent.parent() {
+                   let g_name = get_node_text(&grand, content).trim();
+                   if let Some(res) = resolve_macro_specifiers(g_name) {
+                       return Ok(res);
+                   }
+                }
+            }
+        }
+        // ---------------------------------------
+
         if p_kind == "field_expression" {
             if let Some(obj_node) = curr.child_by_field_name("argument") {
                 return resolve_node_and_fetch_members(conn, obj_node, &root, content, row);
@@ -79,14 +97,42 @@ pub fn process_completion(
         curr_opt = curr.parent();
     }
 
-    // 3. 暗黙の this 補完 (スタンドアロンの識別子入力時)
-    if node_type == "identifier" || node_type == "type_identifier" || node_type == "field_identifier" || node_type == "this" {
+    // 3. 暗黙の this 補完 + グローバルシンボル補完 (スタンドアロンの識別子入力時)
+    if node_type == "identifier" || node_type == "type_identifier" || node_type == "field_identifier" || node_type == "this" || node_type == "ERROR" {
+        let prefix = get_node_text(&node, content).trim();
+        let mut results = Vec::new();
+
+        // 3a. Current class members (implicit this)
         if let Some(current_class) = get_enclosing_class_name(&node, content) {
             tracing::info!("Implicit 'this' context detected: '{}'", current_class);
-            let members = fetch_members_recursive(conn, &current_class)?;
-            if !members.is_empty() {
-                return Ok(json!(members));
+            if let Ok(members) = fetch_members_recursive(conn, &current_class) {
+                results.extend(members);
             }
+        }
+
+        // 3b. Global symbols (Classes, Enums)
+        if let Ok(globals) = fetch_global_symbols(conn, prefix) {
+            if let Some(arr) = globals.as_array() {
+                results.extend(arr.clone());
+            }
+        }
+
+        // 3c. Unreal Snippets
+        results.extend(get_ue_snippets(prefix));
+
+        if !results.is_empty() {
+            // 重複排除 (labelで)
+            let mut seen = HashMap::new();
+            let mut unique_results = Vec::new();
+            for r in results {
+                if let Some(label) = r.get("label").and_then(|v| v.as_str()) {
+                    if !seen.contains_key(label) {
+                        seen.insert(label.to_string(), true);
+                        unique_results.push(r);
+                    }
+                }
+            }
+            return Ok(json!(unique_results));
         }
     }
 
@@ -153,7 +199,7 @@ fn resolve_expression_type(
             if name == "this" {
                 return Ok(get_enclosing_class_name(&node, content));
             }
-            if let Some(t) = infer_variable_type(name, root, content, cursor_row)? {
+            if let Some(t) = infer_variable_type(conn, name, root, content, cursor_row)? {
                 return Ok(Some(t));
             }
             if let Some(current_class) = get_enclosing_class_name(&node, content) {
@@ -171,15 +217,44 @@ fn resolve_expression_type(
             Ok(None)
         }
         "qualified_identifier" => {
-            let text = get_node_text(&node, content);
+            let text = get_node_text(&node, content).trim();
             if is_known_type(conn, text)? {
                 return Ok(Some(text.to_string()));
+            }
+            // If it's something like Class::StaticMember, try to resolve the type
+            if text.contains("::") {
+                let parts: Vec<&str> = text.split("::").collect();
+                if parts.len() >= 2 {
+                    let cls = parts[..parts.len()-1].join("::");
+                    let member = parts[parts.len()-1];
+                    return find_member_return_type(conn, &cls, member);
+                }
+            }
+            Ok(None)
+        }
+        "template_call" => {
+            // Support Cast<T>(Obj) or StaticCast<T>(Obj)
+            if let Some(name_node) = node.child_by_field_name("name") {
+                let name = get_node_text(&name_node, content).trim();
+                if name == "Cast" || name == "StaticCast" || name == "ExactCast" || name == "CastChecked" {
+                    if let Some(args_node) = node.child_by_field_name("arguments") {
+                        // arguments are template arguments <T>
+                        let t_text = get_node_text(&args_node, content).trim();
+                        if t_text.starts_with('<') && t_text.ends_with('>') {
+                            let inner = &t_text[1..t_text.len()-1];
+                            let clean = extract_clean_type(inner);
+                            tracing::info!("Resolved template cast '{}' to type '{}'", name, clean);
+                            return Ok(Some(clean));
+                        }
+                    }
+                }
             }
             Ok(None)
         }
         "call_expression" => {
             if let Some(func_node) = node.child_by_field_name("function") {
-                if func_node.kind() == "field_expression" {
+                let func_kind = func_node.kind();
+                if func_kind == "field_expression" {
                     if let Some(obj_node) = func_node.child_by_field_name("argument") {
                         if let Some(obj_type) = resolve_expression_type(conn, obj_node, root, content, cursor_row)? {
                             if let Some(field_node) = func_node.child_by_field_name("field") {
@@ -187,8 +262,20 @@ fn resolve_expression_type(
                             }
                         }
                     }
+                } else if func_kind == "template_call" {
+                    return resolve_expression_type(conn, func_node, root, content, cursor_row);
                 } else {
                     let func_name = get_node_text(&func_node, content).trim();
+                    // --- Added: Handle Class::Get() ---
+                    if func_name.contains("::") {
+                        let parts: Vec<&str> = func_name.split("::").collect();
+                        if parts.len() >= 2 {
+                            let cls = parts[..parts.len()-1].join("::");
+                            let method = parts[parts.len()-1];
+                            return find_member_return_type(conn, &cls, method);
+                        }
+                    }
+                    // ----------------------------------
                     if let Some(current_class) = get_enclosing_class_name(&node, content) {
                         return find_member_return_type(conn, &current_class, func_name);
                     }
@@ -212,6 +299,30 @@ fn resolve_expression_type(
                     let unwrapped = unwrap_container_type(&obj_type);
                     tracing::info!("Subscript detected: container type '{}' -> element type '{}'", obj_type, unwrapped);
                     return Ok(Some(unwrapped));
+                }
+            }
+            Ok(None)
+        }
+        "parenthesized_expression" => {
+            // Skip parentheses ( (expr) )
+            for i in 0..node.child_count() {
+                if let Some(child) = node.child(i as u32) {
+                    let ck = child.kind();
+                    if ck != "(" && ck != ")" {
+                        return resolve_expression_type(conn, child, root, content, cursor_row);
+                    }
+                }
+            }
+            Ok(None)
+        }
+        "pointer_expression" | "parenthesized_declarator" | "pointer_declarator" | "reference_declarator" => {
+            // Unwrap pointer/reference expressions
+            for i in 0..node.child_count() {
+                if let Some(child) = node.child(i as u32) {
+                    let ck = child.kind();
+                    if ck != "*" && ck != "&" {
+                        return resolve_expression_type(conn, child, root, content, cursor_row);
+                    }
                 }
             }
             Ok(None)
@@ -391,6 +502,7 @@ fn fetch_members_recursive(conn: &Connection, class_name: &str) -> anyhow::Resul
                 JOIN strings smt ON m.type_id = smt.id
                 LEFT JOIN strings srt ON m.return_type_id = srt.id
                 WHERE class_id = ?
+                ORDER BY smn.text ASC
             ")?;
             let mem_rows = mem_stmt.query_map([class_id], |row| {
                 let m_name: String = row.get(0)?;
@@ -421,6 +533,86 @@ fn fetch_members_recursive(conn: &Connection, class_name: &str) -> anyhow::Resul
     Ok(result)
 }
 
+fn fetch_global_symbols(conn: &Connection, prefix: &str) -> anyhow::Result<Value> {
+    let mut results = Vec::new();
+    let limit = 50;
+    
+    let mut stmt = conn.prepare("
+        SELECT s.text, symbol_type FROM classes c
+        JOIN strings s ON c.name_id = s.id
+        WHERE LOWER(s.text) LIKE LOWER(?) AND symbol_type IN ('class', 'struct', 'enum')
+        LIMIT ?
+    ")?;
+    let prefix_search = format!("{}%", prefix);
+    let rows = stmt.query_map([&prefix_search, &limit.to_string()], |row| {
+        let name: String = row.get(0)?;
+        let sym_type: String = row.get(1)?;
+        let kind = match sym_type.as_str() {
+            "class" | "struct" => 7, // Class
+            "enum" => 13, // Enum
+            _ => 1
+        };
+        Ok(json!({ "label": name, "kind": kind, "detail": sym_type, "insertText": name }))
+    })?;
+    for r in rows { results.push(r?); }
+    
+    Ok(json!(results))
+}
+
+fn get_ue_snippets(prefix: &str) -> Vec<Value> {
+    let mut snippets = vec![
+        json!({ "label": "UPROPERTY", "kind": 15, "detail": "macro", "insertText": "UPROPERTY($1)", "sortText": "01" }),
+        json!({ "label": "UFUNCTION", "kind": 15, "detail": "macro", "insertText": "UFUNCTION($1)", "sortText": "01" }),
+        json!({ "label": "UCLASS", "kind": 15, "detail": "macro", "insertText": "UCLASS($1)", "sortText": "01" }),
+        json!({ "label": "USTRUCT", "kind": 15, "detail": "macro", "insertText": "USTRUCT($1)", "sortText": "01" }),
+        json!({ "label": "UENUM", "kind": 15, "detail": "macro", "insertText": "UENUM($1)", "sortText": "01" }),
+        json!({ "label": "GENERATED_BODY", "kind": 15, "detail": "macro", "insertText": "GENERATED_BODY()", "sortText": "01" }),
+        json!({ "label": "GetWorld()", "kind": 2, "detail": "AActor", "insertText": "GetWorld()", "sortText": "02" }),
+        json!({ "label": "GetOwner()", "kind": 2, "detail": "AActor", "insertText": "GetOwner()", "sortText": "02" }),
+        json!({ "label": "Super::", "kind": 7, "detail": "parent class", "insertText": "Super::", "sortText": "00" }),
+    ];
+    
+    if prefix.is_empty() { return snippets; }
+    let prefix_lower = prefix.to_lowercase();
+    snippets.retain(|v| v.get("label").and_then(|l| l.as_str()).map(|l| l.to_lowercase().starts_with(&prefix_lower)).unwrap_or(false));
+    snippets
+}
+
+fn resolve_macro_specifiers(macro_name: &str) -> Option<Value> {
+    let name = macro_name.split('(').next().unwrap_or("").trim();
+    let mut items = Vec::new();
+    
+    match name {
+        "UPROPERTY" => {
+            items.push(json!({ "label": "EditAnywhere", "kind": 12, "detail": "Specifier", "documentation": "Indicates that this property can be edited by property windows, on instances or archetypes." }));
+            items.push(json!({ "label": "BlueprintReadOnly", "kind": 12, "detail": "Specifier", "documentation": "This property can be read from blueprints, but never modified." }));
+            items.push(json!({ "label": "BlueprintReadWrite", "kind": 12, "detail": "Specifier", "documentation": "This property can be read or written from blueprints." }));
+            items.push(json!({ "label": "Category", "kind": 12, "detail": "Specifier", "documentation": "Specifies the category of the property in the Editor UI. Usage: Category=\"MyCategory\"" }));
+            items.push(json!({ "label": "VisibleAnywhere", "kind": 12, "detail": "Specifier", "documentation": "Indicates that this property is visible in property windows, but cannot be edited." }));
+            items.push(json!({ "label": "Transient", "kind": 12, "detail": "Specifier", "documentation": "Property is not saved to disk and not loaded from disk." }));
+            items.push(json!({ "label": "Replicated", "kind": 12, "detail": "Specifier", "documentation": "Property should be replicated over the network." }));
+        },
+        "UFUNCTION" => {
+            items.push(json!({ "label": "BlueprintCallable", "kind": 12, "detail": "Specifier", "documentation": "The function can be executed in a Blueprint or Level Blueprint graph." }));
+            items.push(json!({ "label": "BlueprintPure", "kind": 12, "detail": "Specifier", "documentation": "The function does not affect the owning object in any way and can be executed in a Blueprint or Level Blueprint graph." }));
+            items.push(json!({ "label": "Category", "kind": 12, "detail": "Specifier", "documentation": "Specifies the category of the function in the Editor UI." }));
+            items.push(json!({ "label": "BlueprintImplementableEvent", "kind": 12, "detail": "Specifier", "documentation": "The function can be overridden in a Blueprint or Level Blueprint graph." }));
+            items.push(json!({ "label": "BlueprintNativeEvent", "kind": 12, "detail": "Specifier", "documentation": "The function can be overridden in a Blueprint, but also has a native default implementation." }));
+            items.push(json!({ "label": "Server", "kind": 12, "detail": "Specifier", "documentation": "The function is only executed on the server." }));
+            items.push(json!({ "label": "Client", "kind": 12, "detail": "Specifier", "documentation": "The function is only executed on the client that owns the object." }));
+        },
+        "UCLASS" | "USTRUCT" => {
+            items.push(json!({ "label": "Blueprintable", "kind": 12, "detail": "Specifier", "documentation": "Exposes this class as an acceptable base class for creating Blueprints." }));
+            items.push(json!({ "label": "BlueprintType", "kind": 12, "detail": "Specifier", "documentation": "Exposes this class as a type that can be used for variables in Blueprints." }));
+            items.push(json!({ "label": "Abstract", "kind": 12, "detail": "Specifier", "documentation": "Prevents the user from adding actors of this class to the world in the Editor." }));
+            items.push(json!({ "label": "MinimalAPI", "kind": 12, "detail": "Specifier", "documentation": "Causes only the class's type information to be exported for use by other modules." }));
+        },
+        _ => return None
+    }
+    
+    if items.is_empty() { None } else { Some(json!(items)) }
+}
+
 fn map_kind(k: &str) -> i64 {
     match k { "function" => 2, "variable" | "property" => 5, "enum_item" => 20, _ => 1 }
 }
@@ -436,12 +628,14 @@ fn is_known_type(conn: &Connection, name: &str) -> anyhow::Result<bool> {
     Ok(stmt.exists([&clean])?)
 }
 
-fn infer_variable_type(target_name: &str, root: &Node, content: &str, cursor_row: usize) -> anyhow::Result<Option<String>> {
+fn infer_variable_type(conn: &Connection, target_name: &str, root: &Node, content: &str, cursor_row: usize) -> anyhow::Result<Option<String>> {
+    tracing::info!("infer_variable_type(target='{}', cursor_row={})", target_name, cursor_row);
     let language: tree_sitter::Language = tree_sitter_unreal_cpp::LANGUAGE.into();
     let query_str = "
       (declaration type: (_) @type declarator: (_) @decl)
       (parameter_declaration type: (_) @type declarator: (_) @decl)
       (for_range_loop type: (_) @type declarator: (_) @decl)
+      (condition_clause value: (declaration type: (_) @type declarator: (_) @decl))
       (condition_clause (declaration type: (_) @type declarator: (_) @decl))
     ";
     let query = Query::new(&language, query_str)?;
@@ -461,10 +655,13 @@ fn infer_variable_type(target_name: &str, root: &Node, content: &str, cursor_row
             for d_node in decl_nodes {
                 if find_identifier_in_decl(&d_node, target_name, content)? {
                     let row = d_node.start_position().row;
+                    tracing::info!("Found match for '{}' at row {} (Type: {})", target_name, row, t_node.kind());
                     if row <= cursor_row && (best_type.is_none() || row >= best_row) {
                         let type_text = get_node_text(&t_node, content).trim();
                         if type_text == "auto" {
-                            if let Some(inferred) = infer_from_assignment(target_name, root, content, cursor_row)? {
+                            // If auto, try to get value from current node or search assignment
+                            if let Some(inferred) = infer_from_assignment(conn, target_name, root, content, cursor_row)? {
+                                tracing::info!("Inferred 'auto' type: '{}'", inferred);
                                 best_type = Some(inferred);
                             }
                         } else {
@@ -477,8 +674,10 @@ fn infer_variable_type(target_name: &str, root: &Node, content: &str, cursor_row
         }
     }
     if best_type.is_none() {
-        best_type = infer_from_assignment(target_name, root, content, cursor_row)?;
+        tracing::info!("No direct declaration found, trying broad assignment inference...");
+        best_type = infer_from_assignment(conn, target_name, root, content, cursor_row)?;
     }
+    tracing::info!("infer_variable_type Result for '{}': {:?}", target_name, best_type);
     Ok(best_type)
 }
 
@@ -495,10 +694,14 @@ fn find_identifier_in_decl(node: &Node, target_name: &str, content: &str) -> any
     Ok(false)
 }
 
-fn infer_from_assignment(target_name: &str, root: &Node, content: &str, cursor_row: usize) -> anyhow::Result<Option<String>> {
+fn infer_from_assignment(conn: &Connection, target_name: &str, root: &Node, content: &str, cursor_row: usize) -> anyhow::Result<Option<String>> {
+    tracing::info!("infer_from_assignment(target='{}')", target_name);
     let language: tree_sitter::Language = tree_sitter_unreal_cpp::LANGUAGE.into();
     let query_str = "
-      (declaration declarator: (init_declarator declarator: (_) @decl value: (_) @value))
+      (declaration type: (_) declarator: (init_declarator declarator: (_) @decl value: (_) @value))
+      (declaration declarator: (_) @decl value: (_) @value)
+      (condition_clause value: (declaration type: (_) declarator: (init_declarator declarator: (_) @decl value: (_) @value)))
+      (condition_clause value: (declaration declarator: (_) @decl value: (_) @value))
       (assignment_expression left: (_) @decl right: (_) @value)
     ";
     let query = Query::new(&language, query_str)?;
@@ -513,11 +716,27 @@ fn infer_from_assignment(target_name: &str, root: &Node, content: &str, cursor_r
             else if c_name == "value" { value_node = Some(cap.node); }
         }
         if let (Some(d_node), Some(v_node)) = (decl_node, value_node) {
-            if find_identifier_in_decl(&d_node, target_name, content)? {
+            let found_name = if d_node.kind() == "identifier" { get_node_text(&d_node, content).trim() } else { "" };
+            if !found_name.is_empty() && found_name == target_name {
                 let row = d_node.start_position().row;
                 if row <= cursor_row { 
+                    tracing::info!("Found assignment match for '{}' at row {} (Value Kind: {}), resolving RHS...", target_name, row, v_node.kind());
+                    if let Ok(Some(t)) = resolve_expression_type(conn, v_node, root, content, cursor_row) {
+                        tracing::info!("RHS resolved successfully: '{}'", t);
+                        return Ok(Some(t));
+                    }
                     let v_text = get_node_text(&v_node, content);
+                    tracing::info!("RHS resolve failed, fallback to regex on: '{}'", v_text);
                     return infer_from_value_text(v_text);
+                }
+            } else if find_identifier_in_decl(&d_node, target_name, content)? {
+                // Handle complex declarators like *x or &x
+                let row = d_node.start_position().row;
+                if row <= cursor_row {
+                    tracing::info!("Found complex assignment match for '{}' at row {}, resolving RHS...", target_name, row);
+                    if let Ok(Some(t)) = resolve_expression_type(conn, v_node, root, content, cursor_row) {
+                        return Ok(Some(t));
+                    }
                 }
             }
         }
