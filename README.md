@@ -103,6 +103,11 @@ opts = {
     picker = {
       mode = "auto", -- "auto", "telescope", "fzf_lua", "native"
       prefer = { "telescope", "fzf_lua", "native" },
+      behaviour = {
+        single = "native",
+        multiselect = "native",
+        multiselect_empty = "confirm_item",
+      },
     },
     filer = {
       mode = "auto",
@@ -236,9 +241,10 @@ The `spec` table passed to `open()` supports the following fields:
 | `source` | `table` | Data source definition (see below). |
 | `items` | `table` | Shorthand for `source.type = "static"`. A list of items. |
 | `on_confirm` | `function` | Callback when an item is confirmed. Receives the selection. |
-| `multiselect` | `string/bool` | Selection mode: `"loop"` (safe looping UI), `"native"` (backend native UI), or `"none"` (single selection). |
+| `multiselect` | `string/bool` | Selection mode: `false` or `"single"` (single selection), `true` or `"multiselect"` (multi selection enabled, no empty selection), or `"multiselect_empty"` (multi selection, empty selection allowed). |
 | `preview_enabled`| `boolean` | Whether to enable the previewer. |
 | `devicons_enabled`| `boolean` | Whether to show icons. |
+| `default_selected`| `boolean` | If multiselection, should the entries be selected by default |
 
 ### Source Type Variations
 
@@ -291,6 +297,37 @@ require('UNL').setup({
   }
 })
 ```
+
+### Modifying the behaviours
+
+It is possible to customize the behaviours (`single`, `multiselect`, `multiselect_empty`) of the pickers in the configuration. Here is the valid options:
+
+| Behaviour | Value | Description |
+| :--- | :--- | :--- |
+| `single` | `native` | Only valid option for `single` |
+| `multiselect` | `native` | Will return the selected entries. If none are selected return the current entry |
+| `multiselect` | `loop` | Selecting an entry will check it. Selecting `* confirm selection` will return the checked entries. |
+| `multiselect_empty` | `native` | Will return the selected entries. If none are selected return an empty selection (fallback to loop for fzf-lua) |
+| `multiselect_empty` | `confirm_item` | Added a `* Confirm selection` entry. On confirm, return an empty selection if `* Confirm selection` was not selected, or else return the other selected items |
+| `multiselect_empty` | `loop` | Selecting an entry will check it. Selecting `* confirm selection` will return the checked entries. |
+
+It is also possible to further customize the behaviour by providing a function instead of a string.
+
+```lua
+require("UNL").setup({
+  ui = {
+    picker = {
+      behaviour = {
+        single = function (picker, spec)
+          ...
+        end
+      }
+    }
+  }
+})
+```
+
+`spec` is a table containing the arguments in the call to `require("UNL.picker").open({...})`. `picker` is the table returned by `prepare_source`. The function should modify `picker.opts` to obtain the desired behaviours. Examples can be found inside `lua/UNL/backend/picker/provider/{snacks,telescope,fzf_lua}.lua`.
 
 -----
 
