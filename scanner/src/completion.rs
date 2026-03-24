@@ -487,14 +487,17 @@ fn fetch_members_recursive(conn: &Connection, class_name: &str) -> anyhow::Resul
         if visited.contains_key(&current) { continue; }
         visited.insert(current.clone(), true);
         
+        // Find all class IDs for this name (to handle multiple declarations/definitions)
         let mut stmt = conn.prepare("
             SELECT c.id FROM classes c 
             JOIN strings sc ON c.name_id = sc.id
-            WHERE LOWER(sc.text) = LOWER(?) GROUP BY c.id LIMIT 1
+            WHERE LOWER(sc.text) = LOWER(?)
         ")?;
-        let mut rows = stmt.query([&current])?;
-        if let Some(row) = rows.next()? {
-            let class_id: i64 = row.get(0)?;
+        let class_ids: Vec<i64> = stmt.query_map([&current], |row| row.get(0))?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        for class_id in class_ids {
             let mut mem_stmt = conn.prepare("
                 SELECT smn.text, smt.text, srt.text, access, is_static, detail, m.line_number, sp.text
                 FROM members m 
@@ -702,11 +705,15 @@ fn infer_variable_type(conn: &Connection, target_name: &str, root: &Node, conten
     tracing::info!("infer_variable_type(target='{}', cursor_row={})", target_name, cursor_row);
     let language: tree_sitter::Language = tree_sitter_unreal_cpp::LANGUAGE.into();
     let query_str = "
+      (declaration type: (_) @type declarator: (init_declarator declarator: (_) @decl))
       (declaration type: (_) @type declarator: (_) @decl)
+      (field_declaration type: (_) @type declarator: (init_declarator declarator: (_) @decl))
+      (field_declaration type: (_) @type declarator: (_) @decl)
       (parameter_declaration type: (_) @type declarator: (_) @decl)
       (for_range_loop type: (_) @type declarator: (_) @decl)
+      (condition_clause value: (declaration type: (_) @type declarator: (init_declarator declarator: (_) @decl)))
       (condition_clause value: (declaration type: (_) @type declarator: (_) @decl))
-      (condition_clause (declaration type: (_) @type declarator: (_) @decl))
+      (declaration (_) @type (_) @decl)
     ";
     let query = Query::new(&language, query_str)?;
     let mut cursor = QueryCursor::new();
