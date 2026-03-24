@@ -496,11 +496,13 @@ fn fetch_members_recursive(conn: &Connection, class_name: &str) -> anyhow::Resul
         if let Some(row) = rows.next()? {
             let class_id: i64 = row.get(0)?;
             let mut mem_stmt = conn.prepare("
-                SELECT smn.text, smt.text, srt.text, access, is_static, detail 
+                SELECT smn.text, smt.text, srt.text, access, is_static, detail, m.line_number, sp.text
                 FROM members m 
                 JOIN strings smn ON m.name_id = smn.id
                 JOIN strings smt ON m.type_id = smt.id
                 LEFT JOIN strings srt ON m.return_type_id = srt.id
+                LEFT JOIN files f ON m.file_id = f.id
+                LEFT JOIN strings sp ON f.path_id = sp.id
                 WHERE class_id = ?
                 ORDER BY smn.text ASC
             ")?;
@@ -509,7 +511,21 @@ fn fetch_members_recursive(conn: &Connection, class_name: &str) -> anyhow::Resul
                 let m_type: String = row.get(1)?;
                 let r_type: Option<String> = row.get(2)?;
                 let detail: Option<String> = row.get(5)?;
-                Ok(json!({ "label": m_name, "kind": map_kind(&m_type), "detail": r_type.unwrap_or_default(), "documentation": detail.unwrap_or_default(), "insertText": m_name }))
+                let line: usize = row.get::<_, Option<usize>>(6)?.unwrap_or(0);
+                let f_path: Option<String> = row.get(7).ok();
+
+                let doc = if let Some(path) = f_path {
+                    let mut comment = extract_comment_from_file(&path, line);
+                    if let Some(d) = detail {
+                        if !comment.is_empty() { comment.push_str("\n\n"); }
+                        comment.push_str(&d);
+                    }
+                    comment
+                } else {
+                    detail.unwrap_or_default()
+                };
+
+                Ok(json!({ "label": m_name, "kind": map_kind(&m_type), "detail": r_type.unwrap_or_default(), "documentation": doc, "insertText": m_name }))
             })?;
             for m in mem_rows { result.push(m?); }
             let mut enum_stmt = conn.prepare("
@@ -615,6 +631,60 @@ fn resolve_macro_specifiers(macro_name: &str) -> Option<Value> {
 
 fn map_kind(k: &str) -> i64 {
     match k { "function" => 2, "variable" | "property" => 5, "enum_item" => 20, _ => 1 }
+}
+
+fn extract_comment_from_file(file_path: &str, line_number: usize) -> String {
+    if line_number == 0 { return String::new(); }
+    let content = match std::fs::read_to_string(file_path) {
+        Ok(c) => c,
+        Err(_) => return String::new(),
+    };
+    let lines: Vec<&str> = content.lines().collect();
+    if line_number > lines.len() { return String::new(); }
+
+    let mut comment_lines = Vec::new();
+    let mut current_line = line_number - 1; // 0-indexed, and we want the line *before* the definition
+
+    // Skip empty lines or attributes [ ... ] or macros like UPROPERTY(...)
+    while current_line > 0 {
+        let trimmed = lines[current_line - 1].trim();
+        if trimmed.is_empty() || trimmed.starts_with('[') || trimmed.starts_with("UPROPERTY") || trimmed.starts_with("UFUNCTION") || trimmed.starts_with("GENERATED_BODY") {
+            current_line -= 1;
+            continue;
+        }
+        break;
+    }
+
+    // Now look for comments
+    let mut in_block_comment = false;
+    while current_line > 0 {
+        let trimmed = lines[current_line - 1].trim();
+        if trimmed.starts_with("//") {
+            comment_lines.push(trimmed.trim_start_matches('/').trim_start_matches('/').trim().to_string());
+            current_line -= 1;
+        } else if trimmed.ends_with("*/") {
+            in_block_comment = true;
+            let content = trimmed.trim_end_matches("*/");
+            if content.starts_with("/*") {
+                comment_lines.push(content.trim_start_matches("/*").trim_start_matches('*').trim().to_string());
+                break;
+            }
+            comment_lines.push(content.trim_start_matches('*').trim().to_string());
+            current_line -= 1;
+        } else if in_block_comment {
+            if trimmed.starts_with("/*") {
+                comment_lines.push(trimmed.trim_start_matches("/*").trim_start_matches('*').trim().to_string());
+                break;
+            }
+            comment_lines.push(trimmed.trim_start_matches('*').trim().to_string());
+            current_line -= 1;
+        } else {
+            break;
+        }
+    }
+
+    comment_lines.reverse();
+    comment_lines.join("\n")
 }
 
 fn is_known_type(conn: &Connection, name: &str) -> anyhow::Result<bool> {
