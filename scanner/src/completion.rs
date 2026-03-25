@@ -761,6 +761,9 @@ fn infer_variable_type(conn: &Connection, target_name: &str, root: &Node, conten
       (condition_clause value: (declaration type: (_) @type declarator: (init_declarator declarator: (_) @decl)))
       (condition_clause value: (declaration type: (_) @type declarator: (_) @decl))
       (condition_clause (declaration type: (_) @type declarator: (_) @decl))
+      (field_declaration (_) @type (init_declarator declarator: (_) @decl))
+      (field_declaration (_) @type (_) @decl)
+      (declaration (_) @type (init_declarator declarator: (_) @decl))
     ";
     let query = Query::new(&language, query_str)?;
     let mut cursor = QueryCursor::new();
@@ -779,11 +782,10 @@ fn infer_variable_type(conn: &Connection, target_name: &str, root: &Node, conten
             for d_node in decl_nodes {
                 if find_identifier_in_decl(&d_node, target_name, content)? {
                     let row = d_node.start_position().row;
-                    tracing::info!("Found match for '{}' at row {} (Type: {})", target_name, row, t_node.kind());
+                    tracing::info!("Found match for '{}' at row {} (Type Kind: {})", target_name, row, t_node.kind());
                     if row <= cursor_row && (best_type.is_none() || row >= best_row) {
                         let type_text = get_node_text(&t_node, content).trim();
                         if type_text == "auto" {
-                            // If auto, try to get value from current node or search assignment
                             if let Some(inferred) = infer_from_assignment(conn, target_name, root, content, cursor_row)? {
                                 tracing::info!("Inferred 'auto' type: '{}'", inferred);
                                 best_type = Some(inferred);
@@ -846,7 +848,14 @@ fn infer_from_assignment(conn: &Connection, target_name: &str, root: &Node, cont
             else if c_name == "value" { value_node = Some(cap.node); }
         }
         if let (Some(d_node), Some(v_node)) = (decl_node, value_node) {
-            let found_name = if d_node.kind() == "identifier" { get_node_text(&d_node, content).trim() } else { "" };
+            // ONLY infer if the target IS the direct subject of assignment (or pointer/ref to it)
+            // Skip if it's a subscript_expression or field_expression
+            let dk = d_node.kind();
+            if dk == "subscript_expression" || dk == "field_expression" {
+                continue;
+            }
+
+            let found_name = if dk == "identifier" { get_node_text(&d_node, content).trim() } else { "" };
             if !found_name.is_empty() && found_name == target_name {
                 let row = d_node.start_position().row;
                 if row <= cursor_row { 
@@ -860,7 +869,7 @@ fn infer_from_assignment(conn: &Connection, target_name: &str, root: &Node, cont
                     return infer_from_value_text(v_text);
                 }
             } else if find_identifier_in_decl(&d_node, target_name, content)? {
-                // Handle complex declarators like *x or &x
+                // Handle complex but direct declarators like *x or &x
                 let row = d_node.start_position().row;
                 if row <= cursor_row {
                     tracing::info!("Found complex assignment match for '{}' at row {}, resolving RHS...", target_name, row);
@@ -920,7 +929,11 @@ fn extract_clean_type(raw: &str) -> String {
             if ["TObjectPtr", "TSharedPtr", "TUniquePtr", "TWeakObjectPtr", "TSubclassOf", "TSoftObjectPtr", "TSoftClassPtr", "TEnumAsByte"].contains(&wrapper) {
                 return extract_clean_type(inner);
             }
-            // For other templates like TArray, keep the whole thing (to be handled by unwrap_container_type)
+            // For other templates like TArray/TMap, return the whole cleaned string (including <...>)
+            // but first remove pointers/refs from the outer wrapper if any (e.g. TArray<int>*)
+            let outer = wrapper.replace('*', "").replace('&', "").trim().to_string();
+            let suffix_cleaned = clean[end+1..].replace('*', "").replace('&', "").trim().to_string();
+            return format!("{}<{}>{}", outer, inner, suffix_cleaned).trim().to_string();
         }
     }
 
