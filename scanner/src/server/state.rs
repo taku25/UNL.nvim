@@ -92,10 +92,11 @@ impl AppState {
             return Ok(Arc::clone(conn));
         }
 
-        info!("Opening database connection: {}", db_path_native);
+        info!("Opening primary database connection (Read/Write): {}", db_path_native);
         db::ensure_correct_version(db_path_native)?;
         
         let conn = rusqlite::Connection::open(db_path_native)?;
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
 
         let _ = conn.pragma_update(None, "journal_mode", "WAL");
         let _ = conn.pragma_update(None, "synchronous", "NORMAL");
@@ -127,5 +128,24 @@ impl AppState {
 
         conns.insert(db_path_native.to_string(), Arc::clone(&conn_arc));
         Ok(conn_arc)
+    }
+
+    /// 読み取り専用の新しい接続を取得する（並列アクセス用）
+    pub fn get_read_only_connection(&self, db_path_native: &str) -> anyhow::Result<rusqlite::Connection> {
+        // info!("Opening read-only database connection: {}", db_path_native);
+        let conn = rusqlite::Connection::open_with_flags(
+            db_path_native,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX
+        )?;
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+
+        // 最適化設定
+        let _ = conn.pragma_update(None, "journal_mode", "WAL");
+        let _ = conn.pragma_update(None, "cache_size", "-200000"); // 読み取り用は少し小さめに
+        let _ = conn.pragma_update(None, "mmap_size", "1073741824");
+        let _ = conn.pragma_update(None, "temp_store", "MEMORY");
+        let _ = conn.pragma_update(None, "query_only", "ON");
+
+        Ok(conn)
     }
 }

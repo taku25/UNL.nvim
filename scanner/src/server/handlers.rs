@@ -174,7 +174,9 @@ pub async fn handle_query(state: Arc<AppState>, params: &Value, tx: mpsc::Sender
         ctx.db_path.clone()
     };
     let db_path_native = normalize_to_native(&db_path_unix);
-    let conn_arc = state.get_connection(&db_path_native)?;
+    
+    // 読み取り専用の独自の接続を取得（並列アクセス用）
+    let conn = state.get_read_only_connection(&db_path_native)?;
 
     let is_async = matches!(req.query, 
         QueryRequest::GetFilesInModulesAsync { .. } | 
@@ -183,7 +185,6 @@ pub async fn handle_query(state: Arc<AppState>, params: &Value, tx: mpsc::Sender
     );
 
     tokio::task::spawn_blocking(move || {
-        let conn = conn_arc.lock().unwrap();
         match req.query {
             QueryRequest::GetAssetUsages { asset_path } => {
                 {

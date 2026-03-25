@@ -11,7 +11,7 @@ function M.request(method, params, on_notification, on_response, timeout_ms)
     local port = (conf and conf.remote and conf.remote.port) or 30110
     local host = (conf and conf.remote and conf.remote.host) or "127.0.0.1"
     
-    timeout_ms = timeout_ms or 30000
+    timeout_ms = timeout_ms or 60000
 
     msgid_counter = msgid_counter + 1
     local msgid = msgid_counter
