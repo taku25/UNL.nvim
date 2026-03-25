@@ -13,6 +13,7 @@ local finder = require("UNL.finder")
 local M = {}
 
 local active_starts = {}
+local completed_setups = {}
 
 function M.execute(opts)
     opts = opts or {}
@@ -84,23 +85,23 @@ function M.execute(opts)
                         end
                     end
                     
-                    local db_exists = false
-                    if vim.fn.filereadable(db_path) == 1 then
-                        local size = vim.fn.getfsize(db_path)
-                        if size > 50000 then -- Over 50KB considered valid
-                            db_exists = true
-                        end
-                    end
-                    
                     local current_vcs = vcs.get_current_hash(project_root)
+                    local vcs_changed = is_registered and (current_vcs ~= last_vcs) and (current_vcs ~= nil)
+
+                    -- セッション内ですでにセットアップ済み、かつVCS変更なしならスキップ
+                    if completed_setups[project_root_norm] and not vcs_changed and not opts.force then
+                        log.debug("Project %s already setup in this session. Skipping redundant registration.", project_root)
+                        active_starts[project_root_norm] = nil
+                        -- ポーラーだけ確実に動いているか確認
+                        vcs_poller.start(project_root_norm, current_vcs)
+                        return
+                    end
 
                     log.info("Registering and initializing project: %s", project_root)
                     setup.execute(opts, function(setup_res)
                         if type(setup_res) == "table" and setup_res.status == "ok" then
+                            completed_setups[project_root_norm] = true
                             watch.execute(opts)
-                            
-                            -- VCSが変わっている、またはDBが空(needs_full_refresh)の場合にリフレッシュ
-                            local vcs_changed = is_registered and (current_vcs ~= last_vcs) and (current_vcs ~= nil)
                             
                             if setup_res.needs_full_refresh or vcs_changed then
                                 if vcs_changed then
