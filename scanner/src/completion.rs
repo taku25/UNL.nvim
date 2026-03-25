@@ -28,11 +28,36 @@ pub fn process_completion(
     
     let node = match root.descendant_for_point_range(prev_point, point) {
         Some(n) => n,
-        None => return Ok(json!([])),
+        None => {
+            tracing::info!("No node found at cursor position.");
+            return Ok(json!([]));
+        }
     };
 
     let node_type = node.kind();
     tracing::info!("Node at cursor: kind='{}', text='{}'", node_type, get_node_text(&node, content));
+    
+    // Check if we are inside or near an ERROR node
+    let mut target_node = None;
+    if node_type == "ERROR" || node_type == "." || node_type == "->" || node_type == "::" {
+        if let Some(prev) = get_prev_meaningful_sibling(node) {
+            tracing::info!("Found meaningful sibling before ERROR/Operator: kind='{}'", prev.kind());
+            target_node = Some(prev);
+        } else if let Some(parent) = node.parent() {
+            if parent.kind() == "ERROR" {
+                if let Some(prev) = get_prev_meaningful_sibling(parent) {
+                    tracing::info!("Found meaningful sibling before parent ERROR: kind='{}'", prev.kind());
+                    target_node = Some(prev);
+                }
+            }
+        }
+    }
+
+    if let Some(t) = target_node {
+        return resolve_node_and_fetch_members(conn, t, &root, content, row);
+    }
+
+    let mut curr_opt = Some(node);
     
     // 1. 演算子（. -> ::）の直後、または演算子そのものの場合
     if node_type == "." || node_type == "->" || node_type == "::" || node_type == ":" {
@@ -43,51 +68,67 @@ pub fn process_completion(
         };
 
         if let Some(prev) = get_prev_meaningful_sibling(op_node) {
-            tracing::info!("Operator detected, target node: kind='{}', text='{}'", prev.kind(), get_node_text(&prev, content));
+            tracing::info!("Operator detected (Case 1), target node: kind='{}', text='{}'", prev.kind(), get_node_text(&prev, content));
             return resolve_node_and_fetch_members(conn, prev, &root, content, row);
+        } else {
+            tracing::info!("Operator detected but no meaningful sibling found. Continuing to traverse up from parent.");
+            curr_opt = node.parent(); // Move to parent and let Case 2 handle it
         }
     }
 
     // 2. 識別子の入力途中、またはそれ以外
-    let mut curr_opt = Some(node);
     while let Some(curr) = curr_opt {
         let p_kind = curr.kind();
+        tracing::debug!("Traversing up: kind='{}', text='{}'", p_kind, get_node_text(&curr, content));
 
-        // --- Added: Macro Specifiers Support ---
+        // ... existing macro specifier logic ...
         if p_kind == "unreal_macro_argument_list" || p_kind == "macro_argument_list" {
             if let Some(parent) = curr.parent() {
                 let macro_name = get_node_text(&parent, content).trim();
                 if let Some(res) = resolve_macro_specifiers(macro_name) {
+                    tracing::info!("Resolved macro specifiers for '{}'", macro_name);
                     return Ok(res);
                 }
                 if let Some(grand) = parent.parent() {
                    let g_name = get_node_text(&grand, content).trim();
                    if let Some(res) = resolve_macro_specifiers(g_name) {
+                       tracing::info!("Resolved macro specifiers for grand '{}'", g_name);
                        return Ok(res);
                    }
                 }
             }
         }
-        // ---------------------------------------
 
         if p_kind == "field_expression" {
             if let Some(obj_node) = curr.child_by_field_name("argument") {
+                tracing::info!("Field expression detected (Case 2), resolving argument...");
                 return resolve_node_and_fetch_members(conn, obj_node, &root, content, row);
+            } else if let Some(first_child) = curr.child(0) {
+                // Fallback: use first child if argument field is missing but expression is present
+                if first_child.kind() != "." && first_child.kind() != "->" {
+                    tracing::info!("Field expression detected (Fallback), resolving first child...");
+                    return resolve_node_and_fetch_members(conn, first_child, &root, content, row);
+                }
             }
-            break;
+        } else if p_kind == "call_expression" && (node_type == "." || node_type == "->") {
+             // Sometimes the dot is a child of call_expression if it's incomplete
+             if let Some(func_node) = curr.child_by_field_name("function") {
+                 tracing::info!("Call expression parent of operator detected, resolving function...");
+                 return resolve_node_and_fetch_members(conn, func_node, &root, content, row);
+             }
         } else if p_kind == "qualified_identifier" {
             if let Some(scope_node) = curr.child_by_field_name("scope") {
+                tracing::info!("Qualified identifier detected (Case 2), resolving scope...");
                 return resolve_static_members(conn, get_node_text(&scope_node, content));
             }
-            break;
         } else if p_kind == "ERROR" {
-            // ERRORノード内の子要素を逆順に探して演算子を見つける
             let count = curr.child_count();
             for i in (0..count).rev() {
                 if let Some(child) = curr.child(i as u32) {
                     let ck = child.kind();
                     if ck == "." || ck == "->" || ck == "::" {
                         if let Some(prev) = get_prev_meaningful_sibling(child) {
+                             tracing::info!("Operator detected inside ERROR, resolving previous sibling...");
                              return resolve_node_and_fetch_members(conn, prev, &root, content, row);
                         }
                     }
@@ -248,6 +289,12 @@ fn resolve_expression_type(
                         }
                     }
                 }
+            }
+            Ok(None)
+        }
+        "init_declarator" => {
+            if let Some(val_node) = node.child_by_field_name("value") {
+                return resolve_expression_type(conn, val_node, root, content, cursor_row);
             }
             Ok(None)
         }
@@ -713,7 +760,7 @@ fn infer_variable_type(conn: &Connection, target_name: &str, root: &Node, conten
       (for_range_loop type: (_) @type declarator: (_) @decl)
       (condition_clause value: (declaration type: (_) @type declarator: (init_declarator declarator: (_) @decl)))
       (condition_clause value: (declaration type: (_) @type declarator: (_) @decl))
-      (declaration (_) @type (_) @decl)
+      (condition_clause (declaration type: (_) @type declarator: (_) @decl))
     ";
     let query = Query::new(&language, query_str)?;
     let mut cursor = QueryCursor::new();
@@ -765,6 +812,12 @@ fn find_identifier_in_decl(node: &Node, target_name: &str, content: &str) -> any
     }
     for i in 0..node.child_count() {
         if let Some(child) = node.child(i as u32) {
+            // IMPORTANT: Skip 'value' or 'initializer' fields for ANY node type
+            if let Some(field_name) = node.field_name_for_child(i as u32) {
+                if field_name == "value" || field_name == "initializer" {
+                    continue;
+                }
+            }
             if find_identifier_in_decl(&child, target_name, content)? { return Ok(true); }
         }
     }
@@ -846,6 +899,20 @@ fn infer_from_value_text(text: &str) -> anyhow::Result<Option<String>> {
 
 fn extract_clean_type(raw: &str) -> String {
     let mut clean = raw.trim().to_string();
+    
+    // 1. Remove qualifiers/keywords first so they don't interfere with template name matching
+    let keywords = ["const", "typename", "struct", "class", "enum", "virtual", "static", "inline", "FORCEINLINE"];
+    for kw in keywords {
+        if let Ok(re) = regex::Regex::new(&format!(r"\b{}\b", kw)) { 
+            clean = re.replace_all(&clean, "").to_string(); 
+        }
+    }
+    if let Ok(re) = regex::Regex::new(r"\b[A-Z0-9_]+_API\b") { 
+        clean = re.replace_all(&clean, "").to_string(); 
+    }
+    clean = clean.trim().to_string();
+
+    // 2. Handle template unwrapping
     if let Some(start) = clean.find('<') {
         if let Some(end) = clean.rfind('>') {
             let wrapper = clean[..start].trim();
@@ -853,15 +920,11 @@ fn extract_clean_type(raw: &str) -> String {
             if ["TObjectPtr", "TSharedPtr", "TUniquePtr", "TWeakObjectPtr", "TSubclassOf", "TSoftObjectPtr", "TSoftClassPtr", "TEnumAsByte"].contains(&wrapper) {
                 return extract_clean_type(inner);
             }
-            if ["TMap", "TArray", "TSet"].contains(&wrapper) { return clean.to_string(); }
-            else { clean = wrapper.to_string(); }
+            // For other templates like TArray, keep the whole thing (to be handled by unwrap_container_type)
         }
     }
-    let keywords = ["const", "typename", "struct", "class", "enum", "virtual", "static", "inline", "FORCEINLINE"];
-    for kw in keywords {
-        if let Ok(re) = regex::Regex::new(&format!(r"\b{}\b", kw)) { clean = re.replace_all(&clean, "").to_string(); }
-    }
-    if let Ok(re) = regex::Regex::new(r"\b[A-Z0-9_]+_API\b") { clean = re.replace_all(&clean, "").to_string(); }
+
+    // 3. Remove pointers/references and take the last part
     clean = clean.replace('*', " ").replace('&', " ");
     clean.split_whitespace().last().unwrap_or("").split("::").last().unwrap_or("").to_string()
 }
