@@ -255,12 +255,14 @@ pub fn save_to_db(conn: &mut Connection, results: &[ParseResult], reporter: Arc<
 
         let tx = conn.transaction()?;
         {
-            let mut stmt_file = tx.prepare("INSERT OR REPLACE INTO files (path_id, filename_id, extension, mtime, file_hash, module_id, is_header) VALUES (?, ?, ?, ?, ?, ?, ?)")?;
-            let mut stmt_class = tx.prepare("INSERT OR IGNORE INTO classes (name_id, namespace_id, base_class_id, file_id, line_number, symbol_type, end_line_number) VALUES (?, ?, ?, ?, ?, ?, ?)")?;
+            // 更新対象のファイルを一旦削除して、CASCADEによって関連データをクリーンにする
+            let mut stmt_del_file = tx.prepare("DELETE FROM files WHERE path_id = ?")?;
+            let mut stmt_file = tx.prepare("INSERT INTO files (path_id, filename_id, extension, mtime, file_hash, module_id, is_header) VALUES (?, ?, ?, ?, ?, ?, ?)")?;
+            let mut stmt_class = tx.prepare("INSERT INTO classes (name_id, namespace_id, base_class_id, file_id, line_number, symbol_type, end_line_number) VALUES (?, ?, ?, ?, ?, ?, ?)")?;
             let mut stmt_class_id = tx.prepare("SELECT id FROM classes WHERE name_id = ? AND file_id = ? LIMIT 1")?;
-            let mut stmt_inheritance = tx.prepare("INSERT OR IGNORE INTO inheritance (child_id, parent_name_id) VALUES (?, ?)")?;
-            let mut stmt_enum = tx.prepare("INSERT OR IGNORE INTO enum_values (enum_id, name_id) VALUES (?, ?)")?;
-            let mut stmt_member = tx.prepare("INSERT OR IGNORE INTO members (class_id, name_id, type_id, flags, access, detail, return_type_id, is_static, line_number, file_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")?;
+            let mut stmt_inheritance = tx.prepare("INSERT INTO inheritance (child_id, parent_name_id) VALUES (?, ?)")?;
+            let mut stmt_enum = tx.prepare("INSERT INTO enum_values (enum_id, name_id) VALUES (?, ?)")?;
+            let mut stmt_member = tx.prepare("INSERT INTO members (class_id, name_id, type_id, flags, access, detail, return_type_id, is_static, line_number, file_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")?;
             let mut stmt_call = tx.prepare("INSERT INTO symbol_calls (file_id, line, name_id) VALUES (?, ?, ?)")?;
 
             for (i, result) in batch.iter().enumerate() {
@@ -287,6 +289,9 @@ pub fn save_to_db(conn: &mut Connection, results: &[ParseResult], reporter: Arc<
 
                 let path_id = get_or_create_string(&tx, &mut string_cache, &result.path)?;
                 let filename_id = get_or_create_string(&tx, &mut string_cache, filename)?;
+                
+                // 明示的に古いデータを消す（CASCADE発火）
+                let _ = stmt_del_file.execute([path_id]);
 
                 let file_res = stmt_file.execute(params![
                     path_id, filename_id, extension, result.mtime as i64, data.new_hash, safe_module_id,
@@ -364,29 +369,41 @@ pub fn save_to_db(conn: &mut Connection, results: &[ParseResult], reporter: Arc<
     Ok(())
 }
 
-pub fn get_module_id_for_path(conn: &Connection, file_path: &str) -> anyhow::Result<Option<i64>> {
-    let mut stmt = conn.prepare(
-        "SELECT m.id, s.text 
-         FROM modules m 
-         JOIN strings s ON m.root_path_id = s.id 
+pub fn get_module_id_for_path(_conn: &Connection, file_path: &str) -> anyhow::Result<Option<i64>> {
+    let mut stmt = _conn.prepare(
+        "SELECT m.id, s.text
+         FROM modules m
+         JOIN strings s ON m.root_path_id = s.id
          ORDER BY length(s.text) DESC"
     )?;
-    
+
     let mut rows = stmt.query([])?;
     let mut best_id = None;
-    
+
+    let file_path_lower = if cfg!(target_os = "windows") {
+        file_path.to_lowercase()
+    } else {
+        String::new() // Not used on non-windows
+    };
+
     while let Some(row) = rows.next()? {
         let id: i64 = row.get(0)?;
         let root_path: String = row.get(1)?;
-        if file_path.starts_with(&root_path) {
+
+        let matched = if cfg!(target_os = "windows") {
+            file_path_lower.starts_with(&root_path.to_lowercase())
+        } else {
+            file_path.starts_with(&root_path)
+        };
+
+        if matched {
             best_id = Some(id);
             break;
         }
     }
-    
+
     Ok(best_id)
 }
-
 pub fn register_module(conn: &Connection, name: &str, root_path: &str, m_type: &str, scope: &str) -> anyhow::Result<i64> {
     let tx = conn.unchecked_transaction()?;
     

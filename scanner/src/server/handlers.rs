@@ -139,10 +139,25 @@ pub async fn handle_refresh(state: &AppState, params: &Value, tx: mpsc::Sender<V
 pub async fn handle_watch(state: &AppState, params: &Value) -> anyhow::Result<Value> {
     let req: crate::types::WatchRequest = convert_params(params)?;
     let root_native = normalize_to_native(&req.project_root);
+    tracing::info!("Watcher: Request received to watch path: {}", root_native);
+    
     let root_path_native = PathBuf::from(&root_native);
+    if !root_path_native.exists() {
+        tracing::error!("Watcher: Path does not exist: {}", root_native);
+        return Err(anyhow::anyhow!("Path does not exist: {}", root_native));
+    }
+
     let mut watcher = state.watcher.lock().unwrap();
-    watcher.watch(&root_path_native, notify::RecursiveMode::Recursive)?;
-    Ok(Value::String("Watch started".to_string()))
+    match watcher.watch(&root_path_native, notify::RecursiveMode::Recursive) {
+        Ok(_) => {
+            tracing::info!("Watcher: Successfully started watching: {}", root_native);
+            Ok(Value::String("Watch started".to_string()))
+        }
+        Err(e) => {
+            tracing::error!("Watcher: Failed to start watching {}: {}", root_native, e);
+            Err(e.into())
+        }
+    }
 }
 
 #[derive(serde::Deserialize)]

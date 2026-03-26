@@ -46,10 +46,11 @@ function M.execute(opts, on_complete)
         rpc.request("setup", req, nil, function(success, result_or_err)
             if success then
                 log.debug("UNL setup complete.")
+                if on_complete then on_complete(result_or_err) end
             else
                 log.error("UNL setup failed: %s", result_or_err or "Unknown error")
+                if on_complete then on_complete(nil) end
             end
-            if on_complete then on_complete(success) end
         end)
     end)
 end

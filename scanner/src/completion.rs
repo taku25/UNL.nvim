@@ -145,7 +145,7 @@ pub fn process_completion(
 
         // 3a. Current class members (implicit this)
         if let Some(current_class) = get_enclosing_class_name(&node, content) {
-            tracing::info!("Implicit 'this' context detected: '{}'", current_class);
+            tracing::debug!("Implicit 'this' context detected: '{}'", current_class);
             if let Ok(members) = fetch_members_recursive(conn, &current_class) {
                 results.extend(members);
             }
@@ -464,7 +464,7 @@ fn get_enclosing_class_name(start_node: &Node, content: &str) -> Option<String> 
            kind == "unreal_class_declaration" || kind == "unreal_struct_declaration" {
             if let Some(name_node) = curr.child_by_field_name("name") {
                 let name = get_node_text(&name_node, content).trim().to_string();
-                tracing::info!("Enclosing class found via specifier: '{}'", name);
+                tracing::debug!("Enclosing class found via specifier: '{}'", name);
                 return Some(name);
             }
         } else if kind == "function_definition" {

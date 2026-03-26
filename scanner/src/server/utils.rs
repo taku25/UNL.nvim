@@ -18,6 +18,15 @@ pub fn normalize_to_native(s: &str) -> String {
 
 pub fn normalize_path_key(s: &str) -> String {
     let mut normalized = s.replace('\\', "/");
+    
+    // Windows: Normalize drive letter to uppercase (c:/ -> C:/)
+    if cfg!(target_os = "windows") {
+        if normalized.len() >= 2 && &normalized[1..2] == ":" {
+            let drive = &normalized[0..1].to_uppercase();
+            normalized.replace_range(0..1, drive);
+        }
+    }
+
     while normalized.ends_with('/') && normalized.len() > 3 {
         normalized.pop();
     }

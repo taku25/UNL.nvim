@@ -26,15 +26,17 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let log_file = std::fs::OpenOptions::new().create(true).append(true).open(&log_path)?;
-    tracing_subscriber::fmt().with_writer(Arc::new(log_file)).init();
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .with_writer(Arc::new(log_file))
+        .init();
     info!("--- UNL Server Starting (MsgPack) ---");
 
     let (tx, mut rx) = mpsc::channel::<PathBuf>(100);
     let _watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
         if let Ok(event) = res {
-            if matches!(event.kind, notify::EventKind::Modify(_) | notify::EventKind::Create(_)) {
-                for path in event.paths { let _ = tx.blocking_send(path); }
-            }
+            tracing::debug!("Watcher event: {:?}", event);
+            for path in event.paths { let _ = tx.blocking_send(path); }
         }
     })?;
 
@@ -61,7 +63,8 @@ async fn main() -> anyhow::Result<()> {
     tokio::spawn(async move {
         let mut last_event: HashMap<PathBuf, Instant> = HashMap::new();
         while let Some(path) = rx.recv().await {
-            if let Some(last) = last_event.get(&path) { if last.elapsed() < Duration::from_millis(200) { continue; } }
+            // Shorten debounce to 50ms to catch quick create after remove
+            if let Some(last) = last_event.get(&path) { if last.elapsed() < Duration::from_millis(50) { continue; } }
             last_event.insert(path.clone(), Instant::now());
             handle_file_change(state_for_watcher.clone(), path).await;
         }

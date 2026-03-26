@@ -99,11 +99,29 @@ function M.execute(opts)
 
                     log.info("Registering and initializing project: %s", project_root)
                     setup.execute(opts, function(setup_res)
-                        if type(setup_res) == "table" and setup_res.status == "ok" then
+                        log.debug("Setup callback received. Result: %s", vim.inspect(setup_res))
+                        
+                        local is_ok = false
+                        local needs_full_refresh = false
+                        
+                        if type(setup_res) == "table" then
+                            is_ok = (setup_res.status == "ok")
+                            needs_full_refresh = setup_res.needs_full_refresh
+                        elseif setup_res == true then
+                            is_ok = true
+                        end
+
+                        if is_ok then
+                            log.debug("Setup confirmed OK. Triggering watcher...")
                             completed_setups[project_root_norm] = true
-                            watch.execute(opts)
                             
-                            if setup_res.needs_full_refresh or vcs_changed then
+                            -- 明示的にルートを渡す
+                            local watch_opts = vim.tbl_extend("force", opts or {}, { project_root = project_root_norm })
+                            watch.execute(watch_opts, function(watch_ok)
+                                log.debug("Watcher execution result: %s", tostring(watch_ok))
+                            end)
+                            
+                            if needs_full_refresh or vcs_changed then
                                 if vcs_changed then
                                     log.info("VCS changed for %s. Refreshing...", project_root)
                                 else
@@ -119,6 +137,8 @@ function M.execute(opts)
                                 -- リフレッシュ不要 → 既存ハッシュでポーラー起動
                                 vcs_poller.start(project_root_norm, current_vcs)
                             end
+                        else
+                            log.error("Setup failed or returned invalid response: %s", vim.inspect(setup_res))
                         end
                         active_starts[project_root_norm] = nil
                     end)

@@ -4,9 +4,17 @@ local function _normalize(p)
   if not p or p == "" then return p end
   local ok, np = pcall(vim.fs.normalize, p)
   p = ok and np or p
+  
   -- UNC の先頭はそのまま (//server/share) を許容
-  -- バックスラッシュ統一 (normalize で大半は変わるが念のため)
+  -- バックスラッシュ統一
   p = p:gsub("\\", "/")
+  
+  -- Windowsのドライブレターを大文字に統一 (c:/ -> C:/)
+  local is_win = vim.loop.os_uname().version:find("Windows") or vim.fn.has("win32") == 1
+  if is_win then
+    p = p:gsub("^([a-z]):", function(drive) return drive:upper() .. ":" end)
+  end
+
   -- 末尾スラッシュ除去（ルートは残す）
   if #p > 1 then
     p = p:gsub("/+$", "")
