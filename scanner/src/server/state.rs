@@ -131,29 +131,21 @@ impl AppState {
         Ok(conn_arc)
     }
 
-    /// 読み取り専用の新しい接続を取得する（キャッシュ・並列アクセス用）
-    pub fn get_read_only_connection(&self, db_path_native: &str) -> anyhow::Result<Arc<Mutex<rusqlite::Connection>>> {
-        let mut conns = self.read_only_connections.lock().unwrap();
-        if let Some(conn) = conns.get(db_path_native) {
-            return Ok(Arc::clone(conn));
-        }
-
-        // info!("Opening read-only database connection: {}", db_path_native);
+    /// 読み取り専用の新しい接続を取得する（並列アクセス用）
+    pub fn get_read_only_connection(&self, db_path_native: &str) -> anyhow::Result<rusqlite::Connection> {
         let conn = rusqlite::Connection::open_with_flags(
             db_path_native,
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX
         )?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
 
-        // 最適化設定 (メモリ消費を極限まで抑える)
+        // 各接続のメモリ消費を厳格に制限しつつ、並列性を確保
         let _ = conn.pragma_update(None, "journal_mode", "WAL");
-        let _ = conn.pragma_update(None, "cache_size", "-1000"); // 約1MB
-        let _ = conn.pragma_update(None, "mmap_size", "0");      // mmapを使わない
-        let _ = conn.pragma_update(None, "temp_store", "FILE");  // 一時テーブルもメモリを使わない
+        let _ = conn.pragma_update(None, "cache_size", "-4000"); // 約4MB (インデックス用)
+        let _ = conn.pragma_update(None, "mmap_size", "0");      // メモリマップ無効 (20GBリークの主因)
+        let _ = conn.pragma_update(None, "temp_store", "FILE");  // 一時データはディスクへ
         let _ = conn.pragma_update(None, "query_only", "ON");
 
-        let conn_arc = Arc::new(Mutex::new(conn));
-        conns.insert(db_path_native.to_string(), Arc::clone(&conn_arc));
-        Ok(conn_arc)
+        Ok(conn)
     }
 }
