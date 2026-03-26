@@ -70,22 +70,23 @@ pub fn get_recursive_parent_classes(conn: &Connection, child_class: String) -> a
         "WITH RECURSIVE parents_cte AS (
           SELECT c.id, sc.text as name, 0 as level FROM classes c JOIN strings sc ON c.name_id = sc.id WHERE sc.text = ?
           UNION ALL
-          SELECT p.id, spc.text as name, c.level + 1
-          FROM classes p
-          JOIN strings spc ON p.name_id = spc.id
-          JOIN inheritance i ON p.id = i.child_id
+          SELECT p.id, scp.text as name, pc.level + 1
+          FROM inheritance i
+          JOIN parents_cte pc ON i.child_id = pc.id
           JOIN strings si ON i.parent_name_id = si.id
-          JOIN parents_cte c ON si.text = c.name
+          LEFT JOIN classes p ON si.text = (SELECT text FROM strings WHERE id = p.name_id)
+          JOIN strings scp ON si.id = scp.id
+          WHERE pc.level < 20
         )
         SELECT d.name, '', c.line_number, sp.text as path, sfn.text as filename, c.symbol_type, sm.text as module_name, MIN(d.level) as min_level
         FROM parents_cte d
-        JOIN classes c ON d.id = c.id
-        JOIN strings sc ON c.name_id = sc.id
-        JOIN files f ON c.file_id = f.id
-        JOIN strings sp ON f.path_id = sp.id
-        JOIN strings sfn ON f.filename_id = sfn.id
-        JOIN modules m ON f.module_id = m.id
-        JOIN strings sm ON m.name_id = sm.id
+        LEFT JOIN classes c ON d.id = c.id
+        LEFT JOIN strings sc ON c.name_id = sc.id
+        LEFT JOIN files f ON c.file_id = f.id
+        LEFT JOIN strings sp ON f.path_id = sp.id
+        LEFT JOIN strings sfn ON f.filename_id = sfn.id
+        LEFT JOIN modules m ON f.module_id = m.id
+        LEFT JOIN strings sm ON m.name_id = sm.id
         GROUP BY d.name
         ORDER BY min_level ASC"
     )?;
