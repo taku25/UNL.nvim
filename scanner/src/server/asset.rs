@@ -114,15 +114,15 @@ fn parse_asset_file(path: &Path) -> anyhow::Result<(Option<String>, Vec<String>,
 }
 
 fn add_to_graph(graph: &mut AssetGraph, asset_path: String, parent: Option<String>, imports: Vec<String>, functions: Vec<String>) {
-    let asset_path_lower = asset_path.to_lowercase();
+    let asset_path_arc: Arc<str> = asset_path.to_lowercase().into();
     if let Some(p) = parent {
-        graph.derived.entry(p.to_lowercase()).or_default().insert(asset_path_lower.clone());
+        graph.derived.entry(p.to_lowercase().into()).or_default().insert(asset_path_arc.clone());
     }
     for import in imports {
-        graph.references.entry(import.to_lowercase()).or_default().insert(asset_path_lower.clone());
+        graph.references.entry(import.to_lowercase().into()).or_default().insert(asset_path_arc.clone());
     }
     for func in functions {
-        graph.functions.entry(func.to_lowercase()).or_default().insert(asset_path_lower.clone());
+        graph.functions.entry(func.to_lowercase().into()).or_default().insert(asset_path_arc.clone());
     }
 }
 

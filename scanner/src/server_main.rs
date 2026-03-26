@@ -49,6 +49,7 @@ async fn main() -> anyhow::Result<()> {
     let state = Arc::new(AppState {
         projects: Mutex::new(initial_projects),
         connections: Mutex::new(HashMap::new()),
+        read_only_connections: Mutex::new(HashMap::new()),
         active_refreshes: Mutex::new(HashSet::new()),
         active_asset_scans: Mutex::new(HashSet::new()),
         watcher: Mutex::new(_watcher),

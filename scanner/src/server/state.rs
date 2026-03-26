@@ -43,14 +43,15 @@ pub struct ProjectContext {
 
 #[derive(Debug, Clone, Default)]
 pub struct AssetGraph {
-    pub references: HashMap<String, HashSet<String>>,
-    pub derived: HashMap<String, HashSet<String>>,
-    pub functions: HashMap<String, HashSet<String>>,
+    pub references: HashMap<Arc<str>, HashSet<Arc<str>>>,
+    pub derived: HashMap<Arc<str>, HashSet<Arc<str>>>,
+    pub functions: HashMap<Arc<str>, HashSet<Arc<str>>>,
 }
 
 pub struct AppState {
     pub projects: Mutex<HashMap<String, ProjectContext>>,
     pub connections: Mutex<HashMap<String, Arc<Mutex<rusqlite::Connection>>>>,
+    pub read_only_connections: Mutex<HashMap<String, Arc<Mutex<rusqlite::Connection>>>>,
     pub active_refreshes: Mutex<HashSet<String>>,
     pub active_asset_scans: Mutex<HashSet<String>>,
     pub watcher: Mutex<notify::RecommendedWatcher>,
@@ -130,8 +131,13 @@ impl AppState {
         Ok(conn_arc)
     }
 
-    /// 読み取り専用の新しい接続を取得する（並列アクセス用）
-    pub fn get_read_only_connection(&self, db_path_native: &str) -> anyhow::Result<rusqlite::Connection> {
+    /// 読み取り専用の新しい接続を取得する（キャッシュ・並列アクセス用）
+    pub fn get_read_only_connection(&self, db_path_native: &str) -> anyhow::Result<Arc<Mutex<rusqlite::Connection>>> {
+        let mut conns = self.read_only_connections.lock().unwrap();
+        if let Some(conn) = conns.get(db_path_native) {
+            return Ok(Arc::clone(conn));
+        }
+
         // info!("Opening read-only database connection: {}", db_path_native);
         let conn = rusqlite::Connection::open_with_flags(
             db_path_native,
@@ -139,13 +145,15 @@ impl AppState {
         )?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
 
-        // 最適化設定
+        // 最適化設定 (メモリ消費を極限まで抑える)
         let _ = conn.pragma_update(None, "journal_mode", "WAL");
-        let _ = conn.pragma_update(None, "cache_size", "-200000"); // 読み取り用は少し小さめに
-        let _ = conn.pragma_update(None, "mmap_size", "1073741824");
-        let _ = conn.pragma_update(None, "temp_store", "MEMORY");
+        let _ = conn.pragma_update(None, "cache_size", "-1000"); // 約1MB
+        let _ = conn.pragma_update(None, "mmap_size", "0");      // mmapを使わない
+        let _ = conn.pragma_update(None, "temp_store", "FILE");  // 一時テーブルもメモリを使わない
         let _ = conn.pragma_update(None, "query_only", "ON");
 
-        Ok(conn)
+        let conn_arc = Arc::new(Mutex::new(conn));
+        conns.insert(db_path_native.to_string(), Arc::clone(&conn_arc));
+        Ok(conn_arc)
     }
 }

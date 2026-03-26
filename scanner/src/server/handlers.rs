@@ -190,8 +190,8 @@ pub async fn handle_query(state: Arc<AppState>, params: &Value, tx: mpsc::Sender
     };
     let db_path_native = normalize_to_native(&db_path_unix);
     
-    // 読み取り専用の独自の接続を取得（並列アクセス用）
-    let conn = state.get_read_only_connection(&db_path_native)?;
+    // 読み取り専用の接続を取得（キャッシュ・並列アクセス用）
+    let conn_arc = state.get_read_only_connection(&db_path_native)?;
 
     let is_async = matches!(req.query, 
         QueryRequest::GetFilesInModulesAsync { .. } | 
@@ -200,6 +200,7 @@ pub async fn handle_query(state: Arc<AppState>, params: &Value, tx: mpsc::Sender
     );
 
     tokio::task::spawn_blocking(move || {
+        let conn = conn_arc.lock().unwrap();
         match req.query {
             QueryRequest::GetAssetUsages { asset_path } => {
                 {
@@ -233,19 +234,19 @@ pub async fn handle_query(state: Arc<AppState>, params: &Value, tx: mpsc::Sender
                     for name in &try_names {
                         let dot_name = format!(".{}", name);
                         for (k, v) in &graph.references {
-                            if k.ends_with(&dot_name) || *k == **name {
-                                for x in v { result_refs.insert(x.clone()); }
+                            if k.ends_with(&dot_name) || **k == **name {
+                                for x in v { result_refs.insert(x.to_string()); }
                             }
                         }
                         for (k, v) in &graph.derived {
-                            if k.ends_with(&dot_name) || *k == **name {
-                                for x in v { result_derived.insert(x.clone()); }
+                            if k.ends_with(&dot_name) || **k == **name {
+                                for x in v { result_derived.insert(x.to_string()); }
                             }
                         }
                         // Function Call Matching
                         for (k, v) in &graph.functions {
-                            if k.ends_with(&dot_name) || *k == **name || k.contains(&format!(":{}", name)) {
-                                for x in v { result_refs.insert(x.clone()); }
+                            if k.ends_with(&dot_name) || **k == **name || k.contains(&format!(":{}", name)) {
+                                for x in v { result_refs.insert(x.to_string()); }
                             }
                         }
                     }
@@ -321,7 +322,7 @@ pub async fn handle_query(state: Arc<AppState>, params: &Value, tx: mpsc::Sender
                     for name in &try_names {
                         let dot_name = format!(".{}", name);
                         for (k, v) in &graph.derived {
-                            if k.ends_with(&dot_name) || *k == **name {
+                            if k.ends_with(&dot_name) || **k == **name {
                                 for asset in v {
                                     // Case-insensitive duplicate check
                                     let exists = results.iter().any(|r| {
@@ -330,7 +331,7 @@ pub async fn handle_query(state: Arc<AppState>, params: &Value, tx: mpsc::Sender
                                     if !exists {
                                         results.push(json!({ 
                                             "name": asset.split('/').last().unwrap_or(asset).replace(".uasset", ""), 
-                                            "path": asset, 
+                                            "path": asset.to_string(), 
                                             "symbol_type": "uasset" 
                                         }));
                                     }
@@ -346,10 +347,10 @@ pub async fn handle_query(state: Arc<AppState>, params: &Value, tx: mpsc::Sender
                 if let Some(graph) = graphs.get(&root_key) {
                     let mut all_assets: HashSet<String> = HashSet::new();
                     for assets in graph.references.values() {
-                        for a in assets { all_assets.insert(a.clone()); }
+                        for a in assets { all_assets.insert(a.to_string()); }
                     }
                     for assets in graph.derived.values() {
-                        for a in assets { all_assets.insert(a.clone()); }
+                        for a in assets { all_assets.insert(a.to_string()); }
                     }
                     let mut result: Vec<String> = all_assets.into_iter().collect();
                     result.sort();
