@@ -273,7 +273,7 @@ fn resolve_expression_type(
             }
             Ok(None)
         }
-        "template_call" => {
+        "template_call" | "template_function" => {
             // Support Cast<T>(Obj) or StaticCast<T>(Obj)
             if let Some(name_node) = node.child_by_field_name("name") {
                 let name = get_node_text(&name_node, content).trim();
@@ -284,7 +284,7 @@ fn resolve_expression_type(
                         if t_text.starts_with('<') && t_text.ends_with('>') {
                             let inner = &t_text[1..t_text.len()-1];
                             let clean = extract_clean_type(inner);
-                            tracing::info!("Resolved template cast '{}' to type '{}'", name, clean);
+                            tracing::debug!("Resolved template cast '{}' to type '{}'", name, clean);
                             return Ok(Some(clean));
                         }
                     }
@@ -309,7 +309,7 @@ fn resolve_expression_type(
                             }
                         }
                     }
-                } else if func_kind == "template_call" {
+                } else if func_kind == "template_call" || func_kind == "template_function" {
                     return resolve_expression_type(conn, func_node, root, content, cursor_row);
                 } else {
                     let func_name = get_node_text(&func_node, content).trim();
@@ -833,6 +833,7 @@ fn infer_from_assignment(conn: &Connection, target_name: &str, root: &Node, cont
       (declaration type: (_) declarator: (init_declarator declarator: (_) @decl value: (_) @value))
       (declaration declarator: (_) @decl value: (_) @value)
       (condition_clause value: (declaration type: (_) declarator: (init_declarator declarator: (_) @decl value: (_) @value)))
+      (condition_clause value: (declaration type: (_) declarator: (_) @decl value: (_) @value))
       (condition_clause value: (declaration declarator: (_) @decl value: (_) @value))
       (assignment_expression left: (_) @decl right: (_) @value)
     ";
