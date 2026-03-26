@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use rayon::prelude::*;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use ignore::WalkBuilder;
 use regex::Regex;
 use tree_sitter::Query;
@@ -145,19 +145,48 @@ pub fn run_refresh(req: RefreshRequest, reporter: Arc<dyn ProgressReporter>) -> 
 
     reporter.report("discovery", 60, 100, &format!("Resolving dependencies for {} modules...", module_defs.len()));
     let name_to_def: HashMap<String, &ModuleDef> = module_defs.iter().map(|d| (d.name.clone(), d)).collect();
+    
+    // メモ化用のキャッシュ: モジュール名 -> そのモジュールが依存する全モジュールセット
+    let mut memo: HashMap<String, HashSet<String>> = HashMap::new();
     let mut resolved_modules = Vec::new();
-    for def in &module_defs {
-        let mut deep_deps = HashSet::new();
-        let mut queue = vec![def.name.clone()];
-        let mut visited = HashSet::new();
-        while let Some(current) = queue.pop() {
-            if !visited.insert(current.clone()) { continue; }
-            if let Some(d) = name_to_def.get(&current) {
-                for dep in &d.public_deps { deep_deps.insert(dep.clone()); queue.push(dep.clone()); }
-                for dep in &d.private_deps { deep_deps.insert(dep.clone()); queue.push(dep.clone()); }
+    let total_mods = module_defs.len();
+
+    // 依存関係を再帰的に取得するヘルパー関数
+    fn resolve_deep(
+        name: &str, 
+        name_to_def: &HashMap<String, &ModuleDef>, 
+        memo: &mut HashMap<String, HashSet<String>>,
+        stack: &mut Vec<String> // 循環参照検知用
+    ) -> HashSet<String> {
+        if let Some(cached) = memo.get(name) { return cached.clone(); }
+        if stack.contains(&name.to_string()) { return HashSet::new(); } // 循環参照
+        
+        stack.push(name.to_string());
+        let mut deps = HashSet::new();
+        if let Some(def) = name_to_def.get(name) {
+            let mut immediate = Vec::new();
+            immediate.extend(def.public_deps.clone());
+            immediate.extend(def.private_deps.clone());
+
+            for dep in immediate {
+                deps.insert(dep.clone());
+                let deep = resolve_deep(&dep, name_to_def, memo, stack);
+                for d in deep { deps.insert(d); }
             }
         }
-        deep_deps.remove(&def.name);
+        stack.pop();
+        
+        memo.insert(name.to_string(), deps.clone());
+        deps
+    }
+
+    for (i, def) in module_defs.iter().enumerate() {
+        let mut stack = Vec::new();
+        let deep_deps = resolve_deep(&def.name, &name_to_def, &mut memo, &mut stack);
+        
+        if (i + 1) % 10 == 0 || i + 1 == total_mods {
+            reporter.report("discovery", 60, 100, &format!("Resolving: {}/{} ({})", i + 1, total_mods, def.name));
+        }
         resolved_modules.push((def, deep_deps));
     }
 
@@ -233,32 +262,53 @@ pub fn run_refresh(req: RefreshRequest, reporter: Arc<dyn ProgressReporter>) -> 
     let mut other_files = Vec::new();
     let mut current_on_disk = HashSet::new();
 
-    for (path_str, ext) in all_discovered_files {
-        current_on_disk.insert(path_str.clone());
-        let mod_id = sorted_roots.iter().find(|(r, _)| path_str.starts_with(r)).map(|(_, id)| *id).unwrap_or(global_mod_id);
-        let mtime = fs::metadata(&path_str).and_then(|m| m.modified()).ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs()).unwrap_or(0) as i64;
-        if existing_mtimes.get(&path_str).map_or(false, |&old| old == mtime) {
-            // Update module_id if changed even if mtime is same (rare but safe)
-            let tx = conn.transaction()?;
-            let path_id = get_id(&tx, &mut string_cache, &path_str)?;
-            tx.execute("UPDATE files SET module_id = ? WHERE path_id = ? AND module_id != ?", params![mod_id, path_id, mod_id])?;
-            tx.commit()?;
-            continue;
-        }
-        if ext == "h" || ext == "hpp" { headers_to_parse.push(InputFile { path: path_str, mtime: mtime as u64, old_hash: None, module_id: Some(mod_id), db_path: None }); }
-        else { other_files.push((path_str, mtime, mod_id, ext)); }
-    }
-
+    // ファイル更新のトランザクション開始
+    let tx = conn.transaction()?;
     {
-        let tx = conn.transaction()?;
-        for (path, _) in &existing_mtimes {
-            if !current_on_disk.contains(path) {
-                let path_id = get_id(&tx, &mut string_cache, path)?;
-                tx.execute("DELETE FROM files WHERE path_id = ?", params![path_id])?;
+        for (path_str, ext) in all_discovered_files {
+            current_on_disk.insert(path_str.clone());
+            let mod_id = sorted_roots.iter().find(|(r, _)| path_str.starts_with(r)).map(|(_, id)| *id).unwrap_or(global_mod_id);
+            let mtime = fs::metadata(&path_str).and_then(|m| m.modified()).ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs()).unwrap_or(0) as i64;
+            
+            if let Some(&old_mtime) = existing_mtimes.get(&path_str) {
+                if old_mtime == mtime {
+                    // mtimeが変わっていない場合でも、module_idだけ更新（高速）
+                    let path_id = match string_cache.get(&path_str) {
+                        Some(&id) => id,
+                        None => {
+                            let id: i64 = tx.query_row("SELECT id FROM strings WHERE text = ?", [&path_str], |r| r.get(0)).optional()?.unwrap_or_else(|| 0);
+                            id
+                        }
+                    };
+                    if path_id > 0 {
+                        tx.execute("UPDATE files SET module_id = ? WHERE path_id = ? AND module_id != ?", params![mod_id, path_id, mod_id])?;
+                    }
+                    continue;
+                }
+            }
+
+            if ext == "h" || ext == "hpp" {
+                headers_to_parse.push(InputFile { path: path_str, mtime: mtime as u64, old_hash: None, module_id: Some(mod_id), db_path: None });
+            } else {
+                other_files.push((path_str, mtime, mod_id, ext));
             }
         }
-        tx.commit()?;
     }
+    tx.commit()?; // ここで一括コミット
+
+    // 削除されたファイルの処理
+    let tx = conn.transaction()?;
+    {
+        for (path, _) in &existing_mtimes {
+            if !current_on_disk.contains(path) {
+                let path_id = tx.query_row("SELECT id FROM strings WHERE text = ?", [path], |r| r.get(0)).optional()?.unwrap_or(0);
+                if path_id > 0 {
+                    tx.execute("DELETE FROM files WHERE path_id = ?", params![path_id])?;
+                }
+            }
+        }
+    }
+    tx.commit()?;
 
     if !headers_to_parse.is_empty() {
         reporter.report("analysis", 0, headers_to_parse.len(), &format!("Analyzing {} changed headers...", headers_to_parse.len()));
@@ -277,12 +327,14 @@ pub fn run_refresh(req: RefreshRequest, reporter: Arc<dyn ProgressReporter>) -> 
 
     if !other_files.is_empty() {
         let tx = conn.transaction()?;
-        for (path, mtime, mod_id, ext) in other_files {
-            let filename = Path::new(&path).file_name().and_then(|s| s.to_str()).unwrap_or("unknown");
-            let path_id = get_id(&tx, &mut string_cache, &path)?;
-            let filename_id = get_id(&tx, &mut string_cache, filename)?;
-            // INSERT OR REPLACE files
-            tx.execute("INSERT OR REPLACE INTO files (path_id, filename_id, extension, mtime, module_id, is_header) VALUES (?, ?, ?, ?, ?, 0)", params![path_id, filename_id, ext, mtime as i64, mod_id])?;
+        {
+            for (path, mtime, mod_id, ext) in other_files {
+                let filename = Path::new(&path).file_name().and_then(|s| s.to_str()).unwrap_or("unknown");
+                let path_id = get_id(&tx, &mut string_cache, &path)?;
+                let filename_id = get_id(&tx, &mut string_cache, filename)?;
+                // INSERT OR REPLACE files
+                tx.execute("INSERT OR REPLACE INTO files (path_id, filename_id, extension, mtime, module_id, is_header) VALUES (?, ?, ?, ?, ?, 0)", params![path_id, filename_id, ext, mtime as i64, mod_id])?;
+            }
         }
         tx.commit()?;
     }

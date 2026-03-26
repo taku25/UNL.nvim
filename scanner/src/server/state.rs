@@ -99,34 +99,14 @@ impl AppState {
         let conn = rusqlite::Connection::open(db_path_native)?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
 
+        // プライマリ接続（書き込み・リフレッシュ用）
         let _ = conn.pragma_update(None, "journal_mode", "WAL");
         let _ = conn.pragma_update(None, "synchronous", "NORMAL");
-        let _ = conn.pragma_update(None, "cache_size", "-800000");
-        let _ = conn.pragma_update(None, "mmap_size", "1073741824");
+        let _ = conn.pragma_update(None, "cache_size", "-500000");   // 約512MBキャッシュ
+        let _ = conn.pragma_update(None, "mmap_size", "1073741824"); // 1GB mmap
         let _ = conn.pragma_update(None, "temp_store", "MEMORY");
         
         let conn_arc = Arc::new(Mutex::new(conn));
-        
-        let conn_for_warmup = Arc::clone(&conn_arc);
-        tokio::task::spawn_blocking(move || {
-            let start = Instant::now();
-            let conn = conn_for_warmup.lock().unwrap();
-            info!("Shadow warm-up (aggressive) started...");
-            
-            let _ = conn.query_row(
-                "SELECT SUM(LENGTH(c.name) + LENGTH(f.path) + LENGTH(m.name)) 
-                 FROM classes c 
-                 JOIN files f ON c.file_id = f.id 
-                 JOIN modules m ON f.module_id = m.id", 
-                [], |_| Ok(())
-            );
-            
-            let _ = conn.query_row("SELECT SUM(LENGTH(name) + LENGTH(COALESCE(detail, ''))) FROM members", [], |_| Ok(()));
-            let _ = conn.query_row("SELECT SUM(LENGTH(parent_name)) FROM inheritance", [], |_| Ok(()));
-            
-            info!("Shadow warm-up (aggressive) completed in {:?}.", start.elapsed());
-        });
-
         conns.insert(db_path_native.to_string(), Arc::clone(&conn_arc));
         Ok(conn_arc)
     }

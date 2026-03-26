@@ -167,6 +167,16 @@ pub async fn handle_query(state: Arc<AppState>, params: &Value, tx: mpsc::Sender
     let req: ServerQueryRequest = convert_params(params)?;
     let root_key = normalize_path_key(&req.project_root);
     
+    // --- Added: Block during Refresh ---
+    {
+        let active = state.active_refreshes.lock().unwrap();
+        if active.contains(&root_key) {
+            // tracing::debug!("Blocking query during active refresh for: {}", root_key);
+            return Ok(json!([])); // Refresh中は即座に空を返す
+        }
+    }
+    // ------------------------------------
+
     {
         let graphs = state.asset_graphs.lock().unwrap();
         if !graphs.contains_key(&root_key) {
