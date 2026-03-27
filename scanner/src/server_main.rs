@@ -58,6 +58,7 @@ async fn main() -> anyhow::Result<()> {
         last_activity: Mutex::new(Instant::now()),
         asset_graphs: Mutex::new(HashMap::new()),
         config_caches: Mutex::new(HashMap::new()),
+        completion_caches: Mutex::new(HashMap::new()),
     });
 
     let state_for_watcher = Arc::clone(&state);

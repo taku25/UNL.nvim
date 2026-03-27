@@ -7,6 +7,8 @@ use tracing::info;
 use serde::{Serialize, Deserialize};
 use crate::types::{Progress, ProgressReporter, ConfigCache};
 use crate::db;
+use lru::LruCache;
+use std::num::NonZeroUsize;
 
 pub struct RpcProgressReporter {
     pub tx: mpsc::Sender<Vec<u8>>,
@@ -48,6 +50,59 @@ pub struct AssetGraph {
     pub functions: HashMap<Arc<str>, HashSet<Arc<str>>>,
 }
 
+/// (class_name, prefix) -> (completion_results, hit_count)
+pub struct CompletionCache {
+    /// LRU Cache for (class_name, prefix) -> (JSON Value, hit_count)
+    /// Limit to 50,000 entries (approx. 2GB max if each is 40KB)
+    pub lru: LruCache<(String, String), (serde_json::Value, u64)>,
+    /// Map of class_name -> set of (class_name, prefix) keys in LRU
+    /// used for invalidation when a class is updated.
+    pub class_to_keys: HashMap<String, HashSet<(String, String)>>,
+}
+
+impl CompletionCache {
+    pub fn new() -> Self {
+        Self {
+            lru: LruCache::new(NonZeroUsize::new(50000).unwrap()),
+            class_to_keys: HashMap::new(),
+        }
+    }
+
+    pub fn get(&mut self, class_name: &str, prefix: &str) -> Option<serde_json::Value> {
+        let key = (class_name.to_string(), prefix.to_string());
+        if let Some((val, hit)) = self.lru.get_mut(&key) {
+            *hit += 1;
+            return Some(val.clone());
+        }
+        None
+    }
+
+    pub fn put(&mut self, class_name: &str, prefix: &str, results: serde_json::Value) {
+        let key = (class_name.to_string(), prefix.to_string());
+        
+        // Track which keys belong to which class for invalidation
+        self.class_to_keys.entry(class_name.to_string())
+            .or_default()
+            .insert(key.clone());
+            
+        self.lru.put(key, (results, 1));
+    }
+
+    pub fn invalidate_class(&mut self, class_name: &str) {
+        if let Some(keys) = self.class_to_keys.remove(class_name) {
+            info!("Invalidating completion cache for class: {} ({} entries)", class_name, keys.len());
+            for key in keys {
+                self.lru.pop(&key);
+            }
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.lru.clear();
+        self.class_to_keys.clear();
+    }
+}
+
 pub struct AppState {
     pub projects: Mutex<HashMap<String, ProjectContext>>,
     pub connections: Mutex<HashMap<String, Arc<Mutex<rusqlite::Connection>>>>,
@@ -60,6 +115,8 @@ pub struct AppState {
     pub last_activity: Mutex<Instant>,
     pub asset_graphs: Mutex<HashMap<String, AssetGraph>>,
     pub config_caches: Mutex<HashMap<String, ConfigCache>>,
+    /// project_root -> CompletionCache
+    pub completion_caches: Mutex<HashMap<String, Arc<Mutex<CompletionCache>>>>,
 }
 
 impl AppState {
@@ -127,5 +184,15 @@ impl AppState {
         let _ = conn.pragma_update(None, "query_only", "ON");
 
         Ok(conn)
+    }
+
+    pub fn get_completion_cache(&self, project_root: &str) -> Arc<Mutex<CompletionCache>> {
+        let mut caches = self.completion_caches.lock().unwrap();
+        if let Some(cache) = caches.get(project_root) {
+            return Arc::clone(cache);
+        }
+        let cache = Arc::new(Mutex::new(CompletionCache::new()));
+        caches.insert(project_root.to_string(), Arc::clone(&cache));
+        cache
     }
 }

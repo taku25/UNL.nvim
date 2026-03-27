@@ -2,6 +2,8 @@ use rusqlite::{Connection, params};
 use serde_json::{json, Value};
 use tree_sitter::{Parser, Point, Node, Query, QueryCursor, StreamingIterator};
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use crate::server::state::CompletionCache;
 
 // 補完ロジックのメインエントリー
 pub fn process_completion(
@@ -10,6 +12,7 @@ pub fn process_completion(
     line: u32,
     character: u32,
     _file_path: Option<String>,
+    cache: Option<Arc<Mutex<CompletionCache>>>,
 ) -> anyhow::Result<Value> {
     tracing::info!("--- Completion Request at {}:{} ---", line, character);
     let mut parser = Parser::new();
@@ -54,7 +57,7 @@ pub fn process_completion(
     }
 
     if let Some(t) = target_node {
-        return resolve_node_and_fetch_members(conn, t, &root, content, row, None);
+        return resolve_node_and_fetch_members(conn, t, &root, content, row, None, cache);
     }
 
     let mut curr_opt = Some(node);
@@ -69,7 +72,7 @@ pub fn process_completion(
 
         if let Some(prev) = get_prev_meaningful_sibling(op_node) {
             tracing::info!("Operator detected (Case 1), target node: kind='{}', text='{}'", prev.kind(), get_node_text(&prev, content));
-            return resolve_node_and_fetch_members(conn, prev, &root, content, row, None);
+            return resolve_node_and_fetch_members(conn, prev, &root, content, row, None, cache);
         } else {
             tracing::info!("Operator detected but no meaningful sibling found. Continuing to traverse up from parent.");
             curr_opt = node.parent(); // Move to parent and let Case 2 handle it
@@ -106,17 +109,17 @@ pub fn process_completion(
 
             if let Some(obj_node) = curr.child_by_field_name("argument") {
                 tracing::info!("Field expression detected (Case 2), resolving argument with prefix: {:?}", field_prefix);
-                return resolve_node_and_fetch_members(conn, obj_node, &root, content, row, field_prefix);
+                return resolve_node_and_fetch_members(conn, obj_node, &root, content, row, field_prefix, cache);
             } else if let Some(first_child) = curr.child(0) {
                 if first_child.kind() != "." && first_child.kind() != "->" {
                     tracing::info!("Field expression detected (Fallback), resolving first child...");
-                    return resolve_node_and_fetch_members(conn, first_child, &root, content, row, field_prefix);
+                    return resolve_node_and_fetch_members(conn, first_child, &root, content, row, field_prefix, cache);
                 }
             }
         } else if p_kind == "call_expression" && (node_type == "." || node_type == "->") {
              if let Some(func_node) = curr.child_by_field_name("function") {
                  tracing::info!("Call expression parent of operator detected, resolving function...");
-                 return resolve_node_and_fetch_members(conn, func_node, &root, content, row, None);
+                 return resolve_node_and_fetch_members(conn, func_node, &root, content, row, None, cache);
              }
         } else if p_kind == "qualified_identifier" {
             let field_prefix = if let Some(name_node) = curr.child_by_field_name("name") {
@@ -125,7 +128,7 @@ pub fn process_completion(
 
             if let Some(scope_node) = curr.child_by_field_name("scope") {
                 tracing::info!("Qualified identifier detected (Case 2), resolving scope with prefix: {:?}", field_prefix);
-                return resolve_static_members(conn, get_node_text(&scope_node, content), field_prefix);
+                return resolve_static_members(conn, get_node_text(&scope_node, content), field_prefix, cache);
             }
         } else if p_kind == "ERROR" {
             let count = curr.child_count();
@@ -135,7 +138,7 @@ pub fn process_completion(
                     if ck == "." || ck == "->" || ck == "::" {
                         if let Some(prev) = get_prev_meaningful_sibling(child) {
                              tracing::info!("Operator detected inside ERROR, resolving previous sibling...");
-                             return resolve_node_and_fetch_members(conn, prev, &root, content, row, None);
+                             return resolve_node_and_fetch_members(conn, prev, &root, content, row, None, cache);
                         }
                     }
                 }
@@ -150,7 +153,7 @@ pub fn process_completion(
         let mut results = Vec::new();
 
         if let Some(current_class) = get_enclosing_class_name(&node, content) {
-            if let Ok(members) = fetch_members_recursive(conn, &current_class, Some(prefix.to_string())) {
+            if let Ok(members) = fetch_members_recursive(conn, &current_class, Some(prefix.to_string()), cache.as_ref().map(|c| Arc::clone(c))) {
                 results.extend(members);
             }
         }
@@ -209,12 +212,13 @@ fn resolve_node_and_fetch_members(
     content: &str,
     cursor_row: usize,
     prefix: Option<String>,
+    cache: Option<Arc<Mutex<CompletionCache>>>,
 ) -> anyhow::Result<Value> {
     if let Some(t_name) = resolve_expression_type(conn, node, root, content, cursor_row)? {
         let resolved = resolve_typedef(conn, &t_name)?;
         tracing::info!("Final type for member lookup: '{}', prefix: {:?}", resolved, prefix);
         
-        let members = fetch_members_recursive(conn, &resolved, prefix)?;
+        let members = fetch_members_recursive(conn, &resolved, prefix, cache)?;
         return Ok(json!(members));
     }
     Ok(json!([]))
@@ -474,14 +478,27 @@ fn resolve_typedef(conn: &Connection, type_name: &str) -> anyhow::Result<String>
     Ok(current)
 }
 
-fn resolve_static_members(conn: &Connection, scope_name: &str, prefix: Option<String>) -> anyhow::Result<Value> {
+fn resolve_static_members(conn: &Connection, scope_name: &str, prefix: Option<String>, cache: Option<Arc<Mutex<CompletionCache>>>) -> anyhow::Result<Value> {
     let clean_scope = extract_clean_type(scope_name);
     let t_name = resolve_typedef(conn, &clean_scope)?;
-    let members = fetch_members_recursive(conn, &t_name, prefix)?;
+    let members = fetch_members_recursive(conn, &t_name, prefix, cache)?;
     Ok(json!(members))
 }
 
-fn fetch_members_recursive(conn: &Connection, class_name: &str, prefix: Option<String>) -> anyhow::Result<Vec<Value>> {
+fn fetch_members_recursive(conn: &Connection, class_name: &str, prefix: Option<String>, cache: Option<Arc<Mutex<CompletionCache>>>) -> anyhow::Result<Vec<Value>> {
+    let prefix_val = prefix.as_deref().unwrap_or("");
+    
+    // 1. Try Cache
+    if let Some(c_mutex) = &cache {
+        let mut c = c_mutex.lock().unwrap();
+        if let Some(cached) = c.get(class_name, prefix_val) {
+            if let Some(arr) = cached.as_array() {
+                tracing::info!("Cache hit for class='{}', prefix='{}'", class_name, prefix_val);
+                return Ok(arr.clone());
+            }
+        }
+    }
+
     let mut result = Vec::new();
     let mut queue = vec![class_name.to_string()];
     let mut visited = HashMap::new();
@@ -575,6 +592,14 @@ fn fetch_members_recursive(conn: &Connection, class_name: &str, prefix: Option<S
         }
         if result.len() >= 500 { break; }
     }
+
+    // 2. Store in Cache
+    if let Some(c_mutex) = &cache {
+        let mut c = c_mutex.lock().unwrap();
+        tracing::info!("Caching results for class='{}', prefix='{}' ({} items)", class_name, prefix_val, result.len());
+        c.put(class_name, prefix_val, json!(result));
+    }
+
     Ok(result)
 }
 

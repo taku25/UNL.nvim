@@ -99,8 +99,21 @@ pub async fn handle_file_change(state: Arc<AppState>, path: PathBuf) {
                         db_path: Some(db_path_native.clone()) 
                     };
                     if let Ok(res) = scanner::process_file(&input, &language, &query) { 
+                        let classes_to_invalidate = if let Some(data) = &res.data {
+                            data.classes.iter().map(|c| c.class_name.clone()).collect::<Vec<String>>()
+                        } else {
+                            Vec::new()
+                        };
+
                         if let Err(e) = db::save_to_db(&mut conn, &[res], Arc::new(crate::types::StdoutReporter)) {
                             tracing::error!("Watcher: Failed to save scan results to DB: {}", e);
+                        } else {
+                            // Invalidate cache for classes found in this file
+                            let cache_arc = state.get_completion_cache(&root_clone);
+                            let mut cache = cache_arc.lock().unwrap();
+                            for cls in classes_to_invalidate {
+                                cache.invalidate_class(&cls);
+                            }
                         }
                     }
                 }

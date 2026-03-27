@@ -130,6 +130,14 @@ pub async fn handle_refresh(state: &AppState, params: &Value, tx: mpsc::Sender<V
     let reporter = Arc::new(RpcProgressReporter { tx });
     tokio::task::spawn_blocking(move || { refresh::run_refresh(req, reporter) }).await??;
     
+    // Clear completion cache after refresh
+    {
+        let cache_arc = state.get_completion_cache(&root_key);
+        let mut cache = cache_arc.lock().unwrap();
+        cache.clear();
+        info!("Cleared completion cache after refresh for: {}", root_key);
+    }
+
     let db_path_native = normalize_to_native(&db_path_unix);
     let _ = state.get_connection(&db_path_native);
     
@@ -374,6 +382,10 @@ pub async fn handle_query(state: Arc<AppState>, params: &Value, tx: mpsc::Sender
                     engine_root.as_deref()
                 )?;
                 Ok(json!(data))
+            }
+            QueryRequest::GetCompletions { content, line, character, file_path } => {
+                let cache = state.get_completion_cache(&root_key);
+                crate::completion::process_completion(&conn, &content, line, character, file_path, Some(cache))
             }
             _ => {
                 if is_async {
