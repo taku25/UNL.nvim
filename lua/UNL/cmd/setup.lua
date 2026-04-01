@@ -45,8 +45,13 @@ function M.execute(opts, on_complete)
         
         rpc.request("setup", req, nil, function(success, result_or_err)
             if success then
-                log.debug("UNL setup complete.")
-                if on_complete then on_complete(result_or_err) end
+                log.debug("UNL setup complete. (needs_full_refresh: %s)", tostring(result_or_err.needs_full_refresh))
+                if result_or_err.needs_full_refresh then
+                    log.info("Database is empty or version mismatch. Triggering full refresh...")
+                    require("UNL.cmd.refresh").execute(opts, on_complete)
+                else
+                    if on_complete then on_complete(result_or_err) end
+                end
             else
                 log.error("UNL setup failed: %s", result_or_err or "Unknown error")
                 if on_complete then on_complete(nil) end

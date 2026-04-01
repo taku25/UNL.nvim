@@ -55,11 +55,13 @@ pub async fn handle_setup(state: Arc<AppState>, params: &Value) -> anyhow::Resul
     let root_key = normalize_path_key(&req.project_root);
     let db_path_native_clone = db_path_native.clone();
     let was_empty = tokio::task::spawn_blocking(move || {
-        let mut is_new = false;
-        if let Ok(conn) = rusqlite::Connection::open(&db_path_native_clone) {
-            // Check if classes table is empty
-            if let Ok(count) = conn.query_row("SELECT COUNT(*) FROM classes", [], |r| r.get::<_, i64>(0)) {
-                if count == 0 { is_new = true; }
+        let mut is_new = db::ensure_correct_version(&db_path_native_clone).unwrap_or(false);
+        if !is_new {
+            if let Ok(conn) = rusqlite::Connection::open(&db_path_native_clone) {
+                // Check if classes table is empty
+                if let Ok(count) = conn.query_row("SELECT COUNT(*) FROM classes", [], |r| r.get::<_, i64>(0)) {
+                    if count == 0 { is_new = true; }
+                }
             }
         }
         Ok::<bool, anyhow::Error>(is_new)

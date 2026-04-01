@@ -8,8 +8,10 @@ pub const DB_VERSION: i32 = 6;
 
 /// 指定されたDBファイルが最新バージョンであることを保証する。
 /// バージョンが合わない場合はファイルを削除して初期化する。
-pub fn ensure_correct_version(db_path: &str) -> anyhow::Result<()> {
+/// 戻り値: 成功した場合は、再初期化（または新規作成）されたかどうかを返す。
+pub fn ensure_correct_version(db_path: &str) -> anyhow::Result<bool> {
     let mut version_match = false;
+    let mut re_initialized = false;
     {
         if let Ok(conn) = rusqlite::Connection::open(db_path) {
             if let Ok(version_str) = conn.query_row(
@@ -27,16 +29,18 @@ pub fn ensure_correct_version(db_path: &str) -> anyhow::Result<()> {
     }
 
     if !version_match && Path::new(db_path).exists() {
-        tracing::info!("DB version mismatch or missing (Current: 6). Re-initializing: {}", db_path);
+        tracing::info!("DB version mismatch or missing (Current: {}). Re-initializing: {}", DB_VERSION, db_path);
         let _ = std::fs::remove_file(db_path);
         let conn = rusqlite::Connection::open(db_path)?;
         init_db(&conn)?;
+        re_initialized = true;
     } else if !Path::new(db_path).exists() {
         let conn = rusqlite::Connection::open(db_path)?;
         init_db(&conn)?;
+        re_initialized = true;
     }
 
-    Ok(())
+    Ok(re_initialized)
 }
 
 pub fn init_db(conn: &Connection) -> rusqlite::Result<()> {

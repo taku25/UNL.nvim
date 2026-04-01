@@ -151,10 +151,9 @@ impl AppState {
         }
 
         info!("Opening primary database connection (Read/Write): {}", db_path_native);
-        db::ensure_correct_version(db_path_native)?;
-        
-        let conn = rusqlite::Connection::open(db_path_native)?;
-        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        let _ = db::ensure_correct_version(db_path_native)?;
+
+        let conn = rusqlite::Connection::open(db_path_native)?;        conn.busy_timeout(std::time::Duration::from_secs(5))?;
 
         // プライマリ接続（書き込み・リフレッシュ用）
         let _ = conn.pragma_update(None, "journal_mode", "WAL");
