@@ -481,11 +481,12 @@ pub fn get_file_symbols(conn: &Connection, file_path: String) -> anyhow::Result<
         let k_lower = class_json["kind"].as_str().unwrap_or("").to_lowercase();
         if k_lower == "uenum" || k_lower == "enum" {
             let mut enum_stmt = conn.prepare(
-                "SELECT ev.name, ev.line_number, sp.text as file_path
+                "SELECT sen.text, ev.line_number, sp.text as file_path
                  FROM enum_values ev
+                 JOIN strings sen ON ev.name_id = sen.id
                  JOIN files f ON ev.file_id = f.id
                  JOIN strings sp ON f.path_id = sp.id
-                 WHERE ev.class_id = ? ORDER BY ev.line_number"
+                 WHERE ev.enum_id = ? ORDER BY ev.line_number"
             )?;
             let enum_rows = enum_stmt.query_map([cid], |row| {
                 let name: String = row.get(0)?;

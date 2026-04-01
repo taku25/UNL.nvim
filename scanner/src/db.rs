@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use rusqlite::{params, Connection};
 use crate::types::{ParseResult, ProgressReporter};
 
-pub const DB_VERSION: i32 = 6;
+pub const DB_VERSION: i32 = 7;
 
 /// 指定されたDBファイルが最新バージョンであることを保証する。
 /// バージョンが合わない場合はファイルを削除して初期化する。
@@ -148,12 +148,16 @@ pub fn init_db(conn: &Connection) -> rusqlite::Result<()> {
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             enum_id INTEGER NOT NULL,
             name_id INTEGER NOT NULL,
+            line_number INTEGER,
+            file_id INTEGER,
             FOREIGN KEY(enum_id) REFERENCES classes(id) ON DELETE CASCADE,
-            FOREIGN KEY(name_id) REFERENCES strings(id)
+            FOREIGN KEY(name_id) REFERENCES strings(id),
+            FOREIGN KEY(file_id) REFERENCES files(id) ON DELETE CASCADE
         )",
         [],
     )?;
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_enum_values_unique ON enum_values(enum_id, name_id)", [])?;
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_enum_values_enum_id ON enum_values(enum_id)", [])?;
 
     // 6. Inheritance
     conn.execute(
@@ -274,7 +278,7 @@ pub fn save_to_db(conn: &mut Connection, results: &[ParseResult], reporter: Arc<
             let mut stmt_file = tx.prepare("INSERT INTO files (path_id, filename_id, extension, mtime, file_hash, module_id, is_header) VALUES (?, ?, ?, ?, ?, ?, ?)")?;
             let mut stmt_class = tx.prepare("INSERT INTO classes (name_id, namespace_id, base_class_id, file_id, line_number, symbol_type, end_line_number) VALUES (?, ?, ?, ?, ?, ?, ?)")?;
             let mut stmt_inheritance = tx.prepare("INSERT INTO inheritance (child_id, parent_name_id) VALUES (?, ?)")?;
-            let mut stmt_enum = tx.prepare("INSERT INTO enum_values (enum_id, name_id) VALUES (?, ?)")?;
+            let mut stmt_enum = tx.prepare("INSERT INTO enum_values (enum_id, name_id, line_number, file_id) VALUES (?, ?, ?, ?)")?;
             let mut stmt_member = tx.prepare("INSERT INTO members (class_id, name_id, type_id, flags, access, detail, return_type_id, is_static, line_number, file_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")?;
             let mut stmt_fts = tx.prepare("INSERT INTO symbols_fts (name, type, class_name, rowid_ref) VALUES (?, ?, ?, ?)")?;
 
@@ -341,7 +345,7 @@ pub fn save_to_db(conn: &mut Connection, results: &[ParseResult], reporter: Arc<
                         for mem in &cls.members {
                             let mem_name_id = get_or_create_string(&tx, &mut string_cache, &mem.name)?;
                             if mem.mem_type == "enum_item" {
-                                let _ = stmt_enum.execute(params![class_id, mem_name_id]);
+                                let _ = stmt_enum.execute(params![class_id, mem_name_id, mem.line as i64, file_id]);
                             } else {
                                 let is_static = if mem.flags.contains("static") { 1 } else { 0 };
                                 let type_id = get_or_create_string(&tx, &mut string_cache, &mem.mem_type)?;
