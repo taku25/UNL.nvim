@@ -351,10 +351,10 @@ pub fn get_file_symbols(conn: &Connection, file_path: String) -> anyhow::Result<
          JOIN modules m ON f.module_id = m.id
          JOIN strings sm ON m.name_id = sm.id
          JOIN strings sr ON m.root_path_id = sr.id
-         WHERE f.module_id = ? AND sn.text LIKE ?"
+         WHERE f.module_id = ? AND (sn.text = ? OR sn.text LIKE ?)"
     )?;
-    let target_like = format!("{}%", stem);
-    let related_files: Vec<(i64, String, String, String)> = stmt.query_map(params![module_id, target_like], |row| {
+    let target_like = format!("{}.%", stem);
+    let related_files: Vec<(i64, String, String, String)> = stmt.query_map(params![module_id, stem, target_like], |row| {
         Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
     })?.filter_map(|r| r.ok()).collect();
 
@@ -426,10 +426,23 @@ pub fn get_file_symbols(conn: &Connection, file_path: String) -> anyhow::Result<
         )?;
 
         let mem_rows = mem_stmt.query_map([cid], |row| {
-            let m_type: String = row.get(1)?;
-            let access = row.get::<_, Option<String>>(3).unwrap_or(Some("public".to_string())).unwrap_or("public".to_string()).to_lowercase();
             let m_name: String = row.get(0)?;
+            let m_type: String = row.get(1)?;
+            let m_path: String = row.get(8)?;
             
+            let mut access = row.get::<_, Option<String>>(3)
+                .unwrap_or(Some("public".to_string()))
+                .unwrap_or("public".to_string())
+                .to_lowercase();
+            
+            // sourceファイル (.cpp, .c, .cc) からのメンバは 'impl' として扱う (関数の場合)
+            if m_type.to_lowercase().contains("function") {
+                let p_lower = m_path.to_lowercase();
+                if p_lower.ends_with(".cpp") || p_lower.ends_with(".c") || p_lower.ends_with(".cc") {
+                    access = "impl".to_string();
+                }
+            }
+
             // Picker表示用にクラス名をカッコで付与するヒントを追加
             let display_name = format!("{} ({})", m_name, current_class_name);
 
@@ -443,7 +456,7 @@ pub fn get_file_symbols(conn: &Connection, file_path: String) -> anyhow::Result<
                 "return_type": row.get::<_, Option<String>>(5)?,
                 "is_static": row.get::<_, i64>(6)? == 1,
                 "line": row.get::<_, i64>(7)?,
-                "file_path": row.get::<_, String>(8)?
+                "file_path": m_path
             })))
         })?;
 
@@ -452,6 +465,35 @@ pub fn get_file_symbols(conn: &Connection, file_path: String) -> anyhow::Result<
             let target = if m_type.to_lowercase().contains("function") { "methods" } else { "fields" };
             if let Some(map) = class_json[target].as_object_mut() {
                 map.entry(access).or_insert(json!([])).as_array_mut().unwrap().push(m_json);
+            }
+        }
+
+        // 7. If it's an Enum, fetch its values from enum_values table
+        let k_lower = class_json["kind"].as_str().unwrap_or("").to_lowercase();
+        if k_lower == "uenum" || k_lower == "enum" {
+            let mut enum_stmt = conn.prepare(
+                "SELECT ev.name, ev.line_number, sp.text as file_path
+                 FROM enum_values ev
+                 JOIN files f ON ev.file_id = f.id
+                 JOIN strings sp ON f.path_id = sp.id
+                 WHERE ev.class_id = ? ORDER BY ev.line_number"
+            )?;
+            let enum_rows = enum_stmt.query_map([cid], |row| {
+                let name: String = row.get(0)?;
+                Ok(json!({
+                    "name": name,
+                    "kind": "Field",
+                    "access": "public",
+                    "line": row.get::<_, i64>(1)?,
+                    "file_path": row.get::<_, String>(2)?
+                }))
+            })?;
+            for e_res in enum_rows {
+                if let Ok(e_json) = e_res {
+                    if let Some(fields) = class_json["fields"].as_object_mut() {
+                        fields.entry("public".to_string()).or_insert(json!([])).as_array_mut().unwrap().push(e_json);
+                    }
+                }
             }
         }
 
