@@ -175,26 +175,38 @@ pub fn find_symbol_in_inheritance_chain(conn: &Connection, class_name: String, s
         JOIN classes c ON p.id = c.id 
         JOIN files f ON c.file_id = f.id 
         JOIN strings sp ON f.path_id = sp.id
-        WHERE sm.text = ? AND p.level > 0 
+        WHERE sm.text = ? AND p.level >= 0 
         ORDER BY p.level ASC LIMIT 1"
     )?;
     let res = stmt.query_row(params![class_name, symbol_name], |row| Ok(json!({ "file_path": row.get::<_, String>(0)?, "line_number": row.get::<_, i64>(1)?, "class_name": row.get::<_, String>(2)? }))).optional()?;
-    if is_impl && res.is_some() {
+    
+    // If found, check if there's a corresponding implementation in .cpp
+    if res.is_some() {
         let data = res.as_ref().unwrap();
         let h_path = data["file_path"].as_str().unwrap();
-        let c_name = data["class_name"].as_str().unwrap();
-        let h_stem = std::path::Path::new(h_path).file_stem().and_then(|s| s.to_str()).unwrap_or("");
-        let mut stmt_cpp = conn.prepare(
-            "SELECT sp.text FROM files f 
+        
+        // Try to find if this member has an entry from a .cpp file (impl access or same name in .cpp)
+        let mut stmt_impl = conn.prepare(
+            "SELECT sp.text, m.line_number 
+             FROM members m
+             JOIN strings sm ON m.name_id = sm.id
+             JOIN classes c ON m.class_id = c.id
+             JOIN strings sc ON c.name_id = sc.id
+             JOIN files f ON m.file_id = f.id
              JOIN strings sp ON f.path_id = sp.id
-             JOIN strings sfn ON f.filename_id = sfn.id
-             WHERE f.module_id = (SELECT module_id FROM files f2 JOIN strings sp2 ON f2.path_id = sp2.id WHERE sp2.text = ?) 
-             AND f.extension IN ('cpp', 'c', 'cc') AND sfn.text LIKE ? LIMIT 1"
+             WHERE sc.text = ? AND sm.text = ? AND f.extension IN ('cpp', 'c', 'cc')
+             LIMIT 1"
         )?;
-        let target_like = format!("{}%.cpp", h_stem);
-        let res_cpp = stmt_cpp.query_row(params![h_path, target_like], |row| Ok(json!({ "file_path": row.get::<_, String>(0)?, "line_number": 0, "class_name": c_name }))).optional()?;
-        if res_cpp.is_some() { return Ok(json!(res_cpp)); }
+        
+        let res_impl = stmt_impl.query_row(params![class_name, symbol_name], |row| Ok(json!({ 
+            "file_path": row.get::<_, String>(0)?, 
+            "line_number": row.get::<_, i64>(1)?,
+            "class_name": class_name.clone()
+        }))).optional()?;
+        
+        if res_impl.is_some() { return Ok(json!(res_impl)); }
     }
+    
     Ok(json!(res))
 }
 

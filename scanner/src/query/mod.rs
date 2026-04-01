@@ -140,6 +140,7 @@ pub fn process_query(conn: &Connection, req: QueryRequest) -> anyhow::Result<Val
              Ok(json!(rows.collect::<Result<Vec<Value>, _>>()?))
         },
         QueryRequest::FindSymbolInModule { module, symbol } => {
+             // 1. Try finding as a Class/Struct/Enum first
              let mut stmt = conn.prepare(
                 "SELECT sp.text as path, c.line_number 
                  FROM classes c 
@@ -151,12 +152,13 @@ pub fn process_query(conn: &Connection, req: QueryRequest) -> anyhow::Result<Val
                  WHERE sm.text = ? AND sc.text = ? LIMIT 1"
              )?;
              if let Some(r) = stmt.query_row([&module, &symbol], |row| Ok(json!({ "file_path": row.get::<_, String>(0)?, "line_number": row.get::<_, i64>(1)? }))).optional()? { return Ok(json!(r)); }
+             
+             // 2. Try finding as a Member (Global or Class member)
              let mut stmt_mem = conn.prepare(
                 "SELECT sp.text as path, mem.line_number 
                  FROM members mem 
                  JOIN strings smem ON mem.name_id = smem.id
-                 JOIN classes c ON mem.class_id = c.id 
-                 JOIN files f ON c.file_id = f.id 
+                 JOIN files f ON mem.file_id = f.id 
                  JOIN strings sp ON f.path_id = sp.id
                  JOIN modules m ON f.module_id = m.id 
                  JOIN strings sm ON m.name_id = sm.id
