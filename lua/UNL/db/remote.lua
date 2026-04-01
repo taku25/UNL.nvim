@@ -13,6 +13,8 @@ local function get_project_root()
     return nil
 end
 
+local pending_requests = {}
+
 function M.request(kind, args, callback)
     local root = get_project_root()
     if not root then 
@@ -25,15 +27,30 @@ function M.request(kind, args, callback)
         kind = kind,
     }
     for k, v in pairs(args or {}) do params[k] = v end
+
+    -- デバウンス処理: 同じ種類のリクエストが短時間に連続した場合、前のものをキャンセル
+    if pending_requests[kind] then
+        pending_requests[kind]:stop()
+        pending_requests[kind] = nil
+    end
+
+    local timer = vim.loop.new_timer()
+    pending_requests[kind] = timer
     
-    rpc.request("query", params, nil, function(success, result_or_err)
-        if success then
-            if callback then callback(result_or_err) end
-        else
-            log.error("UNL Query error (%s): %s", kind, tostring(result_or_err))
-            if callback then callback(nil, result_or_err) end
-        end
-    end)
+    timer:start(20, 0, vim.schedule_wrap(function()
+        pending_requests[kind] = nil
+        timer:close()
+
+        rpc.request("query", params, nil, function(success, result_or_err)
+            if success then
+                if callback then callback(result_or_err) end
+            else
+                -- ログが多すぎると逆に重くなるため、特定の状況以外はデバッグ出力に留める
+                log.debug("UNL Query error (%s): %s", kind, tostring(result_or_err))
+                if callback then callback(nil, result_or_err) end
+            end
+        end)
+    end))
 end
 
 function M.request_streaming(kind, args, on_partial, on_complete)

@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use rusqlite::{params, Connection};
 use crate::types::{ParseResult, ProgressReporter};
 
-pub const DB_VERSION: i32 = 5;
+pub const DB_VERSION: i32 = 6;
 
 /// 指定されたDBファイルが最新バージョンであることを保証する。
 /// バージョンが合わない場合はファイルを削除して初期化する。
@@ -27,7 +27,7 @@ pub fn ensure_correct_version(db_path: &str) -> anyhow::Result<()> {
     }
 
     if !version_match && Path::new(db_path).exists() {
-        tracing::info!("DB version mismatch or missing. Re-initializing: {}", db_path);
+        tracing::info!("DB version mismatch or missing (Current: 6). Re-initializing: {}", db_path);
         let _ = std::fs::remove_file(db_path);
         let conn = rusqlite::Connection::open(db_path)?;
         init_db(&conn)?;
@@ -107,7 +107,8 @@ pub fn init_db(conn: &Connection) -> rusqlite::Result<()> {
         )",
         [],
     )?;
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_classes_name_id ON classes(name_id)", [])?;
+    // Covering Index: 名前検索時にファイルID、行番号、シンボルタイプを即座に取得
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_classes_covering ON classes(name_id, file_id, line_number, symbol_type)", [])?;
     conn.execute("CREATE INDEX IF NOT EXISTS idx_classes_file_id ON classes(file_id)", [])?;
     
     // 4. Members
@@ -132,7 +133,8 @@ pub fn init_db(conn: &Connection) -> rusqlite::Result<()> {
         )",
         [],
     )?;
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_members_class_id ON members(class_id)", [])?;
+    // Covering Index for member listing
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_members_covering ON members(class_id, name_id, type_id, line_number, access, flags)", [])?;
     conn.execute("CREATE INDEX IF NOT EXISTS idx_members_name_id ON members(name_id)", [])?;
     conn.execute("CREATE INDEX IF NOT EXISTS idx_members_file_id ON members(file_id)", [])?;
 
@@ -155,13 +157,21 @@ pub fn init_db(conn: &Connection) -> rusqlite::Result<()> {
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             child_id INTEGER NOT NULL,
             parent_name_id INTEGER NOT NULL,
+            parent_class_id INTEGER, -- ★高速化：親クラスの直接ID
             FOREIGN KEY(child_id) REFERENCES classes(id) ON DELETE CASCADE,
-            FOREIGN KEY(parent_name_id) REFERENCES strings(id)
+            FOREIGN KEY(parent_name_id) REFERENCES strings(id),
+            FOREIGN KEY(parent_class_id) REFERENCES classes(id) ON DELETE SET NULL
         )",
         [],
     )?;
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_inheritance_child_id ON inheritance(child_id)", [])?;
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_inheritance_parent_class_id ON inheritance(parent_class_id)", [])?;
 
-    // 7. Project Meta
+    // 7. FTS5 Virtual Table for Symbols (Lightning fast searching)
+    // NOTE: FTS5 requires SQLite to be compiled with it, which is standard in most modern distros.
+    let _ = conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS symbols_fts USING fts5(name, type, class_name UNINDEXED, rowid_ref UNINDEXED)", []);
+
+    // 8. Project Meta
     conn.execute(
         "CREATE TABLE IF NOT EXISTS project_meta (
             key TEXT PRIMARY KEY,
@@ -259,14 +269,13 @@ pub fn save_to_db(conn: &mut Connection, results: &[ParseResult], reporter: Arc<
             let mut stmt_del_file = tx.prepare("DELETE FROM files WHERE path_id = ?")?;
             let mut stmt_file = tx.prepare("INSERT INTO files (path_id, filename_id, extension, mtime, file_hash, module_id, is_header) VALUES (?, ?, ?, ?, ?, ?, ?)")?;
             let mut stmt_class = tx.prepare("INSERT INTO classes (name_id, namespace_id, base_class_id, file_id, line_number, symbol_type, end_line_number) VALUES (?, ?, ?, ?, ?, ?, ?)")?;
-            let mut stmt_class_id = tx.prepare("SELECT id FROM classes WHERE name_id = ? AND file_id = ? LIMIT 1")?;
             let mut stmt_inheritance = tx.prepare("INSERT INTO inheritance (child_id, parent_name_id) VALUES (?, ?)")?;
             let mut stmt_enum = tx.prepare("INSERT INTO enum_values (enum_id, name_id) VALUES (?, ?)")?;
             let mut stmt_member = tx.prepare("INSERT INTO members (class_id, name_id, type_id, flags, access, detail, return_type_id, is_static, line_number, file_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")?;
-            let mut stmt_call = tx.prepare("INSERT INTO symbol_calls (file_id, line, name_id) VALUES (?, ?, ?)")?;
+            let mut stmt_fts = tx.prepare("INSERT INTO symbols_fts (name, type, class_name, rowid_ref) VALUES (?, ?, ?, ?)")?;
 
-            for (i, result) in batch.iter().enumerate() {
-                let global_i = current_idx + i;
+            for (_i, result) in batch.iter().enumerate() {
+                let global_i = current_idx + _i;
                 if global_i % 200 == 0 {
                     reporter.report("db_sync", global_i, total, &format!("Saving results ({}/{})", global_i, total));
                 }
@@ -290,7 +299,6 @@ pub fn save_to_db(conn: &mut Connection, results: &[ParseResult], reporter: Arc<
                 let path_id = get_or_create_string(&tx, &mut string_cache, &result.path)?;
                 let filename_id = get_or_create_string(&tx, &mut string_cache, filename)?;
                 
-                // 明示的に古いデータを消す（CASCADE発火）
                 let _ = stmt_del_file.execute([path_id]);
 
                 let file_res = stmt_file.execute(params![
@@ -300,12 +308,6 @@ pub fn save_to_db(conn: &mut Connection, results: &[ParseResult], reporter: Arc<
 
                 if file_res.is_ok() {
                     let file_id: i64 = tx.last_insert_rowid();
-
-                    // Save Symbol Calls (C++ usages)
-                    for call in &data.calls {
-                        let call_name_id = get_or_create_string(&tx, &mut string_cache, &call.name)?;
-                        let _ = stmt_call.execute(params![file_id, call.line as i64, call_name_id]);
-                    }
 
                     for cls in &data.classes {
                         let cls_name_id = get_or_create_string(&tx, &mut string_cache, &cls.class_name)?;
@@ -322,33 +324,34 @@ pub fn save_to_db(conn: &mut Connection, results: &[ParseResult], reporter: Arc<
                             cls_name_id, ns_id, base_id, file_id, cls.line as i64, cls.symbol_type, cls.end_line as i64
                         ]);
                         
-                        let class_id_res: rusqlite::Result<i64> = stmt_class_id.query_row(
-                            params![cls_name_id, file_id],
-                            |row| row.get(0),
-                        );
+                        let class_id: i64 = tx.last_insert_rowid();
+                        
+                        // FTS Index: Class
+                        let _ = stmt_fts.execute(params![cls.class_name, cls.symbol_type, cls.class_name, class_id]);
 
-                        if let Ok(class_id) = class_id_res {
-                            for parent in &cls.base_classes {
-                                let p_name_id = get_or_create_string(&tx, &mut string_cache, parent)?;
-                                let _ = stmt_inheritance.execute(params![class_id, p_name_id]);
-                            }
+                        for parent in &cls.base_classes {
+                            let p_name_id = get_or_create_string(&tx, &mut string_cache, parent)?;
+                            let _ = stmt_inheritance.execute(params![class_id, p_name_id]);
+                        }
 
-                            for mem in &cls.members {
-                                let mem_name_id = get_or_create_string(&tx, &mut string_cache, &mem.name)?;
-                                if mem.mem_type == "enum_item" {
-                                    let _ = stmt_enum.execute(params![class_id, mem_name_id]);
-                                } else {
-                                    let is_static = if mem.flags.contains("static") { 1 } else { 0 };
-                                    let type_id = get_or_create_string(&tx, &mut string_cache, &mem.mem_type)?;
-                                    let rt_id = match &mem.return_type {
-                                        Some(rt) => Some(get_or_create_string(&tx, &mut string_cache, rt)?),
-                                        None => None,
-                                    };
+                        for mem in &cls.members {
+                            let mem_name_id = get_or_create_string(&tx, &mut string_cache, &mem.name)?;
+                            if mem.mem_type == "enum_item" {
+                                let _ = stmt_enum.execute(params![class_id, mem_name_id]);
+                            } else {
+                                let is_static = if mem.flags.contains("static") { 1 } else { 0 };
+                                let type_id = get_or_create_string(&tx, &mut string_cache, &mem.mem_type)?;
+                                let rt_id = match &mem.return_type {
+                                    Some(rt) => Some(get_or_create_string(&tx, &mut string_cache, rt)?),
+                                    None => None,
+                                };
 
-                                    let _ = stmt_member.execute(params![
-                                        class_id, mem_name_id, type_id, mem.flags, mem.access, mem.detail, rt_id, is_static, mem.line as i64, file_id
-                                    ]);
-                                }
+                                let _ = stmt_member.execute(params![
+                                    class_id, mem_name_id, type_id, mem.flags, mem.access, mem.detail, rt_id, is_static, mem.line as i64, file_id
+                                ]);
+                                
+                                // FTS Index: Member
+                                let _ = stmt_fts.execute(params![mem.name, mem.mem_type, cls.class_name, tx.last_insert_rowid()]);
                             }
                         }
                     }
@@ -359,10 +362,21 @@ pub fn save_to_db(conn: &mut Connection, results: &[ParseResult], reporter: Arc<
         current_idx = end_idx;
     }
 
+    // 後処理：継承関係のID解決を一括で行う
+    reporter.report("finalizing", 80, 100, "Optimizing inheritance graph...");
+    conn.execute(
+        "UPDATE inheritance SET parent_class_id = (
+            SELECT c.id FROM classes c 
+            JOIN strings s ON c.name_id = s.id 
+            WHERE s.id = inheritance.parent_name_id 
+            LIMIT 1
+        ) WHERE parent_class_id IS NULL",
+        [],
+    )?;
+
     // Finalize
-    reporter.report("finalizing", 50, 100, "Finalizing database (Integrating WAL)...");
-    let _ = conn.pragma_update(None, "synchronous", "NORMAL"); 
-    let _ = conn.execute("PRAGMA wal_checkpoint(RESTART)", []);
+    reporter.report("finalizing", 90, 100, "Vacuuming and optimizing...");
+    let _ = conn.execute("ANALYZE", []);
     let _ = conn.execute("PRAGMA optimize", []);
     reporter.report("finalizing", 100, 100, "Database finalized.");
     
