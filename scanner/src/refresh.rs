@@ -258,7 +258,7 @@ pub fn run_refresh(req: RefreshRequest, reporter: Arc<dyn ProgressReporter>) -> 
     let mut sorted_roots: Vec<(String, i64)> = mod_id_map.into_iter().collect();
     sorted_roots.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
 
-    let mut headers_to_parse = Vec::new();
+    let mut files_to_parse = Vec::new();
     let mut other_files = Vec::new();
     let mut current_on_disk = HashSet::new();
 
@@ -287,8 +287,8 @@ pub fn run_refresh(req: RefreshRequest, reporter: Arc<dyn ProgressReporter>) -> 
                 }
             }
 
-            if ext == "h" || ext == "hpp" {
-                headers_to_parse.push(InputFile { path: path_str, mtime: mtime as u64, old_hash: None, module_id: Some(mod_id), db_path: None });
+            if ext == "h" || ext == "hpp" || ext == "cpp" || ext == "cc" || ext == "c" || ext == "inl" {
+                files_to_parse.push(InputFile { path: path_str, mtime: mtime as u64, old_hash: None, module_id: Some(mod_id), db_path: None });
             } else {
                 other_files.push((path_str, mtime, mod_id, ext));
             }
@@ -310,13 +310,13 @@ pub fn run_refresh(req: RefreshRequest, reporter: Arc<dyn ProgressReporter>) -> 
     }
     tx.commit()?;
 
-    if !headers_to_parse.is_empty() {
-        reporter.report("analysis", 0, headers_to_parse.len(), &format!("Analyzing {} changed headers...", headers_to_parse.len()));
+    if !files_to_parse.is_empty() {
+        reporter.report("analysis", 0, files_to_parse.len(), &format!("Analyzing {} changed files...", files_to_parse.len()));
         let language = tree_sitter_unreal_cpp::LANGUAGE.into();
         let query = Arc::new(Query::new(&language, scanner::QUERY_STR).expect("Failed to parse query"));
         let processed_count = Arc::new(AtomicUsize::new(0));
-        let total = headers_to_parse.len();
-        let results: Vec<ParseResult> = headers_to_parse.into_par_iter().map(|input| {
+        let total = files_to_parse.len();
+        let results: Vec<ParseResult> = files_to_parse.into_par_iter().map(|input| {
             let res = scanner::process_file(&input, &language, &query).unwrap_or_else(|_| ParseResult { path: input.path, status: "error".to_string(), mtime: input.mtime, data: None, module_id: input.module_id });
             let current = processed_count.fetch_add(1, Ordering::Relaxed) + 1;
             if current % 20 == 0 || current == total { reporter.report("analysis", current, total, &format!("Analyzing: {}/{}", current, total)); }

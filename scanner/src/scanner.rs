@@ -319,7 +319,11 @@ pub fn parse_content(content: &str, _path: &str, language: &tree_sitter::Languag
             if member_name.is_empty() { continue; }
 
             let mut flags = Vec::new();
-            let mut access = "public".to_string();
+            let mut access = if scope_name.is_some() && (*capture_name == "func_node" || *capture_name == "ufunc_node") {
+                "impl".to_string()
+            } else {
+                "public".to_string()
+            };
             
             if has_child_type(definition_node, "ufunction_macro") || has_child_type(definition_node, "unreal_function_macro") || definition_node.kind() == "unreal_function_declaration" {
                 flags.push("UFUNCTION");
