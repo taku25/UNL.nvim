@@ -50,7 +50,7 @@ pub fn init_db(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute(
         "CREATE TABLE IF NOT EXISTS strings (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            text TEXT NOT NULL UNIQUE
+            text TEXT NOT NULL UNIQUE COLLATE NOCASE
         )",
         [],
     )?;

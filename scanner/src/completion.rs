@@ -1,4 +1,4 @@
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, params, OptionalExtension};
 use serde_json::{json, Value};
 use tree_sitter::{Parser, Point, Node, Query, QueryCursor, StreamingIterator};
 use std::collections::HashMap;
@@ -9,6 +9,7 @@ struct RequestContext<'a> {
     conn: &'a Connection,
     file_cache: HashMap<String, Vec<String>>,
     inheritance_cache: HashMap<(String, String), bool>,
+    string_id_cache: HashMap<String, i64>,
 }
 
 impl<'a> RequestContext<'a> {
@@ -17,7 +18,37 @@ impl<'a> RequestContext<'a> {
             conn,
             file_cache: HashMap::new(),
             inheritance_cache: HashMap::new(),
+            string_id_cache: HashMap::new(),
         }
+    }
+
+    fn get_string_id(&mut self, text: &str) -> anyhow::Result<Option<i64>> {
+        let text = text.trim();
+        if text.is_empty() { return Ok(None); }
+        if let Some(&id) = self.string_id_cache.get(text) {
+            return Ok(Some(id));
+        }
+        let id: Option<i64> = self.conn.query_row(
+            "SELECT id FROM strings WHERE text = ?",
+            [text],
+            |row| row.get(0)
+        ).optional()?;
+        if let Some(id_val) = id {
+            self.string_id_cache.insert(text.to_string(), id_val);
+        }
+        Ok(id)
+    }
+
+    fn get_class_id_by_name(&mut self, class_name: &str) -> anyhow::Result<Option<i64>> {
+        if let Some(name_id) = self.get_string_id(class_name)? {
+            let class_id: Option<i64> = self.conn.query_row(
+                "SELECT id FROM classes WHERE name_id = ? LIMIT 1",
+                [name_id],
+                |row| row.get(0)
+            ).optional()?;
+            return Ok(class_id);
+        }
+        Ok(None)
     }
 }
 
@@ -269,12 +300,12 @@ fn resolve_expression_type(
                     return Ok(Some(rt));
                 }
             }
-            if is_known_type(ctx.conn, name)? { return Ok(Some(name.to_string())); }
+            if is_known_type(ctx, name)? { return Ok(Some(name.to_string())); }
             Ok(None)
         }
         "qualified_identifier" => {
             let text = get_node_text(&node, content).trim();
-            if is_known_type(ctx.conn, text)? { return Ok(Some(text.to_string())); }
+            if is_known_type(ctx, text)? { return Ok(Some(text.to_string())); }
             if text.contains("::") {
                 let parts: Vec<&str> = text.split("::").collect();
                 if parts.len() >= 2 {
@@ -408,23 +439,27 @@ fn get_template_argument(inner: &str, index: usize) -> &str {
 fn find_member_return_type(ctx: &mut RequestContext, class_name: &str, member_name: &str) -> anyhow::Result<Option<String>> {
     let clean_class = extract_clean_type(class_name);
     let resolved_class = resolve_typedef(ctx, &clean_class)?;
-    let mut queue = vec![resolved_class];
+    
+    let start_class_id = match ctx.get_class_id_by_name(&resolved_class)? {
+        Some(id) => id,
+        None => return Ok(None),
+    };
+
+    let mut queue = vec![start_class_id];
     let mut visited = HashMap::new();
-    while let Some(cls) = queue.pop() {
-        if visited.contains_key(&cls) { continue; }
-        visited.insert(cls.clone(), true);
+    while let Some(cls_id) = queue.pop() {
+        if visited.contains_key(&cls_id) { continue; }
+        visited.insert(cls_id, true);
         
         let mut stmt = ctx.conn.prepare("
             SELECT srt.text FROM members m 
-            JOIN classes c ON m.class_id = c.id 
-            JOIN strings sc ON c.name_id = sc.id
             JOIN strings sm ON m.name_id = sm.id
             LEFT JOIN strings srt ON m.return_type_id = srt.id
-            WHERE LOWER(sc.text) = LOWER(?) AND LOWER(sm.text) = LOWER(?) 
+            WHERE m.class_id = ? AND sm.text = ? 
             ORDER BY (CASE WHEN srt.text = 'T' OR srt.text = 'T*' OR srt.text = 'void' THEN 1 ELSE 0 END) ASC, length(srt.text) DESC 
             LIMIT 1
         ")?;
-        let mut rows = stmt.query([&cls, member_name])?;
+        let mut rows = stmt.query(params![cls_id, member_name])?;
         if let Some(row) = rows.next()? {
             if let Some(rt) = row.get::<_, Option<String>>(0)? {
                 return Ok(Some(extract_clean_type(&rt)));
@@ -432,13 +467,18 @@ fn find_member_return_type(ctx: &mut RequestContext, class_name: &str, member_na
         }
         
         let mut p_stmt = ctx.conn.prepare("
-            SELECT si.text FROM inheritance i 
-            JOIN classes c ON i.child_id = c.id 
-            JOIN strings sc ON c.name_id = sc.id
+            SELECT parent_class_id, si.text FROM inheritance i 
             JOIN strings si ON i.parent_name_id = si.id
-            WHERE LOWER(sc.text) = LOWER(?)")?;
-        let p_rows = p_stmt.query_map([&cls], |r| Ok(r.get::<_, String>(0)?))?;
-        for p in p_rows { queue.push(p?); }
+            WHERE child_id = ?")?;
+        let p_rows = p_stmt.query_map([cls_id], |r| Ok((r.get::<_, Option<i64>>(0)?, r.get::<_, String>(1)?)))?;
+        for p in p_rows { 
+            let (p_id, p_name) = p?;
+            if let Some(id) = p_id {
+                queue.push(id);
+            } else if let Some(id) = ctx.get_class_id_by_name(&p_name)? {
+                queue.push(id);
+            }
+        }
     }
     Ok(None)
 }
@@ -481,13 +521,17 @@ fn resolve_typedef(ctx: &mut RequestContext, type_name: &str) -> anyhow::Result<
     let mut current = extract_clean_type(type_name);
     if current.is_empty() || current == "T" || current == "void" { return Ok(current); }
     for _ in 0..3 {
+        let name_id = match ctx.get_string_id(&current)? {
+            Some(id) => id,
+            None => break,
+        };
+
         let mut stmt = ctx.conn.prepare("
             SELECT sbc.text FROM classes c 
-            JOIN strings sc ON c.name_id = sc.id
             JOIN strings sbc ON c.base_class_id = sbc.id
-            WHERE LOWER(sc.text) = LOWER(?) AND symbol_type = 'typedef' LIMIT 1
+            WHERE c.name_id = ? AND symbol_type = 'typedef' LIMIT 1
         ")?;
-        let mut rows = stmt.query([&current])?;
+        let mut rows = stmt.query([name_id])?;
         if let Some(row) = rows.next()? {
             if let Some(base) = row.get::<_, Option<String>>(0)? {
                 let clean = extract_clean_type(&base);
@@ -517,24 +561,38 @@ fn is_subclass_of(ctx: &mut RequestContext, child: &str, parent: &str) -> anyhow
     let cache_key = (child.to_string(), parent.to_string());
     if let Some(&res) = ctx.inheritance_cache.get(&cache_key) { return Ok(res); }
 
-    let mut queue = vec![child.to_string()];
+    let child_id = match ctx.get_class_id_by_name(child)? {
+        Some(id) => id,
+        None => return Ok(false),
+    };
+    let parent_id = ctx.get_class_id_by_name(parent)?;
+
+    let mut queue = vec![child_id];
     let mut visited = HashMap::new();
     let mut found = false;
-    while let Some(current) = queue.pop() {
-        if current == parent { found = true; break; }
-        if visited.contains_key(&current) { continue; }
-        visited.insert(current.clone(), true);
+    while let Some(current_id) = queue.pop() {
+        if let Some(pid) = parent_id {
+            if current_id == pid { found = true; break; }
+        }
+        
+        if visited.contains_key(&current_id) { continue; }
+        visited.insert(current_id, true);
 
         let mut stmt = ctx.conn.prepare("
-            SELECT si.text FROM inheritance i 
-            JOIN classes c ON i.child_id = c.id 
-            JOIN strings sc ON c.name_id = sc.id
+            SELECT parent_class_id, si.text FROM inheritance i 
             JOIN strings si ON i.parent_name_id = si.id
-            WHERE LOWER(sc.text) = LOWER(?)")?;
-        let p_rows = stmt.query_map([&current], |r| Ok(r.get::<_, String>(0)?))?;
+            WHERE child_id = ?")?;
+        let p_rows = stmt.query_map([current_id], |r| Ok((r.get::<_, Option<i64>>(0)?, r.get::<_, String>(1)?)))?;
         for p in p_rows {
-            queue.push(p?);
+            let (p_id, p_name) = p?;
+            if p_name == parent { found = true; break; }
+            if let Some(id) = p_id {
+                queue.push(id);
+            } else if let Some(id) = ctx.get_class_id_by_name(&p_name)? {
+                queue.push(id);
+            }
         }
+        if found { break; }
     }
     ctx.inheritance_cache.insert(cache_key, found);
     Ok(found)
@@ -576,120 +634,128 @@ fn fetch_members_recursive(
         }
     }
 
+    let start_class_id = match ctx.get_class_id_by_name(class_name)? {
+        Some(id) => id,
+        None => return Ok(Vec::new()),
+    };
+
     let mut result = Vec::new();
-    let mut queue = vec![class_name.to_string()];
+    let mut queue = vec![start_class_id];
     let mut visited = HashMap::new();
-    let prefix_search = prefix.as_ref().map(|p| format!("{}%", p.to_lowercase()));
+    let prefix_search = prefix.as_ref().map(|p| format!("{}%", p));
 
-    while let Some(current) = queue.pop() {
-        if visited.contains_key(&current) { continue; }
-        visited.insert(current.clone(), true);
+    while let Some(current_class_id) = queue.pop() {
+        if visited.contains_key(&current_class_id) { continue; }
+        visited.insert(current_class_id, true);
         
-        let mut stmt = ctx.conn.prepare("
-            SELECT c.id FROM classes c 
-            JOIN strings sc ON c.name_id = sc.id
-            WHERE LOWER(sc.text) = LOWER(?)
-        ")?;
-        let class_ids: Vec<i64> = stmt.query_map([&current], |row| row.get(0))?
-            .filter_map(|r| r.ok())
-            .collect();
+        let mut sql = "
+            SELECT smn.text, smt.text, srt.text, access, detail, m.line_number, sp.text
+            FROM members m 
+            JOIN strings smn ON m.name_id = smn.id
+            JOIN strings smt ON m.type_id = smt.id
+            LEFT JOIN strings srt ON m.return_type_id = srt.id
+            LEFT JOIN files f ON m.file_id = f.id
+            LEFT JOIN strings sp ON f.path_id = sp.id
+            WHERE m.class_id = ?".to_string();
+        
+        if prefix_search.is_some() {
+            sql.push_str(" AND smn.text LIKE ?");
+        }
+        sql.push_str(" ORDER BY smn.text ASC LIMIT 200");
 
-        for class_id in class_ids {
-            let mut sql = "
-                SELECT smn.text, smt.text, srt.text, access, is_static, detail, m.line_number, sp.text
-                FROM members m 
-                JOIN strings smn ON m.name_id = smn.id
-                JOIN strings smt ON m.type_id = smt.id
-                LEFT JOIN strings srt ON m.return_type_id = srt.id
-                LEFT JOIN files f ON m.file_id = f.id
-                LEFT JOIN strings sp ON f.path_id = sp.id
-                WHERE class_id = ?".to_string();
-            
-            if prefix_search.is_some() {
-                sql.push_str(" AND LOWER(smn.text) LIKE ?");
-            }
-            sql.push_str(" ORDER BY smn.text ASC LIMIT 200");
+        let mut mem_stmt = ctx.conn.prepare(&sql)?;
+        
+        type MemberRow = (String, String, Option<String>, Option<String>, Option<String>, usize, Option<String>);
+        let member_data: Vec<MemberRow> = if let Some(p) = &prefix_search {
+            let m_rows = mem_stmt.query_map(params![current_class_id, p], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<usize>>(5)?.unwrap_or(0),
+                    row.get::<_, Option<String>>(6).ok().flatten(),
+                ))
+            })?;
+            m_rows.filter_map(|r| r.ok()).collect()
+        } else {
+            let m_rows = mem_stmt.query_map([current_class_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<usize>>(5)?.unwrap_or(0),
+                    row.get::<_, Option<String>>(6).ok().flatten(),
+                ))
+            })?;
+            m_rows.filter_map(|r| r.ok()).collect()
+        };
 
-            let mut mem_stmt = ctx.conn.prepare(&sql)?;
-            
-            type MemberRow = (String, String, Option<String>, Option<String>, Option<String>, usize, Option<String>);
-            let member_data: Vec<MemberRow> = if let Some(p) = &prefix_search {
-                let m_rows = mem_stmt.query_map(params![class_id, p], |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, Option<String>>(2)?,
-                        row.get::<_, Option<String>>(3)?,
-                        row.get::<_, Option<String>>(5)?,
-                        row.get::<_, Option<usize>>(6)?.unwrap_or(0),
-                        row.get::<_, Option<String>>(7).ok().flatten(),
-                    ))
-                })?;
-                m_rows.filter_map(|r| r.ok()).collect()
+        for (m_name, m_type, r_type, access, detail, line, f_path) in member_data {
+            let access_str = access.as_deref().unwrap_or("");
+
+            // 判定を大幅に緩和
+            let is_accessible = if accessor_val.is_empty() {
+                // クラス外からのアクセス
+                access_str == "public" || access_str.is_empty()
+            } else if accessor_val == class_name {
+                true
+            } else if access_str == "private" {
+                false
+            } else if access_str == "protected" {
+                is_subclass_of(ctx, accessor_val, class_name).unwrap_or(false)
             } else {
-                let m_rows = mem_stmt.query_map([class_id], |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, Option<String>>(2)?,
-                        row.get::<_, Option<String>>(3)?,
-                        row.get::<_, Option<String>>(5)?,
-                        row.get::<_, Option<usize>>(6)?.unwrap_or(0),
-                        row.get::<_, Option<String>>(7).ok().flatten(),
-                    ))
-                })?;
-                m_rows.filter_map(|r| r.ok()).collect()
+                true // public or empty
             };
 
-            for (m_name, m_type, r_type, access, detail, line, f_path) in member_data {
-                let access_str = access.as_deref().unwrap_or("");
+            if !is_accessible { continue; }
 
-                // 判定を大幅に緩和
-                let is_accessible = if accessor_val.is_empty() {
-                    // クラス外からのアクセス
-                    access_str == "public" || access_str.is_empty()
-                } else if accessor_val == current {
-                    true
-                } else if access_str == "private" {
-                    false
-                } else if access_str == "protected" {
-                    is_subclass_of(ctx, accessor_val, &current).unwrap_or(false)
-                } else {
-                    true // public or empty
-                };
+            let doc = if let Some(path) = f_path {
+                let mut comment = extract_comment_from_file(&path, line, &mut ctx.file_cache);
+                if let Some(d) = &detail {
+                    if !comment.is_empty() { comment.push_str("\n\n"); }
+                    comment.push_str(d);
+                }
+                comment
+            } else {
+                detail.clone().unwrap_or_default()
+            };
 
-                if !is_accessible { continue; }
+            result.push(json!({ 
+                "label": m_name, 
+                "kind": map_kind(&m_type), 
+                "detail": r_type.unwrap_or_default(), 
+                "documentation": doc, 
+                "insertText": m_name 
+            }));
+        }
 
-                let doc = if let Some(path) = f_path {
-                    let mut comment = extract_comment_from_file(&path, line, &mut ctx.file_cache);
-                    if let Some(d) = &detail {
-                        if !comment.is_empty() { comment.push_str("\n\n"); }
-                        comment.push_str(d);
-                    }
-                    comment
-                } else {
-                    detail.clone().unwrap_or_default()
-                };
-
-                result.push(json!({ 
-                    "label": m_name, 
-                    "kind": map_kind(&m_type), 
-                    "detail": r_type.unwrap_or_default(), 
-                    "documentation": doc, 
-                    "insertText": m_name 
-                }));
+        let mut enum_stmt = ctx.conn.prepare("SELECT sen.text FROM enum_values ev JOIN strings sen ON ev.name_id = sen.id WHERE enum_id = ?")?;
+        let enum_rows = enum_stmt.query_map([current_class_id], |row| {
+            let e_name: String = row.get(0)?;
+            Ok(json!({ "label": e_name, "kind": 20, "detail": "enum item", "insertText": e_name }))
+        })?;
+        for e in enum_rows { result.push(e?); }
+        
+        let mut parent_stmt = ctx.conn.prepare("SELECT parent_class_id, si.text FROM inheritance i JOIN strings si ON i.parent_name_id = si.id WHERE child_id = ?")?;
+        let p_rows = parent_stmt.query_map([current_class_id], |row| {
+            let p_id: Option<i64> = row.get(0)?;
+            let p_name: String = row.get(1)?;
+            Ok((p_id, p_name))
+        })?;
+        for p in p_rows {
+            let (p_id, p_name) = p?;
+            if let Some(id) = p_id {
+                queue.push(id);
+            } else {
+                // IDがない場合は名前で検索（外部定義など）
+                if let Some(id) = ctx.get_class_id_by_name(&p_name)? {
+                    queue.push(id);
+                }
             }
-
-            let mut enum_stmt = ctx.conn.prepare("SELECT sen.text FROM enum_values ev JOIN strings sen ON ev.name_id = sen.id WHERE enum_id = ?")?;
-            let enum_rows = enum_stmt.query_map([class_id], |row| {
-                let e_name: String = row.get(0)?;
-                Ok(json!({ "label": e_name, "kind": 20, "detail": "enum item", "insertText": e_name }))
-            })?;
-            for e in enum_rows { result.push(e?); }
-            
-            let mut parent_stmt = ctx.conn.prepare("SELECT si.text FROM inheritance i JOIN strings si ON i.parent_name_id = si.id WHERE child_id = ?")?;
-            let p_rows = parent_stmt.query_map([class_id], |row| Ok(row.get::<_, String>(0)?))?;
-            for p in p_rows { queue.push(p?); }
         }
         if result.len() >= 500 { break; }
     }
@@ -716,7 +782,7 @@ fn fetch_members_recursive(
 
 fn fetch_global_symbols(conn: &Connection, prefix: &str) -> anyhow::Result<Value> {
     let mut results = Vec::new();
-    let mut stmt = conn.prepare("SELECT s.text, symbol_type FROM classes c JOIN strings s ON c.name_id = s.id WHERE LOWER(s.text) LIKE LOWER(?) AND symbol_type IN ('class', 'struct', 'enum') LIMIT 50")?;
+    let mut stmt = conn.prepare("SELECT s.text, symbol_type FROM classes c JOIN strings s ON c.name_id = s.id WHERE s.text LIKE ? AND symbol_type IN ('class', 'struct', 'enum') LIMIT 50")?;
     let rows = stmt.query_map([format!("{}%", prefix)], |row| {
         let name: String = row.get(0)?;
         let sym_type: String = row.get(1)?;
@@ -817,11 +883,18 @@ fn extract_comment_from_file(file_path: &str, line_number: usize, file_cache: &m
     comment_lines.join("\n")
 }
 
-fn is_known_type(conn: &Connection, name: &str) -> anyhow::Result<bool> {
+fn is_known_type(ctx: &mut RequestContext, name: &str) -> anyhow::Result<bool> {
     let clean = extract_clean_type(name);
     if clean.is_empty() { return Ok(false); }
-    let mut stmt = conn.prepare("SELECT 1 FROM classes c JOIN strings s ON c.name_id = s.id WHERE LOWER(s.text) = LOWER(?) LIMIT 1")?;
-    Ok(stmt.exists([&clean])?)
+    if let Some(id) = ctx.get_string_id(&clean)? {
+        let exists: bool = ctx.conn.query_row(
+            "SELECT 1 FROM classes WHERE name_id = ? LIMIT 1",
+            [id],
+            |_| Ok(true)
+        ).optional()?.unwrap_or(false);
+        return Ok(exists);
+    }
+    Ok(false)
 }
 
 fn infer_variable_type(ctx: &mut RequestContext, target_name: &str, root: &Node, content: &str, cursor_row: usize) -> anyhow::Result<Option<String>> {
