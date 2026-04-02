@@ -154,7 +154,7 @@ pub fn process_completion(
         let mut results = Vec::new();
 
         if let Some(current_class) = get_enclosing_class_name(&node, content) {
-            if let Ok(members) = fetch_members_recursive(conn, &current_class, Some(prefix.to_string()), cache.as_ref().map(|c| Arc::clone(c)), persistent_cache.clone()) {
+            if let Ok(members) = fetch_members_recursive(conn, &current_class, Some(prefix.to_string()), cache.as_ref().map(|c| Arc::clone(c)), persistent_cache.clone(), Some(&current_class)) {
                 results.extend(members);
             }
         }
@@ -218,9 +218,10 @@ fn resolve_node_and_fetch_members(
 ) -> anyhow::Result<Value> {
     if let Some(t_name) = resolve_expression_type(conn, node, root, content, cursor_row)? {
         let resolved = resolve_typedef(conn, &t_name)?;
-        tracing::info!("Final type for member lookup: '{}', prefix: {:?}", resolved, prefix);
+        let current_class = get_enclosing_class_name(&node, content);
+        tracing::info!("Final type for member lookup: '{}', current_class: {:?}, prefix: {:?}", resolved, current_class, prefix);
         
-        let members = fetch_members_recursive(conn, &resolved, prefix, cache, persistent_cache)?;
+        let members = fetch_members_recursive(conn, &resolved, prefix, cache, persistent_cache, current_class.as_deref())?;
         return Ok(json!(members));
     }
     Ok(json!([]))
@@ -489,8 +490,31 @@ fn resolve_static_members(
 ) -> anyhow::Result<Value> {
     let clean_scope = extract_clean_type(scope_name);
     let t_name = resolve_typedef(conn, &clean_scope)?;
-    let members = fetch_members_recursive(conn, &t_name, prefix, cache, persistent_cache)?;
+    let members = fetch_members_recursive(conn, &t_name, prefix, cache, persistent_cache, None)?;
     Ok(json!(members))
+}
+
+fn is_subclass_of(conn: &Connection, child: &str, parent: &str) -> anyhow::Result<bool> {
+    if child == parent { return Ok(true); }
+    let mut queue = vec![child.to_string()];
+    let mut visited = HashMap::new();
+    while let Some(current) = queue.pop() {
+        if current == parent { return Ok(true); }
+        if visited.contains_key(&current) { continue; }
+        visited.insert(current.clone(), true);
+
+        let mut stmt = conn.prepare("
+            SELECT si.text FROM inheritance i 
+            JOIN classes c ON i.child_id = c.id 
+            JOIN strings sc ON c.name_id = sc.id
+            JOIN strings si ON i.parent_name_id = si.id
+            WHERE LOWER(sc.text) = LOWER(?)")?;
+        let p_rows = stmt.query_map([&current], |r| Ok(r.get::<_, String>(0)?))?;
+        for p in p_rows {
+            queue.push(p?);
+        }
+    }
+    Ok(false)
 }
 
 fn fetch_members_recursive(
@@ -499,16 +523,17 @@ fn fetch_members_recursive(
     prefix: Option<String>, 
     cache: Option<Arc<Mutex<CompletionCache>>>,
     persistent_cache: Option<Arc<Mutex<Connection>>>,
+    accessor_class: Option<&str>,
 ) -> anyhow::Result<Vec<Value>> {
     let prefix_val = prefix.as_deref().unwrap_or("");
-    let cache_key = format!("{}:{}", class_name, prefix_val);
+    let accessor_val = accessor_class.unwrap_or("");
+    let cache_key = format!("{}:{}:{}", class_name, prefix_val, accessor_val);
     
     // 1. Try Memory Cache
     if let Some(c_mutex) = &cache {
         let mut c = c_mutex.lock().unwrap();
-        if let Some(cached) = c.get(class_name, prefix_val) {
+        if let Some(cached) = c.get(&cache_key, "") {
             if let Some(arr) = cached.as_array() {
-                tracing::info!("Memory Cache hit for class='{}', prefix='{}'", class_name, prefix_val);
                 return Ok(arr.clone());
             }
         }
@@ -522,19 +547,6 @@ fn fetch_members_recursive(
         if let Ok(blob) = res {
             if let Ok(arr_val) = serde_json::from_slice::<Value>(&blob) {
                 if let Some(arr) = arr_val.as_array() {
-                    tracing::info!("Persistent Cache hit for class='{}', prefix='{}'", class_name, prefix_val);
-                    
-                    // Update hit count and last_used
-                    let _ = pc.execute(
-                        "UPDATE persistent_cache SET hit_count = hit_count + 1, last_used = ? WHERE key = ?",
-                        params![std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64, cache_key],
-                    );
-
-                    // Backfill memory cache
-                    if let Some(c_mutex) = &cache {
-                        let mut c = c_mutex.lock().unwrap();
-                        c.put(class_name, prefix_val, arr_val.clone());
-                    }
                     return Ok(arr.clone());
                 }
             }
@@ -576,50 +588,74 @@ fn fetch_members_recursive(
             sql.push_str(" ORDER BY smn.text ASC LIMIT 200");
 
             let mut mem_stmt = conn.prepare(&sql)?;
-            if let Some(p) = &prefix_search {
-                let mem_rows = mem_stmt.query_map(params![class_id, p], |row| {
-                    let m_name: String = row.get(0)?;
-                    let m_type: String = row.get(1)?;
-                    let r_type: Option<String> = row.get(2)?;
-                    let detail: Option<String> = row.get(5)?;
-                    let line: usize = row.get::<_, Option<usize>>(6)?.unwrap_or(0);
-                    let f_path: Option<String> = row.get(7).ok();
-                    let doc = if let Some(path) = f_path {
-                        let mut comment = extract_comment_from_file(&path, line);
-                        if let Some(d) = detail {
-                            if !comment.is_empty() { comment.push_str("\n\n"); }
-                            comment.push_str(&d);
-                        }
-                        comment
-                    } else {
-                        detail.unwrap_or_default()
-                    };
-                    Ok(json!({ "label": m_name, "kind": map_kind(&m_type), "detail": r_type.unwrap_or_default(), "documentation": doc, "insertText": m_name }))
+            
+            type MemberRow = (String, String, Option<String>, Option<String>, Option<String>, usize, Option<String>);
+            let member_data: Vec<MemberRow> = if let Some(p) = &prefix_search {
+                let m_rows = mem_stmt.query_map(params![class_id, p], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, Option<String>>(5)?,
+                        row.get::<_, Option<usize>>(6)?.unwrap_or(0),
+                        row.get::<_, Option<String>>(7).ok().flatten(),
+                    ))
                 })?;
-                for m in mem_rows { result.push(m?); }
+                m_rows.filter_map(|r| r.ok()).collect()
             } else {
-                let mem_rows = mem_stmt.query_map([class_id], |row| {
-                    let m_name: String = row.get(0)?;
-                    let m_type: String = row.get(1)?;
-                    let r_type: Option<String> = row.get(2)?;
-                    let detail: Option<String> = row.get(5)?;
-                    let line: usize = row.get::<_, Option<usize>>(6)?.unwrap_or(0);
-                    let f_path: Option<String> = row.get(7).ok();
-                    let doc = if let Some(path) = f_path {
-                        let mut comment = extract_comment_from_file(&path, line);
-                        if let Some(d) = detail {
-                            if !comment.is_empty() { comment.push_str("\n\n"); }
-                            comment.push_str(&d);
-                        }
-                        comment
-                    } else {
-                        detail.unwrap_or_default()
-                    };
-                    Ok(json!({ "label": m_name, "kind": map_kind(&m_type), "detail": r_type.unwrap_or_default(), "documentation": doc, "insertText": m_name }))
+                let m_rows = mem_stmt.query_map([class_id], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, Option<String>>(5)?,
+                        row.get::<_, Option<usize>>(6)?.unwrap_or(0),
+                        row.get::<_, Option<String>>(7).ok().flatten(),
+                    ))
                 })?;
-                for m in mem_rows { result.push(m?); }
+                m_rows.filter_map(|r| r.ok()).collect()
             };
-            if result.len() >= 500 { break; }
+
+            for (m_name, m_type, r_type, access, detail, line, f_path) in member_data {
+                let access_str = access.as_deref().unwrap_or("");
+
+                // 判定を大幅に緩和
+                let is_accessible = if accessor_val.is_empty() {
+                    // クラス外からのアクセス
+                    access_str == "public" || access_str.is_empty()
+                } else if accessor_val == current {
+                    true
+                } else if access_str == "private" {
+                    false
+                } else if access_str == "protected" {
+                    is_subclass_of(conn, accessor_val, &current).unwrap_or(false)
+                } else {
+                    true // public or empty
+                };
+
+                if !is_accessible { continue; }
+
+                let doc = if let Some(path) = f_path {
+                    let mut comment = extract_comment_from_file(&path, line);
+                    if let Some(d) = &detail {
+                        if !comment.is_empty() { comment.push_str("\n\n"); }
+                        comment.push_str(d);
+                    }
+                    comment
+                } else {
+                    detail.clone().unwrap_or_default()
+                };
+
+                result.push(json!({ 
+                    "label": m_name, 
+                    "kind": map_kind(&m_type), 
+                    "detail": r_type.unwrap_or_default(), 
+                    "documentation": doc, 
+                    "insertText": m_name 
+                }));
+            }
 
             let mut enum_stmt = conn.prepare("SELECT sen.text FROM enum_values ev JOIN strings sen ON ev.name_id = sen.id WHERE enum_id = ?")?;
             let enum_rows = enum_stmt.query_map([class_id], |row| {
@@ -640,8 +676,7 @@ fn fetch_members_recursive(
     // 3. Store in Memory Cache
     if let Some(c_mutex) = &cache {
         let mut c = c_mutex.lock().unwrap();
-        tracing::info!("Caching results for class='{}', prefix='{}' ({} items)", class_name, prefix_val, result.len());
-        c.put(class_name, prefix_val, result_json.clone());
+        c.put(&cache_key, "", result_json.clone());
     }
 
     // 4. Store in Persistent Cache
@@ -649,19 +684,7 @@ fn fetch_members_recursive(
         let pc = pc_mutex.lock().unwrap();
         if let Ok(blob) = serde_json::to_vec(&result_json) {
             let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
-            let _ = pc.execute(
-                "INSERT OR REPLACE INTO persistent_cache (key, value, last_used) VALUES (?, ?, ?)",
-                params![cache_key, blob, now],
-            );
-
-            // LRU: Keep only top 1000 entries
-            let count: i64 = pc.query_row("SELECT COUNT(*) FROM persistent_cache", [], |r| r.get(0)).unwrap_or(0);
-            if count > 1000 {
-                let _ = pc.execute(
-                    "DELETE FROM persistent_cache WHERE key IN (SELECT key FROM persistent_cache ORDER BY last_used ASC LIMIT ?)",
-                    params![count - 1000],
-                );
-            }
+            let _ = pc.execute("INSERT OR REPLACE INTO persistent_cache (key, value, last_used) VALUES (?, ?, ?)", params![cache_key, blob, now]);
         }
     }
 
