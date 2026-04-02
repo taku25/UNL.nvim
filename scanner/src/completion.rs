@@ -5,6 +5,22 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use crate::server::state::CompletionCache;
 
+struct RequestContext<'a> {
+    conn: &'a Connection,
+    file_cache: HashMap<String, Vec<String>>,
+    inheritance_cache: HashMap<(String, String), bool>,
+}
+
+impl<'a> RequestContext<'a> {
+    fn new(conn: &'a Connection) -> Self {
+        Self {
+            conn,
+            file_cache: HashMap::new(),
+            inheritance_cache: HashMap::new(),
+        }
+    }
+}
+
 // 補完ロジックのメインエントリー
 pub fn process_completion(
     conn: &Connection,
@@ -16,6 +32,8 @@ pub fn process_completion(
     persistent_cache: Option<Arc<Mutex<Connection>>>,
 ) -> anyhow::Result<Value> {
     tracing::info!("--- Completion Request at {}:{} ---", line, character);
+    let mut ctx = RequestContext::new(conn);
+    
     let mut parser = Parser::new();
     let language: tree_sitter::Language = tree_sitter_unreal_cpp::LANGUAGE.into();
     parser.set_language(&language)?;
@@ -58,7 +76,7 @@ pub fn process_completion(
     }
 
     if let Some(t) = target_node {
-        return resolve_node_and_fetch_members(conn, t, &root, content, row, None, cache, persistent_cache);
+        return resolve_node_and_fetch_members(&mut ctx, t, &root, content, row, None, cache, persistent_cache);
     }
 
     let mut curr_opt = Some(node);
@@ -73,7 +91,7 @@ pub fn process_completion(
 
         if let Some(prev) = get_prev_meaningful_sibling(op_node) {
             tracing::info!("Operator detected (Case 1), target node: kind='{}', text='{}'", prev.kind(), get_node_text(&prev, content));
-            return resolve_node_and_fetch_members(conn, prev, &root, content, row, None, cache, persistent_cache);
+            return resolve_node_and_fetch_members(&mut ctx, prev, &root, content, row, None, cache, persistent_cache);
         } else {
             tracing::info!("Operator detected but no meaningful sibling found. Continuing to traverse up from parent.");
             curr_opt = node.parent(); // Move to parent and let Case 2 handle it
@@ -110,17 +128,17 @@ pub fn process_completion(
 
             if let Some(obj_node) = curr.child_by_field_name("argument") {
                 tracing::info!("Field expression detected (Case 2), resolving argument with prefix: {:?}", field_prefix);
-                return resolve_node_and_fetch_members(conn, obj_node, &root, content, row, field_prefix, cache, persistent_cache);
+                return resolve_node_and_fetch_members(&mut ctx, obj_node, &root, content, row, field_prefix, cache, persistent_cache);
             } else if let Some(first_child) = curr.child(0) {
                 if first_child.kind() != "." && first_child.kind() != "->" {
                     tracing::info!("Field expression detected (Fallback), resolving first child...");
-                    return resolve_node_and_fetch_members(conn, first_child, &root, content, row, field_prefix, cache, persistent_cache);
+                    return resolve_node_and_fetch_members(&mut ctx, first_child, &root, content, row, field_prefix, cache, persistent_cache);
                 }
             }
         } else if p_kind == "call_expression" && (node_type == "." || node_type == "->") {
              if let Some(func_node) = curr.child_by_field_name("function") {
                  tracing::info!("Call expression parent of operator detected, resolving function...");
-                 return resolve_node_and_fetch_members(conn, func_node, &root, content, row, None, cache, persistent_cache);
+                 return resolve_node_and_fetch_members(&mut ctx, func_node, &root, content, row, None, cache, persistent_cache);
              }
         } else if p_kind == "qualified_identifier" {
             let field_prefix = if let Some(name_node) = curr.child_by_field_name("name") {
@@ -129,7 +147,7 @@ pub fn process_completion(
 
             if let Some(scope_node) = curr.child_by_field_name("scope") {
                 tracing::info!("Qualified identifier detected (Case 2), resolving scope with prefix: {:?}", field_prefix);
-                return resolve_static_members(conn, get_node_text(&scope_node, content), field_prefix, cache, persistent_cache);
+                return resolve_static_members(&mut ctx, get_node_text(&scope_node, content), field_prefix, cache, persistent_cache);
             }
         } else if p_kind == "ERROR" {
             let count = curr.child_count();
@@ -139,7 +157,7 @@ pub fn process_completion(
                     if ck == "." || ck == "->" || ck == "::" {
                         if let Some(prev) = get_prev_meaningful_sibling(child) {
                              tracing::info!("Operator detected inside ERROR, resolving previous sibling...");
-                             return resolve_node_and_fetch_members(conn, prev, &root, content, row, None, cache, persistent_cache.clone());
+                             return resolve_node_and_fetch_members(&mut ctx, prev, &root, content, row, None, cache, persistent_cache.clone());
                         }
                     }
                 }
@@ -154,7 +172,7 @@ pub fn process_completion(
         let mut results = Vec::new();
 
         if let Some(current_class) = get_enclosing_class_name(&node, content) {
-            if let Ok(members) = fetch_members_recursive(conn, &current_class, Some(prefix.to_string()), cache.as_ref().map(|c| Arc::clone(c)), persistent_cache.clone(), Some(&current_class)) {
+            if let Ok(members) = fetch_members_recursive(&mut ctx, &current_class, Some(prefix.to_string()), cache.as_ref().map(|c| Arc::clone(c)), persistent_cache.clone(), Some(&current_class)) {
                 results.extend(members);
             }
         }
@@ -207,7 +225,7 @@ fn get_prev_meaningful_sibling(node: Node) -> Option<Node> {
 }
 
 fn resolve_node_and_fetch_members(
-    conn: &Connection,
+    ctx: &mut RequestContext,
     node: Node,
     root: &Node,
     content: &str,
@@ -216,19 +234,19 @@ fn resolve_node_and_fetch_members(
     cache: Option<Arc<Mutex<CompletionCache>>>,
     persistent_cache: Option<Arc<Mutex<Connection>>>,
 ) -> anyhow::Result<Value> {
-    if let Some(t_name) = resolve_expression_type(conn, node, root, content, cursor_row)? {
-        let resolved = resolve_typedef(conn, &t_name)?;
+    if let Some(t_name) = resolve_expression_type(ctx, node, root, content, cursor_row)? {
+        let resolved = resolve_typedef(ctx, &t_name)?;
         let current_class = get_enclosing_class_name(&node, content);
         tracing::info!("Final type for member lookup: '{}', current_class: {:?}, prefix: {:?}", resolved, current_class, prefix);
         
-        let members = fetch_members_recursive(conn, &resolved, prefix, cache, persistent_cache, current_class.as_deref())?;
+        let members = fetch_members_recursive(ctx, &resolved, prefix, cache, persistent_cache, current_class.as_deref())?;
         return Ok(json!(members));
     }
     Ok(json!([]))
 }
 
 fn resolve_expression_type(
-    conn: &Connection,
+    ctx: &mut RequestContext,
     node: Node,
     root: &Node,
     content: &str,
@@ -243,26 +261,26 @@ fn resolve_expression_type(
             let name = get_node_text(&node, content).trim();
             if name.is_empty() { return Ok(None); }
             if name == "this" { return Ok(get_enclosing_class_name(&node, content)); }
-            if let Some(t) = infer_variable_type(conn, name, root, content, cursor_row)? {
+            if let Some(t) = infer_variable_type(ctx, name, root, content, cursor_row)? {
                 return Ok(Some(t));
             }
             if let Some(current_class) = get_enclosing_class_name(&node, content) {
-                if let Some(rt) = find_member_return_type(conn, &current_class, name)? {
+                if let Some(rt) = find_member_return_type(ctx, &current_class, name)? {
                     return Ok(Some(rt));
                 }
             }
-            if is_known_type(conn, name)? { return Ok(Some(name.to_string())); }
+            if is_known_type(ctx.conn, name)? { return Ok(Some(name.to_string())); }
             Ok(None)
         }
         "qualified_identifier" => {
             let text = get_node_text(&node, content).trim();
-            if is_known_type(conn, text)? { return Ok(Some(text.to_string())); }
+            if is_known_type(ctx.conn, text)? { return Ok(Some(text.to_string())); }
             if text.contains("::") {
                 let parts: Vec<&str> = text.split("::").collect();
                 if parts.len() >= 2 {
                     let cls = parts[..parts.len()-1].join("::");
                     let member = parts[parts.len()-1];
-                    return find_member_return_type(conn, &cls, member);
+                    return find_member_return_type(ctx, &cls, member);
                 }
             }
             Ok(None)
@@ -284,7 +302,7 @@ fn resolve_expression_type(
         }
         "init_declarator" => {
             if let Some(val_node) = node.child_by_field_name("value") {
-                return resolve_expression_type(conn, val_node, root, content, cursor_row);
+                return resolve_expression_type(ctx, val_node, root, content, cursor_row);
             }
             Ok(None)
         }
@@ -293,14 +311,14 @@ fn resolve_expression_type(
                 let func_kind = func_node.kind();
                 if func_kind == "field_expression" {
                     if let Some(obj_node) = func_node.child_by_field_name("argument") {
-                        if let Some(obj_type) = resolve_expression_type(conn, obj_node, root, content, cursor_row)? {
+                        if let Some(obj_type) = resolve_expression_type(ctx, obj_node, root, content, cursor_row)? {
                             if let Some(field_node) = func_node.child_by_field_name("field") {
-                                return find_member_return_type(conn, &obj_type, get_node_text(&field_node, content).trim());
+                                return find_member_return_type(ctx, &obj_type, get_node_text(&field_node, content).trim());
                             }
                         }
                     }
                 } else if func_kind == "template_call" || func_kind == "template_function" {
-                    return resolve_expression_type(conn, func_node, root, content, cursor_row);
+                    return resolve_expression_type(ctx, func_node, root, content, cursor_row);
                 } else {
                     let func_name = get_node_text(&func_node, content).trim();
                     if func_name.contains("::") {
@@ -308,11 +326,11 @@ fn resolve_expression_type(
                         if parts.len() >= 2 {
                             let cls = parts[..parts.len()-1].join("::");
                             let method = parts[parts.len()-1];
-                            return find_member_return_type(conn, &cls, method);
+                            return find_member_return_type(ctx, &cls, method);
                         }
                     }
                     if let Some(current_class) = get_enclosing_class_name(&node, content) {
-                        return find_member_return_type(conn, &current_class, func_name);
+                        return find_member_return_type(ctx, &current_class, func_name);
                     }
                 }
             }
@@ -320,9 +338,9 @@ fn resolve_expression_type(
         }
         "field_expression" => {
             if let Some(obj_node) = node.child_by_field_name("argument") {
-                if let Some(obj_type) = resolve_expression_type(conn, obj_node, root, content, cursor_row)? {
+                if let Some(obj_type) = resolve_expression_type(ctx, obj_node, root, content, cursor_row)? {
                     if let Some(field_node) = node.child_by_field_name("field") {
-                        return find_member_return_type(conn, &obj_type, get_node_text(&field_node, content).trim());
+                        return find_member_return_type(ctx, &obj_type, get_node_text(&field_node, content).trim());
                     }
                 }
             }
@@ -330,7 +348,7 @@ fn resolve_expression_type(
         }
         "subscript_expression" => {
             if let Some(obj_node) = node.child_by_field_name("argument") {
-                if let Some(obj_type) = resolve_expression_type(conn, obj_node, root, content, cursor_row)? {
+                if let Some(obj_type) = resolve_expression_type(ctx, obj_node, root, content, cursor_row)? {
                     return Ok(Some(unwrap_container_type(&obj_type)));
                 }
             }
@@ -341,7 +359,7 @@ fn resolve_expression_type(
                 if let Some(child) = node.child(i as u32) {
                     let ck = child.kind();
                     if ck != "(" && ck != ")" && ck != "*" && ck != "&" {
-                        return resolve_expression_type(conn, child, root, content, cursor_row);
+                        return resolve_expression_type(ctx, child, root, content, cursor_row);
                     }
                 }
             }
@@ -387,16 +405,16 @@ fn get_template_argument(inner: &str, index: usize) -> &str {
     ""
 }
 
-fn find_member_return_type(conn: &Connection, class_name: &str, member_name: &str) -> anyhow::Result<Option<String>> {
+fn find_member_return_type(ctx: &mut RequestContext, class_name: &str, member_name: &str) -> anyhow::Result<Option<String>> {
     let clean_class = extract_clean_type(class_name);
-    let resolved_class = resolve_typedef(conn, &clean_class)?;
+    let resolved_class = resolve_typedef(ctx, &clean_class)?;
     let mut queue = vec![resolved_class];
     let mut visited = HashMap::new();
     while let Some(cls) = queue.pop() {
         if visited.contains_key(&cls) { continue; }
         visited.insert(cls.clone(), true);
         
-        let mut stmt = conn.prepare("
+        let mut stmt = ctx.conn.prepare("
             SELECT srt.text FROM members m 
             JOIN classes c ON m.class_id = c.id 
             JOIN strings sc ON c.name_id = sc.id
@@ -413,7 +431,7 @@ fn find_member_return_type(conn: &Connection, class_name: &str, member_name: &st
             }
         }
         
-        let mut p_stmt = conn.prepare("
+        let mut p_stmt = ctx.conn.prepare("
             SELECT si.text FROM inheritance i 
             JOIN classes c ON i.child_id = c.id 
             JOIN strings sc ON c.name_id = sc.id
@@ -459,11 +477,11 @@ fn find_qualified_identifier(node: Node) -> Option<Node> {
     None
 }
 
-fn resolve_typedef(conn: &Connection, type_name: &str) -> anyhow::Result<String> {
+fn resolve_typedef(ctx: &mut RequestContext, type_name: &str) -> anyhow::Result<String> {
     let mut current = extract_clean_type(type_name);
     if current.is_empty() || current == "T" || current == "void" { return Ok(current); }
     for _ in 0..3 {
-        let mut stmt = conn.prepare("
+        let mut stmt = ctx.conn.prepare("
             SELECT sbc.text FROM classes c 
             JOIN strings sc ON c.name_id = sc.id
             JOIN strings sbc ON c.base_class_id = sbc.id
@@ -482,28 +500,32 @@ fn resolve_typedef(conn: &Connection, type_name: &str) -> anyhow::Result<String>
 }
 
 fn resolve_static_members(
-    conn: &Connection,
+    ctx: &mut RequestContext,
     scope_name: &str,
     prefix: Option<String>,
     cache: Option<Arc<Mutex<CompletionCache>>>,
     persistent_cache: Option<Arc<Mutex<Connection>>>,
 ) -> anyhow::Result<Value> {
     let clean_scope = extract_clean_type(scope_name);
-    let t_name = resolve_typedef(conn, &clean_scope)?;
-    let members = fetch_members_recursive(conn, &t_name, prefix, cache, persistent_cache, None)?;
+    let t_name = resolve_typedef(ctx, &clean_scope)?;
+    let members = fetch_members_recursive(ctx, &t_name, prefix, cache, persistent_cache, None)?;
     Ok(json!(members))
 }
 
-fn is_subclass_of(conn: &Connection, child: &str, parent: &str) -> anyhow::Result<bool> {
+fn is_subclass_of(ctx: &mut RequestContext, child: &str, parent: &str) -> anyhow::Result<bool> {
     if child == parent { return Ok(true); }
+    let cache_key = (child.to_string(), parent.to_string());
+    if let Some(&res) = ctx.inheritance_cache.get(&cache_key) { return Ok(res); }
+
     let mut queue = vec![child.to_string()];
     let mut visited = HashMap::new();
+    let mut found = false;
     while let Some(current) = queue.pop() {
-        if current == parent { return Ok(true); }
+        if current == parent { found = true; break; }
         if visited.contains_key(&current) { continue; }
         visited.insert(current.clone(), true);
 
-        let mut stmt = conn.prepare("
+        let mut stmt = ctx.conn.prepare("
             SELECT si.text FROM inheritance i 
             JOIN classes c ON i.child_id = c.id 
             JOIN strings sc ON c.name_id = sc.id
@@ -514,11 +536,12 @@ fn is_subclass_of(conn: &Connection, child: &str, parent: &str) -> anyhow::Resul
             queue.push(p?);
         }
     }
-    Ok(false)
+    ctx.inheritance_cache.insert(cache_key, found);
+    Ok(found)
 }
 
 fn fetch_members_recursive(
-    conn: &Connection, 
+    ctx: &mut RequestContext, 
     class_name: &str, 
     prefix: Option<String>, 
     cache: Option<Arc<Mutex<CompletionCache>>>,
@@ -562,7 +585,7 @@ fn fetch_members_recursive(
         if visited.contains_key(&current) { continue; }
         visited.insert(current.clone(), true);
         
-        let mut stmt = conn.prepare("
+        let mut stmt = ctx.conn.prepare("
             SELECT c.id FROM classes c 
             JOIN strings sc ON c.name_id = sc.id
             WHERE LOWER(sc.text) = LOWER(?)
@@ -587,7 +610,7 @@ fn fetch_members_recursive(
             }
             sql.push_str(" ORDER BY smn.text ASC LIMIT 200");
 
-            let mut mem_stmt = conn.prepare(&sql)?;
+            let mut mem_stmt = ctx.conn.prepare(&sql)?;
             
             type MemberRow = (String, String, Option<String>, Option<String>, Option<String>, usize, Option<String>);
             let member_data: Vec<MemberRow> = if let Some(p) = &prefix_search {
@@ -630,7 +653,7 @@ fn fetch_members_recursive(
                 } else if access_str == "private" {
                     false
                 } else if access_str == "protected" {
-                    is_subclass_of(conn, accessor_val, &current).unwrap_or(false)
+                    is_subclass_of(ctx, accessor_val, &current).unwrap_or(false)
                 } else {
                     true // public or empty
                 };
@@ -638,7 +661,7 @@ fn fetch_members_recursive(
                 if !is_accessible { continue; }
 
                 let doc = if let Some(path) = f_path {
-                    let mut comment = extract_comment_from_file(&path, line);
+                    let mut comment = extract_comment_from_file(&path, line, &mut ctx.file_cache);
                     if let Some(d) = &detail {
                         if !comment.is_empty() { comment.push_str("\n\n"); }
                         comment.push_str(d);
@@ -657,14 +680,14 @@ fn fetch_members_recursive(
                 }));
             }
 
-            let mut enum_stmt = conn.prepare("SELECT sen.text FROM enum_values ev JOIN strings sen ON ev.name_id = sen.id WHERE enum_id = ?")?;
+            let mut enum_stmt = ctx.conn.prepare("SELECT sen.text FROM enum_values ev JOIN strings sen ON ev.name_id = sen.id WHERE enum_id = ?")?;
             let enum_rows = enum_stmt.query_map([class_id], |row| {
                 let e_name: String = row.get(0)?;
                 Ok(json!({ "label": e_name, "kind": 20, "detail": "enum item", "insertText": e_name }))
             })?;
             for e in enum_rows { result.push(e?); }
             
-            let mut parent_stmt = conn.prepare("SELECT si.text FROM inheritance i JOIN strings si ON i.parent_name_id = si.id WHERE child_id = ?")?;
+            let mut parent_stmt = ctx.conn.prepare("SELECT si.text FROM inheritance i JOIN strings si ON i.parent_name_id = si.id WHERE child_id = ?")?;
             let p_rows = parent_stmt.query_map([class_id], |row| Ok(row.get::<_, String>(0)?))?;
             for p in p_rows { queue.push(p?); }
         }
@@ -749,10 +772,19 @@ fn map_kind(k: &str) -> i64 {
     match k { "function" => 2, "variable" | "property" => 5, "enum_item" => 20, _ => 1 }
 }
 
-fn extract_comment_from_file(file_path: &str, line_number: usize) -> String {
+fn extract_comment_from_file(file_path: &str, line_number: usize, file_cache: &mut HashMap<String, Vec<String>>) -> String {
     if line_number == 0 { return String::new(); }
-    let content = match std::fs::read_to_string(file_path) { Ok(c) => c, Err(_) => return String::new() };
-    let lines: Vec<&str> = content.lines().collect();
+    
+    if !file_cache.contains_key(file_path) {
+        if let Ok(content) = std::fs::read_to_string(file_path) {
+            let lines: Vec<String> = content.lines().map(|s| s.to_string()).collect();
+            file_cache.insert(file_path.to_string(), lines);
+        } else {
+            return String::new();
+        }
+    }
+    
+    let lines = file_cache.get(file_path).unwrap();
     if line_number > lines.len() { return String::new(); }
     let mut comment_lines = Vec::new();
     let mut current_line = line_number - 1;
@@ -792,9 +824,9 @@ fn is_known_type(conn: &Connection, name: &str) -> anyhow::Result<bool> {
     Ok(stmt.exists([&clean])?)
 }
 
-fn infer_variable_type(conn: &Connection, target_name: &str, root: &Node, content: &str, cursor_row: usize) -> anyhow::Result<Option<String>> {
+fn infer_variable_type(ctx: &mut RequestContext, target_name: &str, root: &Node, content: &str, cursor_row: usize) -> anyhow::Result<Option<String>> {
     let language: tree_sitter::Language = tree_sitter_unreal_cpp::LANGUAGE.into();
-    let query_str = "(declaration type: (_) @type declarator: (init_declarator declarator: (_) @decl)) (declaration type: (_) @type declarator: (_) @decl) (field_declaration type: (_) @type declarator: (init_declarator declarator: (_) @decl)) (field_declaration type: (_) @type declarator: (_) @decl) (parameter_declaration type: (_) @type declarator: (_) @decl) (for_range_loop type: (_) @type declarator: (_) @decl) (condition_clause value: (declaration type: (_) @type declarator: (init_declarator declarator: (_) @decl))) (condition_clause value: (declaration type: (_) @type declarator: (_) @decl)) (condition_clause (declaration type: (_) @type declarator: (_) @decl)) (field_declaration (_) @type (init_declarator declarator: (_) @decl)) (field_declaration (_) @type (_) @decl) (declaration (_) @type (init_declarator declarator: (_) @decl))";
+    let query_str = "(declaration type: (_) @type declarator: (init_declarator declarator: (_) @decl)) (declaration type: (_) @type declarator: (_) @decl) (field_declaration type: (_) @type declarator: (init_declarator declarator: (_) @decl)) (field_declaration type: (_) @type declarator: (_) @decl) (parameter_declaration type: (_) @type declarator: (_) @decl) (for_range_loop type: (_) @type declarator: (_) @decl) (condition_clause value: (declaration type: (_) @type declarator: (init_declarator declarator: (_) @decl))) (condition_clause value: (declaration type: (_) @type declarator: (_) @decl)) (condition_clause (declaration type: (_) @type declarator: (init_declarator declarator: (_) @decl))) (field_declaration (_) @type (init_declarator declarator: (_) @decl)) (field_declaration (_) @type (_) @decl) (declaration (_) @type (init_declarator declarator: (_) @decl))";
     let query = Query::new(&language, query_str)?;
     let mut cursor = QueryCursor::new();
     let mut matches = cursor.matches(&query, *root, content.as_bytes());
@@ -814,7 +846,7 @@ fn infer_variable_type(conn: &Connection, target_name: &str, root: &Node, conten
                     let row = d_node.start_position().row;
                     if row <= cursor_row && (best_type.is_none() || row >= best_row) {
                         let type_text = get_node_text(&t_node, content).trim();
-                        if type_text == "auto" { if let Some(inferred) = infer_from_assignment(conn, target_name, root, content, cursor_row)? { best_type = Some(inferred); } }
+                        if type_text == "auto" { if let Some(inferred) = infer_from_assignment(ctx, target_name, root, content, cursor_row)? { best_type = Some(inferred); } }
                         else { best_type = Some(extract_clean_type(type_text)); }
                         best_row = row;
                     }
@@ -822,7 +854,7 @@ fn infer_variable_type(conn: &Connection, target_name: &str, root: &Node, conten
             }
         }
     }
-    if best_type.is_none() { best_type = infer_from_assignment(conn, target_name, root, content, cursor_row)?; }
+    if best_type.is_none() { best_type = infer_from_assignment(ctx, target_name, root, content, cursor_row)?; }
     Ok(best_type)
 }
 
@@ -838,7 +870,7 @@ fn find_identifier_in_decl(node: &Node, target_name: &str, content: &str) -> any
     Ok(false)
 }
 
-fn infer_from_assignment(conn: &Connection, target_name: &str, root: &Node, content: &str, cursor_row: usize) -> anyhow::Result<Option<String>> {
+fn infer_from_assignment(ctx: &mut RequestContext, target_name: &str, root: &Node, content: &str, cursor_row: usize) -> anyhow::Result<Option<String>> {
     let language: tree_sitter::Language = tree_sitter_unreal_cpp::LANGUAGE.into();
     let query_str = "(declaration type: (_) declarator: (init_declarator declarator: (_) @decl value: (_) @value)) (declaration declarator: (_) @decl value: (_) @value) (condition_clause value: (declaration type: (_) declarator: (init_declarator declarator: (_) @decl value: (_) @value))) (condition_clause value: (declaration type: (_) declarator: (_) @decl value: (_) @value)) (condition_clause value: (declaration declarator: (_) @decl value: (_) @value)) (assignment_expression left: (_) @decl right: (_) @value)";
     let query = Query::new(&language, query_str)?;
@@ -857,12 +889,12 @@ fn infer_from_assignment(conn: &Connection, target_name: &str, root: &Node, cont
             if !found_name.is_empty() && found_name == target_name {
                 let row = d_node.start_position().row;
                 if row <= cursor_row { 
-                    if let Ok(Some(t)) = resolve_expression_type(conn, v_node, root, content, cursor_row) { return Ok(Some(t)); }
+                    if let Ok(Some(t)) = resolve_expression_type(ctx, v_node, root, content, cursor_row) { return Ok(Some(t)); }
                     return infer_from_value_text(get_node_text(&v_node, content));
                 }
             } else if find_identifier_in_decl(&d_node, target_name, content)? {
                 let row = d_node.start_position().row;
-                if row <= cursor_row { if let Ok(Some(t)) = resolve_expression_type(conn, v_node, root, content, cursor_row) { return Ok(Some(t)); } }
+                if row <= cursor_row { if let Ok(Some(t)) = resolve_expression_type(ctx, v_node, root, content, cursor_row) { return Ok(Some(t)); } }
             }
         }
     }
