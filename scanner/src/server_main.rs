@@ -50,6 +50,7 @@ async fn main() -> anyhow::Result<()> {
         projects: Mutex::new(initial_projects),
         connections: Mutex::new(HashMap::new()),
         read_only_connections: Mutex::new(HashMap::new()),
+        persistent_cache_connections: Mutex::new(HashMap::new()),
         active_refreshes: Mutex::new(HashSet::new()),
         active_asset_scans: Mutex::new(HashSet::new()),
         watcher: Mutex::new(_watcher),

@@ -27,6 +27,7 @@ function M.execute(opts, on_complete)
         
         local project_root = vim.fn.fnamemodify(project_info.uproject, ":h")
         local db_path = path_util.get_db_path(project_root)
+        local cache_db_path = path_util.get_cache_db_path(project_root)
         local current_vcs = vcs.get_current_hash(project_root)
         
         local config = {
@@ -37,6 +38,7 @@ function M.execute(opts, on_complete)
         local req = {
             project_root = path_util.normalize(project_root),
             db_path = path_util.normalize(db_path),
+            cache_db_path = path_util.normalize(cache_db_path),
             config = config,
             vcs_hash = current_vcs,
         }

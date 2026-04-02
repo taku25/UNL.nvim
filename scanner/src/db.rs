@@ -454,4 +454,18 @@ pub fn register_module(conn: &Connection, name: &str, root_path: &str, m_type: &
     let id = tx.last_insert_rowid();
     tx.commit()?;
     Ok(id)
-}
+    }
+
+    pub fn init_cache_db(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS persistent_cache (
+            key TEXT PRIMARY KEY,
+            value BLOB NOT NULL,
+            hit_count INTEGER DEFAULT 1,
+            last_used INTEGER NOT NULL
+        )",
+        [],
+    )?;
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_cache_last_used ON persistent_cache(last_used)", [])?;
+    Ok(())
+    }

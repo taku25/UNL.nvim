@@ -61,6 +61,7 @@ function M.execute(opts, on_complete)
             project_root = project_root_norm,
             engine_root = engine_root and path_util.normalize(engine_root) or nil,
             db_path = path_util.get_db_path(project_root), 
+            cache_db_path = path_util.get_cache_db_path(project_root),
             scope = opts.scope or "Full",
             config = config,
             vcs_hash = current_vcs,

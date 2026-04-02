@@ -73,4 +73,9 @@ function M.get_db_path(project_root)
   return M.normalize(cache_dir .. "/" .. filename)
 end
 
+function M.get_cache_db_path(project_root)
+  local db_path = M.get_db_path(project_root)
+  return db_path:gsub("%.db$", ".cache.db")
+end
+
 return M

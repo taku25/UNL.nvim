@@ -69,9 +69,17 @@ pub async fn handle_setup(state: Arc<AppState>, params: &Value) -> anyhow::Resul
 
     {
         let mut projects = state.projects.lock().unwrap();
-        projects.insert(root_key.clone(), ProjectContext { db_path: normalize_to_unix(&req.db_path), vcs_hash: req.vcs_hash.clone(), _last_refresh: Instant::now() });
+        projects.insert(root_key.clone(), ProjectContext { 
+            db_path: normalize_to_unix(&req.db_path), 
+            cache_db_path: req.cache_db_path.as_ref().map(|p| normalize_to_unix(p)),
+            vcs_hash: req.vcs_hash.clone(), 
+            _last_refresh: Instant::now() 
+        });
     }
     let _ = state.get_connection(&db_path_native);
+    if let Some(cache_path) = &req.cache_db_path {
+        let _ = state.get_persistent_cache_connection(&normalize_to_native(cache_path));
+    }
     let _ = state.save_registry();
 
     let state_clone = state.clone();
@@ -112,10 +120,19 @@ pub async fn handle_refresh(state: &AppState, params: &Value, tx: mpsc::Sender<V
         let mut projects = state.projects.lock().unwrap();
         if let Some(path) = &req.db_path {
              let path_u = normalize_to_unix(path);
-             projects.insert(root_key.clone(), ProjectContext { db_path: path_u.clone(), vcs_hash: req.vcs_hash.clone(), _last_refresh: Instant::now() });
+             let cache_path_u = req.cache_db_path.as_ref().map(|p| normalize_to_unix(p));
+             projects.insert(root_key.clone(), ProjectContext { 
+                 db_path: path_u.clone(), 
+                 cache_db_path: cache_path_u,
+                 vcs_hash: req.vcs_hash.clone(), 
+                 _last_refresh: Instant::now() 
+             });
              path_u
         } else if let Some(ctx) = projects.get_mut(&root_key) {
              ctx.vcs_hash = req.vcs_hash.clone();
+             if let Some(path) = &req.cache_db_path {
+                 ctx.cache_db_path = Some(normalize_to_unix(path));
+             }
              ctx.db_path.clone()
         } else { return Err(anyhow::anyhow!("Project not found")); }
     };
@@ -125,6 +142,13 @@ pub async fn handle_refresh(state: &AppState, params: &Value, tx: mpsc::Sender<V
     {
         let mut conns = state.connections.lock().unwrap();
         conns.remove(&db_path_native);
+        
+        let mut p_conns = state.persistent_cache_connections.lock().unwrap();
+        if let Some(ctx) = state.projects.lock().unwrap().get(&root_key) {
+            if let Some(cache_path) = &ctx.cache_db_path {
+                p_conns.remove(&normalize_to_native(cache_path));
+            }
+        }
     }
 
     req.db_path = Some(db_path_unix.clone());
@@ -203,15 +227,20 @@ pub async fn handle_query(state: Arc<AppState>, params: &Value, tx: mpsc::Sender
         }
     }
 
-    let db_path_unix = {
+    let (db_path_unix, cache_db_path_native) = {
         let projects = state.projects.lock().unwrap();
         let ctx = projects.get(&root_key).ok_or_else(|| anyhow::anyhow!("Project not found"))?;
-        ctx.db_path.clone()
+        (ctx.db_path.clone(), ctx.cache_db_path.as_ref().map(|p| normalize_to_native(p)))
     };
     let db_path_native = normalize_to_native(&db_path_unix);
     
     // 読み取り専用の独自の接続を取得（並列アクセス用・メモリ制限付き）
     let conn = state.get_read_only_connection(&db_path_native)?;
+    let persistent_cache_conn = if let Some(path) = cache_db_path_native {
+        state.get_persistent_cache_connection(&path).ok()
+    } else {
+        None
+    };
 
     let is_async = matches!(req.query, 
         QueryRequest::GetFilesInModulesAsync { .. } | 
@@ -387,7 +416,7 @@ pub async fn handle_query(state: Arc<AppState>, params: &Value, tx: mpsc::Sender
             }
             QueryRequest::GetCompletions { content, line, character, file_path } => {
                 let cache = state.get_completion_cache(&root_key);
-                crate::completion::process_completion(&conn, &content, line, character, file_path, Some(cache))
+                crate::completion::process_completion(&conn, &content, line, character, file_path, Some(cache), persistent_cache_conn)
             }
             _ => {
                 if is_async {

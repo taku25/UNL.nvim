@@ -23,6 +23,7 @@ pub struct RefreshRequest {
     pub project_root: String,
     pub engine_root: Option<String>,
     pub db_path: Option<String>,
+    pub cache_db_path: Option<String>,
     pub config: UEPConfig,
     pub scope: Option<String>,
     pub vcs_hash: Option<String>,
@@ -38,6 +39,7 @@ pub struct WatchRequest {
 pub struct SetupRequest {
     pub project_root: String,
     pub db_path: String,
+    pub cache_db_path: Option<String>,
     pub config: UEPConfig,
     pub vcs_hash: Option<String>,
 }
