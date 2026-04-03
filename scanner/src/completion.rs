@@ -28,6 +28,7 @@ impl<'a> RequestContext<'a> {
         if let Some(&id) = self.string_id_cache.get(text) {
             return Ok(Some(id));
         }
+        // 厳密な比較 (=) に戻す。インデックスが最適に効く。
         let id: Option<i64> = self.conn.query_row(
             "SELECT id FROM strings WHERE text = ?",
             [text],
@@ -39,16 +40,15 @@ impl<'a> RequestContext<'a> {
         Ok(id)
     }
 
-    fn get_class_id_by_name(&mut self, class_name: &str) -> anyhow::Result<Option<i64>> {
+    fn get_class_ids_by_name(&mut self, class_name: &str) -> anyhow::Result<Vec<i64>> {
         if let Some(name_id) = self.get_string_id(class_name)? {
-            let class_id: Option<i64> = self.conn.query_row(
-                "SELECT id FROM classes WHERE name_id = ? LIMIT 1",
-                [name_id],
-                |row| row.get(0)
-            ).optional()?;
-            return Ok(class_id);
+            let mut stmt = self.conn.prepare("SELECT id FROM classes WHERE name_id = ?")?;
+            let ids = stmt.query_map([name_id], |row| row.get(0))?
+                .filter_map(|r| r.ok())
+                .collect();
+            return Ok(ids);
         }
-        Ok(None)
+        Ok(Vec::new())
     }
 }
 
@@ -440,12 +440,10 @@ fn find_member_return_type(ctx: &mut RequestContext, class_name: &str, member_na
     let clean_class = extract_clean_type(class_name);
     let resolved_class = resolve_typedef(ctx, &clean_class)?;
     
-    let start_class_id = match ctx.get_class_id_by_name(&resolved_class)? {
-        Some(id) => id,
-        None => return Ok(None),
-    };
+    let start_class_ids = ctx.get_class_ids_by_name(&resolved_class)?;
+    if start_class_ids.is_empty() { return Ok(None); }
 
-    let mut queue = vec![start_class_id];
+    let mut queue = start_class_ids;
     let mut visited = HashMap::new();
     while let Some(cls_id) = queue.pop() {
         if visited.contains_key(&cls_id) { continue; }
@@ -475,8 +473,9 @@ fn find_member_return_type(ctx: &mut RequestContext, class_name: &str, member_na
             let (p_id, p_name) = p?;
             if let Some(id) = p_id {
                 queue.push(id);
-            } else if let Some(id) = ctx.get_class_id_by_name(&p_name)? {
-                queue.push(id);
+            } else {
+                let ids = ctx.get_class_ids_by_name(&p_name)?;
+                for id in ids { queue.push(id); }
             }
         }
     }
@@ -561,19 +560,14 @@ fn is_subclass_of(ctx: &mut RequestContext, child: &str, parent: &str) -> anyhow
     let cache_key = (child.to_string(), parent.to_string());
     if let Some(&res) = ctx.inheritance_cache.get(&cache_key) { return Ok(res); }
 
-    let child_id = match ctx.get_class_id_by_name(child)? {
-        Some(id) => id,
-        None => return Ok(false),
-    };
-    let parent_id = ctx.get_class_id_by_name(parent)?;
+    let child_ids = ctx.get_class_ids_by_name(child)?;
+    let parent_ids = ctx.get_class_ids_by_name(parent)?;
 
-    let mut queue = vec![child_id];
+    let mut queue = child_ids;
     let mut visited = HashMap::new();
     let mut found = false;
     while let Some(current_id) = queue.pop() {
-        if let Some(pid) = parent_id {
-            if current_id == pid { found = true; break; }
-        }
+        if parent_ids.contains(&current_id) { found = true; break; }
         
         if visited.contains_key(&current_id) { continue; }
         visited.insert(current_id, true);
@@ -588,8 +582,9 @@ fn is_subclass_of(ctx: &mut RequestContext, child: &str, parent: &str) -> anyhow
             if p_name == parent { found = true; break; }
             if let Some(id) = p_id {
                 queue.push(id);
-            } else if let Some(id) = ctx.get_class_id_by_name(&p_name)? {
-                queue.push(id);
+            } else {
+                let ids = ctx.get_class_ids_by_name(&p_name)?;
+                for id in ids { queue.push(id); }
             }
         }
         if found { break; }
@@ -634,13 +629,11 @@ fn fetch_members_recursive(
         }
     }
 
-    let start_class_id = match ctx.get_class_id_by_name(class_name)? {
-        Some(id) => id,
-        None => return Ok(Vec::new()),
-    };
+    let start_class_ids = ctx.get_class_ids_by_name(class_name)?;
+    if start_class_ids.is_empty() { return Ok(Vec::new()); }
 
     let mut result = Vec::new();
-    let mut queue = vec![start_class_id];
+    let mut queue = start_class_ids;
     let mut visited = HashMap::new();
     let prefix_search = prefix.as_ref().map(|p| format!("{}%", p));
 
@@ -752,9 +745,8 @@ fn fetch_members_recursive(
                 queue.push(id);
             } else {
                 // IDがない場合は名前で検索（外部定義など）
-                if let Some(id) = ctx.get_class_id_by_name(&p_name)? {
-                    queue.push(id);
-                }
+                let ids = ctx.get_class_ids_by_name(&p_name)?;
+                for id in ids { queue.push(id); }
             }
         }
         if result.len() >= 500 { break; }
@@ -980,11 +972,24 @@ fn infer_from_value_text(text: &str) -> anyhow::Result<Option<String>> {
     if let Ok(re) = regex::Regex::new(r"([a-zA-Z0-9_]+)\s*<\s*([a-zA-Z0-9_:]+)") {
         if let Some(cap) = re.captures(text) {
             let func = cap.get(1).unwrap().as_str(); let inner = cap.get(2).unwrap().as_str();
-            if ["NewObject", "TObjectPtr", "TSharedPtr"].contains(&func) { return Ok(Some(extract_clean_type(inner))); }
+            if ["NewObject", "TObjectPtr", "TSharedPtr", "StaticCastSharedPtr", "MakeShared", "MakeUnique"].contains(&func) { return Ok(Some(extract_clean_type(inner))); }
             return Ok(Some(extract_clean_type(func)));
         }
     }
-    if let Ok(re) = regex::Regex::new(r"^([a-zA-Z0-9_:]+)\s*\(") { if let Some(cap) = re.captures(text) { return Ok(Some(extract_clean_type(cap.get(1).unwrap().as_str()))); } }
+    if let Ok(re) = regex::Regex::new(r"^([a-zA-Z0-9_:]+)\s*\(") {
+        if let Some(cap) = re.captures(text) {
+            let full_name = cap.get(1).unwrap().as_str();
+            if full_name.contains("::") {
+                let parts: Vec<&str> = full_name.split("::").collect();
+                if let Some(&last) = parts.last() {
+                    if ["Get", "GetChecked", "GetPtr", "StaticClass", "GetDefault", "GetInstance"].contains(&last) {
+                        return Ok(Some(extract_clean_type(&parts[..parts.len()-1].join("::"))));
+                    }
+                }
+            }
+            return Ok(Some(extract_clean_type(full_name)));
+        }
+    }
     Ok(None)
 }
 
@@ -1001,5 +1006,7 @@ fn extract_clean_type(raw: &str) -> String {
             return format!("{}<{}>{}", wrapper.replace('*', "").replace('&', "").trim(), inner, clean[end+1..].replace('*', "").replace('&', "").trim()).trim().to_string();
         }
     }
-    clean.replace('*', " ").replace('&', " ").split_whitespace().last().unwrap_or("").split("::").last().unwrap_or("").to_string()
+    let base = clean.replace('*', " ").replace('&', " ");
+    let last_word = base.split_whitespace().last().unwrap_or("").to_string();
+    last_word
 }
