@@ -41,13 +41,38 @@ impl<'a> RequestContext<'a> {
     }
 
     fn get_class_ids_by_name(&mut self, class_name: &str) -> anyhow::Result<Vec<i64>> {
+        let class_name = class_name.trim();
+        if class_name.is_empty() { return Ok(Vec::new()); }
+
+        // 1. まずは完全一致（UE::Math::TVector などが一個の文字列で登録されている可能性）
         if let Some(name_id) = self.get_string_id(class_name)? {
             let mut stmt = self.conn.prepare("SELECT id FROM classes WHERE name_id = ?")?;
-            let ids = stmt.query_map([name_id], |row| row.get(0))?
+            let ids: Vec<i64> = stmt.query_map([name_id], |row| row.get(0))?
                 .filter_map(|r| r.ok())
                 .collect();
-            return Ok(ids);
+            if !ids.is_empty() { return Ok(ids); }
         }
+
+        // 2. 名前空間で分割して検索（UE::Math と TVector に分かれている可能性）
+        if class_name.contains("::") {
+            let parts: Vec<&str> = class_name.split("::").collect();
+            if parts.len() >= 2 {
+                let ns_name = parts[..parts.len()-1].join("::");
+                let cls_name = parts[parts.len()-1];
+                
+                if let (Some(ns_id), Some(cls_id)) = (self.get_string_id(&ns_name)?, self.get_string_id(cls_name)?) {
+                    let mut stmt = self.conn.prepare("SELECT id FROM classes WHERE name_id = ? AND namespace_id = ?")?;
+                    let ids: Vec<i64> = stmt.query_map([cls_id, ns_id], |row| row.get(0))?
+                        .filter_map(|r| r.ok())
+                        .collect();
+                    if !ids.is_empty() { return Ok(ids); }
+                }
+                
+                // 名前空間を無視して名前だけで検索（フォールバック）
+                return self.get_class_ids_by_name(cls_name);
+            }
+        }
+
         Ok(Vec::new())
     }
 }
