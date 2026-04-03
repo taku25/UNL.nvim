@@ -743,10 +743,13 @@ fn fetch_members_recursive(
             let (p_id, p_name) = p?;
             if let Some(id) = p_id {
                 queue.push(id);
-            } else {
-                // IDがない場合は名前で検索（外部定義など）
-                let ids = ctx.get_class_ids_by_name(&p_name)?;
-                for id in ids { queue.push(id); }
+            }
+            // IDがある場合でも、名前で再検索して他のID（前方宣言など）も網羅する
+            let ids = ctx.get_class_ids_by_name(&p_name)?;
+            for id in ids {
+                if !visited.contains_key(&id) {
+                    queue.push(id);
+                }
             }
         }
         if result.len() >= 500 { break; }
@@ -879,12 +882,8 @@ fn is_known_type(ctx: &mut RequestContext, name: &str) -> anyhow::Result<bool> {
     let clean = extract_clean_type(name);
     if clean.is_empty() { return Ok(false); }
     if let Some(id) = ctx.get_string_id(&clean)? {
-        let exists: bool = ctx.conn.query_row(
-            "SELECT 1 FROM classes WHERE name_id = ? LIMIT 1",
-            [id],
-            |_| Ok(true)
-        ).optional()?.unwrap_or(false);
-        return Ok(exists);
+        let mut stmt = ctx.conn.prepare("SELECT 1 FROM classes WHERE name_id = ? LIMIT 1")?;
+        return Ok(stmt.exists([id])?);
     }
     Ok(false)
 }
@@ -995,18 +994,49 @@ fn infer_from_value_text(text: &str) -> anyhow::Result<Option<String>> {
 
 fn extract_clean_type(raw: &str) -> String {
     let mut clean = raw.trim().to_string();
-    let keywords = ["const", "typename", "struct", "class", "enum", "virtual", "static", "inline", "FORCEINLINE"];
-    for kw in keywords { if let Ok(re) = regex::Regex::new(&format!(r"\b{}\b", kw)) { clean = re.replace_all(&clean, "").to_string(); } }
-    if let Ok(re) = regex::Regex::new(r"\b[A-Z0-9_]+_API\b") { clean = re.replace_all(&clean, "").to_string(); }
-    clean = clean.trim().to_string();
-    if let Some(start) = clean.find('<') {
-        if let Some(end) = clean.rfind('>') {
-            let wrapper = clean[..start].trim(); let inner = &clean[start+1..end];
-            if ["TObjectPtr", "TSharedPtr", "TUniquePtr", "TWeakObjectPtr", "TSubclassOf", "TSoftObjectPtr", "TSoftClassPtr", "TEnumAsByte"].contains(&wrapper) { return extract_clean_type(inner); }
-            return format!("{}<{}>{}", wrapper.replace('*', "").replace('&', "").trim(), inner, clean[end+1..].replace('*', "").replace('&', "").trim()).trim().to_string();
+    
+    // 1. 不要なキーワードの削除
+    let keywords = ["const", "typename", "struct", "class", "enum", "virtual", "static", "inline", "FORCEINLINE", "volatile", "mutable"];
+    for kw in keywords {
+        if let Ok(re) = regex::Regex::new(&format!(r"\b{}\b", kw)) {
+            clean = re.replace_all(&clean, "").to_string();
         }
     }
+    
+    // 2. UE特有のマクロ削除
+    if let Ok(re) = regex::Regex::new(r"\b[A-Z0-9_]+_API\b") {
+        clean = re.replace_all(&clean, "").to_string();
+    }
+
+    // 3. テンプレートの抽出
+    if let Some(start) = clean.find('<') {
+        if let Some(end) = clean.rfind('>') {
+            let wrapper = clean[..start].trim();
+            let inner = &clean[start+1..end];
+            if ["TObjectPtr", "TSharedPtr", "TUniquePtr", "TWeakObjectPtr", "TSubclassOf", "TSoftObjectPtr", "TSoftClassPtr", "TEnumAsByte"].contains(&wrapper) {
+                return extract_clean_type(inner);
+            }
+            // テンプレートを維持する場合
+            return format!("{}<{}>", wrapper.replace('*', "").replace('&', "").trim(), inner).trim().to_string();
+        }
+    }
+
+    // 4. ポインタや参照、余計な空白の整理
+    // 基本的に「ポインタ等を除いた最初の単語」を型名として扱う
     let base = clean.replace('*', " ").replace('&', " ");
-    let last_word = base.split_whitespace().last().unwrap_or("").to_string();
-    last_word
+    let words: Vec<&str> = base.split_whitespace().collect();
+    
+    if words.is_empty() {
+        return String::new();
+    }
+
+    if words.len() > 1 {
+        let first = words[0];
+        if ["unsigned", "signed", "long", "short"].contains(&first) {
+            return words[..std::cmp::min(words.len(), 2)].join(" ");
+        }
+        return first.to_string();
+    }
+
+    words[0].to_string()
 }
