@@ -532,8 +532,12 @@ fn clean_type_string(s: &str) -> String {
     // 3. 余計な記号の整理（ポインタや参照は残す）
     clean = clean.replace(";", "").replace(":", " : ").replace("  ", " ").trim().to_string();
     
-    // 4. 最終的に「一番右側の単語」が型名である可能性が高い (C++の宣言形式)
-    // ただし、ポインタ等は単語の一部として維持する
+    // 4. 最終的に型名として最も適切な部分を抽出する
+    // テンプレート (< >) を含む場合は、分割せずに全体を維持する
+    if clean.contains('<') && clean.contains('>') {
+        return clean;
+    }
+
     let words: Vec<&str> = clean.split_whitespace().collect();
     if let Some(&last) = words.last() {
         return last.to_string();

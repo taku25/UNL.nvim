@@ -996,16 +996,27 @@ fn extract_clean_type(raw: &str) -> String {
     let mut clean = raw.trim().to_string();
     
     // 1. 不要なキーワードの削除
+    // 単語全体 (\b) に厳密にマッチさせる
     let keywords = ["const", "typename", "struct", "class", "enum", "virtual", "static", "inline", "FORCEINLINE", "volatile", "mutable"];
     for kw in keywords {
-        if let Ok(re) = regex::Regex::new(&format!(r"\b{}\b", kw)) {
-            clean = re.replace_all(&clean, "").to_string();
+        let pattern = format!(r"\b{}\b", kw);
+        if let Ok(re) = regex::Regex::new(&pattern) {
+            clean = re.replace_all(&clean, " ").to_string();
         }
     }
     
-    // 2. UE特有のマクロ削除
+    // 2. UE特有のマクロ削除 (_API, UPROPERTY 等)
+    // マクロ名そのものにマッチさせる (\b..._API\b)
     if let Ok(re) = regex::Regex::new(r"\b[A-Z0-9_]+_API\b") {
-        clean = re.replace_all(&clean, "").to_string();
+        clean = re.replace_all(&clean, " ").to_string();
+    }
+    // UPROPERTY や UFUNCTION などの単体キーワードも削る
+    let ue_keywords = ["UPROPERTY", "UFUNCTION", "UCLASS", "USTRUCT", "UENUM", "GENERATED_BODY"];
+    for kw in ue_keywords {
+        let pattern = format!(r"\b{}\b", kw);
+        if let Ok(re) = regex::Regex::new(&pattern) {
+            clean = re.replace_all(&clean, " ").to_string();
+        }
     }
 
     // 3. テンプレートの抽出
@@ -1016,10 +1027,17 @@ fn extract_clean_type(raw: &str) -> String {
             if ["TObjectPtr", "TSharedPtr", "TUniquePtr", "TWeakObjectPtr", "TSubclassOf", "TSoftObjectPtr", "TSoftClassPtr", "TEnumAsByte"].contains(&wrapper) {
                 return extract_clean_type(inner);
             }
+            // テンプレートを維持する場合
             return format!("{}<{}>", wrapper.replace('*', "").replace('&', "").trim(), inner).trim().to_string();
         }
     }
 
-    // 4. 修飾子の除去 (単語の分割 split は絶対にしない)
-    clean.replace('*', "").replace('&', "").trim().to_string()
+    // 4. 装飾子の除去
+    // * と & を消した後、トリムする。
+    // その後、もし末尾に > が残っていたら除去する（DBの不整合対策の最終ガード）
+    let mut res = clean.replace('*', "").replace('&', "").trim().to_string();
+    if res.ends_with('>') && !res.contains('<') {
+        res.pop();
+    }
+    res.trim().to_string()
 }
