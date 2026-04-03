@@ -278,8 +278,10 @@ pub fn parse_content(content: &str, _path: &str, language: &tree_sitter::Languag
             let mut member_name = String::new();
             let mut scope_name = None;
             let mut is_function = *capture_name == "func_node" || *capture_name == "ufunc_node";
+            let mut declarator_node = None;
             
             if let Some(declarator) = find_declarator_node(definition_node) {
+                declarator_node = Some(declarator);
                 let mut current = declarator;
                 loop {
                     match current.kind() {
@@ -350,31 +352,31 @@ pub fn parse_content(content: &str, _path: &str, language: &tree_sitter::Languag
                 curr = parent;
             }
 
-            let node_text = get_node_text(&definition_node, content_bytes);
-            if node_text.contains("virtual") { flags.push("virtual"); }
-            if node_text.contains("static") { flags.push("static"); }
-            if node_text.contains("override") { flags.push("override"); }
-
-            let mut detail = None;
             let mut return_type = None;
             let mem_type = if is_function { "function" } else { "property" };
 
-            if let Some(idx) = node_text.find(&member_name) {
-                let prefix = &node_text[..idx];
-                let mut actual_prefix = prefix;
-                if let Some(macro_end) = prefix.rfind(')') {
-                    actual_prefix = &prefix[macro_end+1..];
-                }
-                let mut cleaned = clean_type_string(actual_prefix);
-                if let Some(sn) = &scope_name {
-                    let scope_marker = format!("{}::", sn);
-                    if let Some(s_idx) = cleaned.find(&scope_marker) {
-                        cleaned = cleaned[..s_idx].trim().to_string();
+            // バグ修正：文字列検索(find)を廃止し、バイト位置で正確に型部分を切り出す
+            if let Some(decl) = declarator_node {
+                let def_start = definition_node.start_byte();
+                let decl_start = decl.start_byte();
+                if decl_start > def_start {
+                    let prefix = &content[def_start..decl_start];
+                    let mut actual_prefix = prefix;
+                    if let Some(macro_end) = prefix.rfind(')') {
+                        actual_prefix = &prefix[macro_end+1..];
                     }
+                    let mut cleaned = clean_type_string(actual_prefix);
+                    if let Some(sn) = &scope_name {
+                        let scope_marker = format!("{}::", sn);
+                        if let Some(s_idx) = cleaned.find(&scope_marker) {
+                            cleaned = cleaned[..s_idx].trim().to_string();
+                        }
+                    }
+                    if !cleaned.is_empty() { return_type = Some(cleaned); }
                 }
-                if !cleaned.is_empty() { return_type = Some(cleaned); }
             }
 
+            let mut detail = None;
             if is_function {
                 if let Some(param_list) = find_child_by_type(definition_node, "parameter_list") {
                     detail = Some(get_node_text(&param_list, content_bytes).to_string());
@@ -513,24 +515,28 @@ fn find_declarator_node<'a>(node: Node<'a>) -> Option<Node<'a>> {
 }
 
 fn clean_type_string(s: &str) -> String {
-    let mut words: Vec<String> = Vec::new();
-    for word in s.split_whitespace() {
-        let w = word.trim();
-        if w.is_empty() { continue; }
-        
-        if w == "virtual" || w == "static" || w == "inline" || w == "FORCEINLINE" || 
-           w == "FORCEINLINE_DEBUGGABLE" ||
-           w == "const" || w == "friend" || w == "class" || w == "struct" || w == "enum" ||
-           w.starts_with("UE_DEPRECATED") || 
-           w.ends_with("_API") { 
-            continue;
+    let mut clean = s.trim().to_string();
+    
+    // 1. 不要なキーワードの削除 (単語境界を意識)
+    let keywords = ["virtual", "static", "inline", "FORCEINLINE", "FORCEINLINE_DEBUGGABLE", "const", "friend", "class", "struct", "enum", "typename"];
+    for kw in keywords {
+        if let Ok(re) = regex::Regex::new(&format!(r"\b{}\b", kw)) {
+            clean = re.replace_all(&clean, "").to_string();
         }
-        
-        if w.starts_with("UFUNCTION") || w.starts_with("UPROPERTY") {
-            continue;
-        }
-        
-        words.push(w.to_string());
     }
-    words.join(" ")
+
+    // 2. UE特有のマクロ削除
+    if let Ok(re) = regex::Regex::new(r"\b[A-Z0-9_]+_API\b") { clean = re.replace_all(&clean, "").to_string(); }
+    if let Ok(re) = regex::Regex::new(r"UFUNCTION\(.*?\)|UPROPERTY\(.*?\)") { clean = re.replace_all(&clean, "").to_string(); }
+
+    // 3. 余計な記号の整理（ポインタや参照は残す）
+    clean = clean.replace(";", "").replace(":", " : ").replace("  ", " ").trim().to_string();
+    
+    // 4. 最終的に「一番右側の単語」が型名である可能性が高い (C++の宣言形式)
+    // ただし、ポインタ等は単語の一部として維持する
+    let words: Vec<&str> = clean.split_whitespace().collect();
+    if let Some(&last) = words.last() {
+        return last.to_string();
+    }
+    clean
 }

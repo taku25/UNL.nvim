@@ -1016,27 +1016,10 @@ fn extract_clean_type(raw: &str) -> String {
             if ["TObjectPtr", "TSharedPtr", "TUniquePtr", "TWeakObjectPtr", "TSubclassOf", "TSoftObjectPtr", "TSoftClassPtr", "TEnumAsByte"].contains(&wrapper) {
                 return extract_clean_type(inner);
             }
-            // テンプレートを維持する場合
             return format!("{}<{}>", wrapper.replace('*', "").replace('&', "").trim(), inner).trim().to_string();
         }
     }
 
-    // 4. ポインタや参照、余計な空白の整理
-    // 基本的に「ポインタ等を除いた最初の単語」を型名として扱う
-    let base = clean.replace('*', " ").replace('&', " ");
-    let words: Vec<&str> = base.split_whitespace().collect();
-    
-    if words.is_empty() {
-        return String::new();
-    }
-
-    if words.len() > 1 {
-        let first = words[0];
-        if ["unsigned", "signed", "long", "short"].contains(&first) {
-            return words[..std::cmp::min(words.len(), 2)].join(" ");
-        }
-        return first.to_string();
-    }
-
-    words[0].to_string()
+    // 4. 修飾子の除去 (単語の分割 split は絶対にしない)
+    clean.replace('*', "").replace('&', "").trim().to_string()
 }

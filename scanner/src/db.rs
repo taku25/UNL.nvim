@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use rusqlite::{params, Connection};
 use crate::types::{ParseResult, ProgressReporter};
 
-pub const DB_VERSION: i32 = 8;
+pub const DB_VERSION: i32 = 10;
 
 /// 指定されたDBファイルが最新バージョンであることを保証する。
 /// バージョンが合わない場合はファイルを削除して初期化する。
