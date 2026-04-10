@@ -52,4 +52,20 @@ function Aggregator:percentage()
   return math.floor(pct * 100 + 0.5)
 end
 
+function Aggregator:current_stage_info()
+  local active_stage = nil
+  local max_done_ratio = -1
+  
+  -- 進行中のステージ（完了しておらず、かつ進捗があるもの）を探す
+  for name, st in pairs(self.stages) do
+    local ratio = st.done / st.total
+    if ratio > 0 and ratio < 1.0 then
+      active_stage = { name = name, done = st.done, total = st.total, ratio = ratio }
+      break
+    end
+  end
+  
+  return active_stage
+end
+
 return Aggregator

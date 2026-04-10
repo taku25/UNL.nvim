@@ -94,6 +94,18 @@ function M.request(method, params, on_notification, on_response, timeout_ms)
                             end
                         elseif msg_type == 2 then -- Notification: [2, method, params]
                             log.debug("RPC Notification received: method=%s", tostring(decoded[2]))
+                            -- Reset timeout timer on progress
+                            if timeout_timer and not timeout_timer:is_closing() then
+                                timeout_timer:stop()
+                                timeout_timer:start(timeout_ms, 0, function()
+                                    if client then
+                                        client:close()
+                                        if on_response then
+                                            vim.schedule(function() on_response(false, "RPC Timeout after " .. (timeout_ms/1000) .. "s") end)
+                                        end
+                                    end
+                                end)
+                            end
                             if on_notification then
                                 vim.schedule(function() on_notification(decoded[2], decoded[3]) end)
                             end

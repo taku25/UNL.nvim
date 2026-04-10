@@ -12,7 +12,7 @@ pub fn parse_buffer(
     
     // 1. 全体シンボル解析 (既存の scanner ロジックを利用)
     let query = Query::new(&language, crate::scanner::QUERY_STR)?;
-    let (classes, _) = crate::scanner::parse_content(&content, &path, &language, &query)?;
+    let (classes, _, _) = crate::scanner::parse_content(&content, &path, &language, &query)?;
     
     let mut results = Vec::new();
     for cls in classes {

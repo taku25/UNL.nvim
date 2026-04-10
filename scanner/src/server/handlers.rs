@@ -3,7 +3,7 @@ use std::path::{PathBuf};
 use std::time::{Instant};
 use std::collections::{HashSet};
 use tokio::sync::mpsc;
-use tracing::{info};
+use tracing::{info, error};
 use notify::Watcher;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -19,12 +19,10 @@ pub struct DeleteProjectRequest { pub project_root: String }
 pub async fn handle_delete_project(state: &AppState, params: &Value) -> anyhow::Result<Value> {
     let req: DeleteProjectRequest = convert_params(params)?;
     let root_key = normalize_path_key(&req.project_root);
-    
     let removed = {
         let mut projects = state.projects.lock().unwrap();
         projects.remove(&root_key).is_some()
     };
-    
     if removed {
         let _ = state.save_registry();
         info!("Deleted project: {}", root_key);
@@ -46,25 +44,29 @@ pub async fn handle_ping(state: &AppState, params: &Value) -> anyhow::Result<Val
 pub async fn handle_setup(state: Arc<AppState>, params: &Value) -> anyhow::Result<Value> {
     let req: SetupRequest = convert_params(params)?;
     let db_path_native = normalize_to_native(&req.db_path);
-    
     {
         let mut conns = state.connections.lock().unwrap();
         conns.remove(&db_path_native);
     }
-
     let root_key = normalize_path_key(&req.project_root);
     let db_path_native_clone = db_path_native.clone();
+    
+    // DBが空か、あるいはバージョン不一致で再作成されたかを判定
     let was_empty = tokio::task::spawn_blocking(move || {
-        let mut is_new = db::ensure_correct_version(&db_path_native_clone).unwrap_or(false);
-        if !is_new {
-            if let Ok(conn) = rusqlite::Connection::open(&db_path_native_clone) {
-                // Check if classes table is empty
-                if let Ok(count) = conn.query_row("SELECT COUNT(*) FROM classes", [], |r| r.get::<_, i64>(0)) {
-                    if count == 0 { is_new = true; }
-                }
+        let re_initialized = db::ensure_correct_version(&db_path_native_clone).unwrap_or(false);
+        if re_initialized {
+            return Ok::<bool, anyhow::Error>(true);
+        }
+        
+        // バージョンが合っていても、中身が空ならリフレッシュが必要
+        if let Ok(conn) = rusqlite::Connection::open(&db_path_native_clone) {
+            let file_count: i64 = conn.query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0)).unwrap_or(0);
+            let class_count: i64 = conn.query_row("SELECT COUNT(*) FROM classes", [], |r| r.get(0)).unwrap_or(0);
+            if file_count == 0 || class_count == 0 {
+                return Ok(true);
             }
         }
-        Ok::<bool, anyhow::Error>(is_new)
+        Ok(false)
     }).await??;
 
     {
@@ -84,9 +86,7 @@ pub async fn handle_setup(state: Arc<AppState>, params: &Value) -> anyhow::Resul
 
     let state_clone = state.clone();
     let root_clone = root_key.clone();
-    tokio::spawn(async move {
-        handle_asset_scan(state_clone, root_clone).await;
-    });
+    tokio::spawn(async move { handle_asset_scan(state_clone, root_clone).await; });
 
     Ok(serde_json::json!({ "status": "ok", "needs_full_refresh": was_empty }))
 }
@@ -138,11 +138,9 @@ pub async fn handle_refresh(state: &AppState, params: &Value, tx: mpsc::Sender<V
     };
     
     let db_path_native = normalize_to_native(&db_path_unix);
-    
     {
         let mut conns = state.connections.lock().unwrap();
         conns.remove(&db_path_native);
-        
         let mut p_conns = state.persistent_cache_connections.lock().unwrap();
         if let Some(ctx) = state.projects.lock().unwrap().get(&root_key) {
             if let Some(cache_path) = &ctx.cache_db_path {
@@ -154,9 +152,9 @@ pub async fn handle_refresh(state: &AppState, params: &Value, tx: mpsc::Sender<V
     req.db_path = Some(db_path_unix.clone());
     let _ = state.save_registry();
     let reporter = Arc::new(RpcProgressReporter { tx });
+    
     tokio::task::spawn_blocking(move || { refresh::run_refresh(req, reporter) }).await??;
     
-    // Clear completion cache after refresh
     {
         let cache_arc = state.get_completion_cache(&root_key);
         let mut cache = cache_arc.lock().unwrap();
@@ -173,24 +171,12 @@ pub async fn handle_refresh(state: &AppState, params: &Value, tx: mpsc::Sender<V
 pub async fn handle_watch(state: &AppState, params: &Value) -> anyhow::Result<Value> {
     let req: crate::types::WatchRequest = convert_params(params)?;
     let root_native = normalize_to_native(&req.project_root);
-    tracing::info!("Watcher: Request received to watch path: {}", root_native);
-    
     let root_path_native = PathBuf::from(&root_native);
-    if !root_path_native.exists() {
-        tracing::error!("Watcher: Path does not exist: {}", root_native);
-        return Err(anyhow::anyhow!("Path does not exist: {}", root_native));
-    }
-
+    if !root_path_native.exists() { return Err(anyhow::anyhow!("Path does not exist: {}", root_native)); }
     let mut watcher = state.watcher.lock().unwrap();
     match watcher.watch(&root_path_native, notify::RecursiveMode::Recursive) {
-        Ok(_) => {
-            tracing::info!("Watcher: Successfully started watching: {}", root_native);
-            Ok(Value::String("Watch started".to_string()))
-        }
-        Err(e) => {
-            tracing::error!("Watcher: Failed to start watching {}: {}", root_native, e);
-            Err(e.into())
-        }
+        Ok(_) => { info!("Watcher: Started watching: {}", root_native); Ok(Value::String("Watch started".to_string())) }
+        Err(e) => { error!("Watcher: Failed to start watching {}: {}", root_native, e); Err(e.into()) }
     }
 }
 
@@ -200,110 +186,53 @@ pub struct ServerQueryRequest { pub project_root: String, #[serde(flatten)] pub 
 pub async fn handle_query(state: Arc<AppState>, params: &Value, tx: mpsc::Sender<Vec<u8>>, msgid: u64) -> anyhow::Result<Value> {
     let req: ServerQueryRequest = convert_params(params)?;
     let root_key = normalize_path_key(&req.project_root);
-    
-    // --- Added: Block during Refresh ---
     {
         let active = state.active_refreshes.lock().unwrap();
-        if active.contains(&root_key) {
-            // tracing::debug!("Blocking query during active refresh for: {}", root_key);
-            return Ok(json!([])); // Refresh中は即座に空を返す
-        }
+        if active.contains(&root_key) { return Ok(json!([])); }
     }
-    // ------------------------------------
-
     {
         let graphs = state.asset_graphs.lock().unwrap();
         if !graphs.contains_key(&root_key) {
             let mut active_scans = state.active_asset_scans.lock().unwrap();
             if !active_scans.contains(&root_key) {
                 active_scans.insert(root_key.clone());
-                info!("Launching targeted asset scan: {} (Key: {})", req.project_root, root_key);
                 let state_clone = state.clone();
                 let root_clone = req.project_root.clone();
-                tokio::spawn(async move {
-                    handle_asset_scan(state_clone, root_clone).await;
-                });
+                tokio::spawn(async move { handle_asset_scan(state_clone, root_clone).await; });
             }
         }
     }
-
     let (db_path_unix, cache_db_path_native) = {
         let projects = state.projects.lock().unwrap();
         let ctx = projects.get(&root_key).ok_or_else(|| anyhow::anyhow!("Project not found"))?;
         (ctx.db_path.clone(), ctx.cache_db_path.as_ref().map(|p| normalize_to_native(p)))
     };
     let db_path_native = normalize_to_native(&db_path_unix);
-    
-    // 読み取り専用の独自の接続を取得（並列アクセス用・メモリ制限付き）
     let conn = state.get_read_only_connection(&db_path_native)?;
-    let persistent_cache_conn = if let Some(path) = cache_db_path_native {
-        state.get_persistent_cache_connection(&path).ok()
-    } else {
-        None
-    };
-
-    let is_async = matches!(req.query, 
-        QueryRequest::GetFilesInModulesAsync { .. } | 
-        QueryRequest::SearchFilesInModulesAsync { .. } |
-        QueryRequest::GetClassesInModulesAsync { .. }
-    );
-
+    let persistent_cache_conn = if let Some(path) = cache_db_path_native { state.get_persistent_cache_connection(&path).ok() } else { None };
+    let is_async = matches!(req.query, QueryRequest::GetFilesInModulesAsync { .. } | QueryRequest::SearchFilesInModulesAsync { .. } | QueryRequest::GetClassesInModulesAsync { .. });
     tokio::task::spawn_blocking(move || {
         match req.query {
             QueryRequest::GetAssetUsages { asset_path } => {
-                {
-                    let active_scans = state.active_asset_scans.lock().unwrap();
-                    if active_scans.contains(&root_key) {
-                        return Ok(json!({ "status": "scanning", "references": [], "derived": [] }));
-                    }
-                }
-
+                { let active_scans = state.active_asset_scans.lock().unwrap(); if active_scans.contains(&root_key) { return Ok(json!({ "status": "scanning", "references": [], "derived": [] })); } }
                 let graphs = state.asset_graphs.lock().unwrap();
                 if let Some(graph) = graphs.get(&root_key) {
                     let mut result_refs: HashSet<String> = HashSet::new();
                     let mut result_derived: HashSet<String> = HashSet::new();
-
-                    let class_name = if asset_path.starts_with("/Script/") {
-                        asset_path.rfind('.').map(|idx| &asset_path[idx+1..]).unwrap_or(&asset_path)
-                    } else {
-                        &asset_path
-                    };
-
+                    let class_name = if asset_path.starts_with("/Script/") { asset_path.rfind('.').map(|idx| &asset_path[idx+1..]).unwrap_or(&asset_path) } else { &asset_path };
                     let mut try_names = vec![class_name.to_lowercase()];
-                    
                     let prefixes = ['a', 'u', 'f', 'e', 't', 's'];
                     if class_name.len() > 2 {
                         let first = class_name.chars().next().unwrap().to_ascii_lowercase();
-                        if prefixes.contains(&first) && class_name.chars().nth(1).unwrap().is_uppercase() {
-                            try_names.push(class_name[1..].to_lowercase());
-                        }
+                        if prefixes.contains(&first) && class_name.chars().nth(1).unwrap().is_uppercase() { try_names.push(class_name[1..].to_lowercase()); }
                     }
-                    
                     for name in &try_names {
                         let dot_name = format!(".{}", name);
-                        for (k, v) in &graph.references {
-                            if k.ends_with(&dot_name) || **k == **name {
-                                for x in v { result_refs.insert(x.to_string()); }
-                            }
-                        }
-                        for (k, v) in &graph.derived {
-                            if k.ends_with(&dot_name) || **k == **name {
-                                for x in v { result_derived.insert(x.to_string()); }
-                            }
-                        }
-                        // Function Call Matching
-                        for (k, v) in &graph.functions {
-                            if k.ends_with(&dot_name) || **k == **name || k.contains(&format!(":{}", name)) {
-                                for x in v { result_refs.insert(x.to_string()); }
-                            }
-                        }
+                        for (k, v) in &graph.references { if k.ends_with(&dot_name) || **k == **name { for x in v { result_refs.insert(x.to_string()); } } }
+                        for (k, v) in &graph.derived { if k.ends_with(&dot_name) || **k == **name { for x in v { result_derived.insert(x.to_string()); } } }
+                        for (k, v) in &graph.functions { if k.ends_with(&dot_name) || **k == **name || k.contains(&format!(":{}", name)) { for x in v { result_refs.insert(x.to_string()); } } }
                     }
-                    
-                    return Ok(json!({
-                        "references": result_refs.into_iter().collect::<Vec<String>>(),
-                        "derived": result_derived.into_iter().collect::<Vec<String>>(),
-                        "status": "ready"
-                    }));
+                    return Ok(json!({ "references": result_refs.into_iter().collect::<Vec<String>>(), "derived": result_derived.into_iter().collect::<Vec<String>>(), "status": "ready" }));
                 }
                 Ok(json!({ "status": "scanning", "references": [], "derived": [] }))
             }
@@ -311,50 +240,30 @@ pub async fn handle_query(state: Arc<AppState>, params: &Value, tx: mpsc::Sender
                 if asset_path.starts_with("/Script/") { return Ok(json!({ "dependencies": [], "parent_class": null })); }
                 let root_path_native = PathBuf::from(normalize_to_native(&req.project_root));
                 let rel_path = asset_path.replacen("/Game/", "Content/", 1);
-                
-                let walker = ignore::WalkBuilder::new(&root_path_native)
-                    .hidden(false)
-                    .git_ignore(true)
-                    .build();
-                
+                let walker = ignore::WalkBuilder::new(&root_path_native).hidden(false).git_ignore(true).build();
                 let target_name_uasset = format!("{}.uasset", rel_path.split('/').last().unwrap_or(""));
                 let target_name_umap = format!("{}.umap", rel_path.split('/').last().unwrap_or(""));
-
                 let mut target_file = None;
                 for entry in walker.filter_map(|e| e.ok()) {
                     let name = entry.file_name().to_str().unwrap_or("");
                     if name == target_name_uasset || name == target_name_umap {
                         let p = entry.path().to_string_lossy().replace('\\', "/");
-                        if p.contains(&rel_path) {
-                            target_file = Some(entry.path().to_path_buf());
-                            break;
-                        }
+                        if p.contains(&rel_path) { target_file = Some(entry.path().to_path_buf()); break; }
                     }
                 }
-                
                 if let Some(file) = target_file {
                     let mut parser = crate::uasset::UAssetParser::new();
                     if let Ok(_) = parser.parse(&file) {
                         let mut deps = parser.imports;
                         let parent = parser.parent_class;
-                        deps.sort();
-                        deps.dedup();
-                        return Ok(json!({
-                            "dependencies": deps,
-                            "parent_class": parent
-                        }));
+                        deps.sort(); deps.dedup();
+                        return Ok(json!({ "dependencies": deps, "parent_class": parent }));
                     }
                 }
                 Ok(json!({ "dependencies": [], "parent_class": null }))
             }
             QueryRequest::FindDerivedClasses { base_class } => {
-                {
-                    let active_scans = state.active_asset_scans.lock().unwrap();
-                    if active_scans.contains(&root_key) {
-                        return Ok(json!([{ "name": "Scanning...", "path": "", "symbol_type": "scanning" }]));
-                    }
-                }
-
+                { let active_scans = state.active_asset_scans.lock().unwrap(); if active_scans.contains(&root_key) { return Ok(json!([{ "name": "Scanning...", "path": "", "symbol_type": "scanning" }])); } }
                 let mut results = crate::query::process_query(&conn, QueryRequest::FindDerivedClasses { base_class: base_class.clone() })?.as_array().cloned().unwrap_or_default();
                 let graphs = state.asset_graphs.lock().unwrap();
                 if let Some(graph) = graphs.get(&root_key) {
@@ -362,27 +271,15 @@ pub async fn handle_query(state: Arc<AppState>, params: &Value, tx: mpsc::Sender
                     let prefixes = ['a', 'u', 'f', 'e', 't', 's'];
                     if base_class.len() > 2 {
                         let first = base_class.chars().next().unwrap().to_ascii_lowercase();
-                        if prefixes.contains(&first) && base_class.chars().nth(1).unwrap().is_uppercase() {
-                            try_names.push(base_class[1..].to_lowercase());
-                        }
+                        if prefixes.contains(&first) && base_class.chars().nth(1).unwrap().is_uppercase() { try_names.push(base_class[1..].to_lowercase()); }
                     }
-
                     for name in &try_names {
                         let dot_name = format!(".{}", name);
                         for (k, v) in &graph.derived {
                             if k.ends_with(&dot_name) || **k == **name {
                                 for asset in v {
-                                    // Case-insensitive duplicate check
-                                    let exists = results.iter().any(|r| {
-                                        r["path"].as_str().map(|p| p.to_lowercase()) == Some(asset.to_lowercase())
-                                    });
-                                    if !exists {
-                                        results.push(json!({ 
-                                            "name": asset.split('/').last().unwrap_or(asset).replace(".uasset", ""), 
-                                            "path": asset.to_string(), 
-                                            "symbol_type": "uasset" 
-                                        }));
-                                    }
+                                    let exists = results.iter().any(|r| r["path"].as_str().map(|p| p.to_lowercase()) == Some(asset.to_lowercase()));
+                                    if !exists { results.push(json!({ "name": asset.split('/').last().unwrap_or(asset).replace(".uasset", ""), "path": asset.to_string(), "symbol_type": "uasset" })); }
                                 }
                             }
                         }
@@ -394,12 +291,8 @@ pub async fn handle_query(state: Arc<AppState>, params: &Value, tx: mpsc::Sender
                 let graphs = state.asset_graphs.lock().unwrap();
                 if let Some(graph) = graphs.get(&root_key) {
                     let mut all_assets: HashSet<String> = HashSet::new();
-                    for assets in graph.references.values() {
-                        for a in assets { all_assets.insert(a.to_string()); }
-                    }
-                    for assets in graph.derived.values() {
-                        for a in assets { all_assets.insert(a.to_string()); }
-                    }
+                    for assets in graph.references.values() { for a in assets { all_assets.insert(a.to_string()); } }
+                    for assets in graph.derived.values() { for a in assets { all_assets.insert(a.to_string()); } }
                     let mut result: Vec<String> = all_assets.into_iter().collect();
                     result.sort();
                     return Ok(json!(result));
@@ -407,11 +300,7 @@ pub async fn handle_query(state: Arc<AppState>, params: &Value, tx: mpsc::Sender
                 Ok(json!([]))
             }
             QueryRequest::GetConfigData { engine_root } => {
-                let data = crate::query::config::get_config_data_with_cache(
-                    &state,
-                    &req.project_root,
-                    engine_root.as_deref()
-                )?;
+                let data = crate::query::config::get_config_data_with_cache(&state, &req.project_root, engine_root.as_deref())?;
                 Ok(json!(data))
             }
             QueryRequest::GetCompletions { content, line, character, file_path } => {
@@ -431,9 +320,7 @@ pub async fn handle_query(state: Arc<AppState>, params: &Value, tx: mpsc::Sender
                         }
                         Ok(())
                     })
-                } else {
-                    crate::query::process_query(&conn, req.query)
-                }
+                } else { crate::query::process_query(&conn, req.query) }
             }
         }
     }).await?
@@ -447,7 +334,8 @@ pub async fn handle_scan(state: &AppState, params: &Value) -> anyhow::Result<Val
     tokio::task::spawn_blocking(move || {
         let language = tree_sitter_unreal_cpp::LANGUAGE.into();
         let query = tree_sitter::Query::new(&language, scanner::QUERY_STR).unwrap();
-        let results: Vec<crate::types::ParseResult> = req.files.into_iter().filter_map(|input| scanner::process_file(&input, &language, &query).ok()).collect();
+        let include_query = tree_sitter::Query::new(&language, scanner::INCLUDE_QUERY_STR).unwrap();
+        let results: Vec<crate::types::ParseResult> = req.files.into_iter().filter_map(|input| scanner::process_file(&input, &language, &query, &include_query).ok()).collect();
         let mut conn = conn_arc.lock().unwrap();
         db::save_to_db(&mut conn, &results, Arc::new(crate::types::StdoutReporter))?;
         Ok(serde_json::json!(results.len()))

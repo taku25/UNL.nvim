@@ -75,6 +75,7 @@ pub struct ParseResult {
 pub struct ParseData {
     pub classes: Vec<ClassInfo>,
     pub calls: Vec<CallInfo>,
+    pub includes: Vec<String>,
     pub parser: String,
     pub new_hash: String,
 }
@@ -255,6 +256,14 @@ pub enum QueryRequest {
     GetModuleDirsByNameAndRoot { name: String, root: String },
     GetClassFilePath { class_name: String },
     GetFileSymbols { file_path: String },
+    SearchSymbols { pattern: String, limit: usize },
+    GetDependFiles { 
+        file_path: String, 
+        #[serde(default)]
+        recursive: bool, 
+        #[serde(default)]
+        game_only: bool 
+    },
     GrepAssets {
         pattern: String,
     },

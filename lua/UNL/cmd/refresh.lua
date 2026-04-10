@@ -1,5 +1,3 @@
--- lua/UNL/cmd/refresh.lua (Server-Aware Progress Reporting)
-local scanner = require("UNL.scanner")
 local path_util = require("UNL.path")
 local finder = require("UNL.finder")
 local log = require("UNL.logging").get("UNL")
@@ -7,16 +5,12 @@ local unl_config = require("UNL.config")
 local progress_backend = require("UNL.backend.progress")
 local unl_events = require("UNL.event.events")
 local unl_event_types = require("UNL.event.types")
-
-local M = {}
-
 local rpc = require("UNL.rpc")
 local server_manager = require("UNL.scanner.server")
 local vcs = require("UNL.vcs")
 
 local M = {}
 
--- 実行中のリフレッシュをプロジェクトルート単位で管理
 local active_refreshes = {}
 
 function M.execute(opts, on_complete)
@@ -39,9 +33,8 @@ function M.execute(opts, on_complete)
         local project_root = vim.fn.fnamemodify(project_info.uproject, ":h")
         local project_root_norm = path_util.normalize(project_root)
 
-        -- すでに実行中の場合はスキップ
         if active_refreshes[project_root_norm] then
-            log.debug("Refresh already in progress for: %s. Skipping redundant request.", project_root_norm)
+            log.debug("Refresh already in progress for: %s", project_root_norm)
             if on_complete then on_complete(true) end
             return
         end
@@ -67,50 +60,38 @@ function M.execute(opts, on_complete)
             vcs_hash = current_vcs,
         }
 
-        -- Initialize Progress Backend
         local progress, _ = progress_backend.create_for_refresh(unl_config.get("UNL"), {
             title = "UNL Refresh: " .. vim.fn.fnamemodify(project_root, ":t"),
             client_name = "UNL.Server",
-            weights = {
-                discovery = 0.05,
-                db_sync = 0.2,
-                file_scan = 0.05,
-                analysis = 0.6,
-                finalizing = 0.1 -- 10% weight for finalization
-            }
+            weights = { discovery = 0.05, db_sync = 0.2, file_scan = 0.05, analysis = 0.6, finalizing = 0.1 }
         })
         progress:open()
-        
-        -- Ensure stages are defined
         progress:stage_define("discovery", 100)
         progress:stage_define("db_sync", 100)
-        progress:stage_define("file_scan", 10000) -- Auto-grows
-        progress:stage_define("analysis", 1000)   -- Auto-grows
+        progress:stage_define("file_scan", 10000)
+        progress:stage_define("analysis", 1000)
         progress:stage_define("finalizing", 100)
 
-        log.debug("Requesting refresh for: %s (Scope: %s)", project_root, req.scope)
+        log.debug("Requesting refresh for: %s", project_root)
         
         rpc.request("refresh", req, function(method, msg)
             local stage = msg.stage or msg[2]
             local current = msg.current or msg[3]
             local message = msg.message or msg[5]
-            
             if method == "progress" and stage then
                 progress:stage_update(stage, current, message)
             end
         end, function(success, result_or_err)
-            active_refreshes[project_root_norm] = nil -- 完了時にロックを解除
-            
+            active_refreshes[project_root_norm] = nil
             progress:finish(success)
             if success then
                 log.debug("Refresh completed successfully.")
                 unl_events.publish(unl_event_types.ON_AFTER_REFRESH_COMPLETED, { project_root = project_root })
             else
-                local err_msg = result_or_err or "Unknown error"
-                log.error("Refresh failed: %s", err_msg)
+                log.error("Refresh failed: %s", tostring(result_or_err))
             end
             if on_complete then on_complete(success) end
-        end, 600000) -- 10 minutes timeout
+        end, 600000) -- Default timeout 10 mins (will be reset by progress)
     end)
 end
 

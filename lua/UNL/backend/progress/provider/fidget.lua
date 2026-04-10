@@ -30,7 +30,20 @@ local spec = {
       local now = vim.loop.hrtime() / 1e6
       if now - last >= throttle_ms then
         last = now
-        handle:report({ percentage = aggr:percentage(), message = msg })
+        local total_pct = aggr:percentage()
+        local stage_info = aggr:current_stage_info()
+        
+        local display_pct = total_pct
+        local display_msg = msg
+        
+        if stage_info then
+          -- ステージ内の進捗率を表示のメインにする
+          display_pct = math.floor(stage_info.ratio * 100 + 0.5)
+          -- メッセージに全体の進捗を添える
+          display_msg = string.format("[%d%%] %s", total_pct, msg or stage_info.name)
+        end
+        
+        handle:report({ percentage = display_pct, message = display_msg })
       end
     end
 

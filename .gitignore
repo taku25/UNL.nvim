@@ -1,0 +1,22 @@
+# Rust
+/scanner/target/
+**/*.rs.bk
+
+# SQLite DB files (local cache)
+*.db
+*.db-journal
+*.db-wal
+
+# Logs
+*.log
+
+# Neovim / Editor
+*.swp
+*.swo
+*~
+.netrwhist
+undo/
+
+# OS
+.DS_Store
+Thumbs.db

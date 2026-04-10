@@ -666,15 +666,17 @@ fn fetch_members_recursive(
         if visited.contains_key(&current_class_id) { continue; }
         visited.insert(current_class_id, true);
         
-        let mut sql = "
-            SELECT smn.text, smt.text, srt.text, access, detail, m.line_number, sp.text
+        let mut sql = format!("
+            {}
+            SELECT smn.text, smt.text, srt.text, access, detail, m.line_number, dp.full_path || '/' || sn.text
             FROM members m 
             JOIN strings smn ON m.name_id = smn.id
             JOIN strings smt ON m.type_id = smt.id
             LEFT JOIN strings srt ON m.return_type_id = srt.id
             LEFT JOIN files f ON m.file_id = f.id
-            LEFT JOIN strings sp ON f.path_id = sp.id
-            WHERE m.class_id = ?".to_string();
+            LEFT JOIN dir_paths dp ON f.directory_id = dp.id
+            LEFT JOIN strings sn ON f.filename_id = sn.id
+            WHERE m.class_id = ?", crate::db::path::PATH_CTE);
         
         if prefix_search.is_some() {
             sql.push_str(" AND smn.text LIKE ?");

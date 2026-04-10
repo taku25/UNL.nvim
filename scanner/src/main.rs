@@ -107,7 +107,8 @@ fn run_scan_command(port: u16, is_server_running: bool) -> anyhow::Result<()> {
             let inputs = req.files;
             let db_path = inputs.get(0).and_then(|i| i.db_path.clone());
             let results: Vec<ParseResult> = inputs.into_par_iter().filter_map(|input| {
-                scanner::process_file(&input, &language, &query).ok()
+                let include_query = Query::new(&language, scanner::INCLUDE_QUERY_STR).unwrap();
+                scanner::process_file(&input, &language, &query, &include_query).ok()
             }).collect();
 
             if let Some(path) = db_path {

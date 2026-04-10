@@ -278,6 +278,15 @@ function M.get_file_symbols(file_path, cb)
     M.request("GetFileSymbols", { file_path = norm_path }, cb)
 end
 
+function M.get_depend_files(file_path, recursive, game_only, cb)
+    local norm_path = file_path:gsub("\\", "/")
+    M.request("GetDependFiles", { 
+        file_path = norm_path, 
+        recursive = recursive, 
+        game_only = game_only 
+    }, cb)
+end
+
 function M.parse_buffer(bufnr_or_opts, cb)
     local params = {}
     
