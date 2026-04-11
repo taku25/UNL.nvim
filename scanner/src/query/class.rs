@@ -4,14 +4,38 @@ use std::collections::HashMap;
 use crate::db::path::{PATH_CTE};
 
 pub fn get_file_symbols(conn: &Connection, file_path: &str) -> anyhow::Result<Value> {
-    // ファイル名から ID を特定する (簡易版)
-    let filename = std::path::Path::new(file_path).file_name().and_then(|s| s.to_str()).unwrap_or("");
-    let file_id: i64 = conn.query_row(
-        "SELECT id FROM files WHERE filename_id = (SELECT id FROM strings WHERE text = ? LIMIT 1) LIMIT 1",
-        [filename], |r| r.get(0)
-    ).unwrap_or(0);
+    // フルパスで file_id を特定する
+    let file_id_sql = format!(
+        "{} SELECT f.id FROM files f
+         JOIN dir_paths dp ON f.directory_id = dp.id
+         JOIN strings sf ON f.filename_id = sf.id
+         WHERE dp.full_path || '/' || sf.text = ?
+         LIMIT 1",
+        PATH_CTE
+    );
+    let file_id: i64 = conn
+        .query_row(&file_id_sql, [file_path], |r| r.get(0))
+        .unwrap_or(0);
 
-    if file_id == 0 { return Ok(json!([])); }
+    // フルパスでマッチしなければファイル名のみでフォールバック
+    let file_id = if file_id == 0 {
+        let filename = std::path::Path::new(file_path)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("");
+        conn.query_row(
+            "SELECT id FROM files WHERE filename_id = (SELECT id FROM strings WHERE text = ? LIMIT 1) LIMIT 1",
+            [filename],
+            |r| r.get(0),
+        )
+        .unwrap_or(0)
+    } else {
+        file_id
+    };
+
+    if file_id == 0 {
+        return Ok(json!([]));
+    }
 
     let mut stmt = conn.prepare("
         SELECT c.id, sc.text as name, c.line_number, c.symbol_type, c.end_line_number
@@ -19,43 +43,55 @@ pub fn get_file_symbols(conn: &Connection, file_path: &str) -> anyhow::Result<Va
         JOIN strings sc ON c.name_id = sc.id
         WHERE c.file_id = ?
     ")?;
-    
+
+    // メンバーのファイルパスも含めて返す
+    let member_sql = format!(
+        "{} SELECT sn.text, st.text, m.access, m.flags, m.line_number, m.detail,
+                srt.text, m.is_static,
+                COALESCE(dp.full_path || '/' || sf.text, '') as file_path
+         FROM members m
+         JOIN strings sn  ON m.name_id = sn.id
+         JOIN strings st  ON m.type_id = st.id
+         LEFT JOIN strings srt ON m.return_type_id = srt.id
+         LEFT JOIN files mf    ON m.file_id = mf.id
+         LEFT JOIN dir_paths dp ON mf.directory_id = dp.id
+         LEFT JOIN strings sf  ON mf.filename_id = sf.id
+         WHERE m.class_id = ?
+         ORDER BY m.line_number",
+        PATH_CTE
+    );
+
     let mut rows = stmt.query([file_id])?;
     let mut results = Vec::new();
     while let Some(row) = rows.next()? {
         let class_id: i64 = row.get(0)?;
         let name: String = row.get(1)?;
-        
-        // Members
-        let mut m_stmt = conn.prepare("
-            SELECT m.name_id, sn.text as name, st.text as type, m.access, m.flags, m.line_number, m.detail, srt.text as return_type, m.is_static
-            FROM members m
-            JOIN strings sn ON m.name_id = sn.id
-            JOIN strings st ON m.type_id = st.id
-            LEFT JOIN strings srt ON m.return_type_id = srt.id
-            WHERE m.class_id = ?
-        ")?;
+
+        let mut m_stmt = conn.prepare(&member_sql)?;
         let mut m_rows = m_stmt.query([class_id])?;
         let mut members = Vec::new();
         while let Some(mr) = m_rows.next()? {
+            let mfp: String = mr.get(8)?;
             members.push(json!({
-                "name": mr.get::<_, String>(1)?,
-                "type": mr.get::<_, String>(2)?,
-                "access": mr.get::<_, String>(3)?,
-                "flags": mr.get::<_, String>(4)?,
-                "line": mr.get::<_, i64>(5)?,
-                "detail": mr.get::<_, Option<String>>(6)?,
-                "return_type": mr.get::<_, Option<String>>(7)?,
-                "is_static": mr.get::<_, i64>(8)? == 1,
+                "name":        mr.get::<_, String>(0)?,
+                "type":        mr.get::<_, String>(1)?,
+                "access":      mr.get::<_, String>(2)?,
+                "flags":       mr.get::<_, String>(3)?,
+                "line":        mr.get::<_, i64>(4)?,
+                "detail":      mr.get::<_, Option<String>>(5)?,
+                "return_type": mr.get::<_, Option<String>>(6)?,
+                "is_static":   mr.get::<_, i64>(7)? == 1,
+                "file_path":   if mfp.is_empty() { file_path.to_string() } else { mfp },
             }));
         }
 
         results.push(json!({
-            "name": name,
-            "line": row.get::<_, i64>(2)?,
-            "type": row.get::<_, String>(3)?,
-            "end_line": row.get::<_, i64>(4)?,
-            "members": members,
+            "name":      name,
+            "line":      row.get::<_, i64>(2)?,
+            "kind":      row.get::<_, String>(3)?,
+            "end_line":  row.get::<_, i64>(4)?,
+            "file_path": file_path,
+            "members":   members,
         }));
     }
     Ok(json!(results))
