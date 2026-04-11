@@ -63,24 +63,24 @@ function M.execute(opts, on_complete)
         local progress, _ = progress_backend.create_for_refresh(unl_config.get("UNL"), {
             title = "UNL Refresh: " .. vim.fn.fnamemodify(project_root, ":t"),
             client_name = "UNL.Server",
-            weights = { discovery = 0.05, db_sync = 0.2, file_scan = 0.05, analysis = 0.6, finalizing = 0.1 }
         })
         progress:open()
-        progress:stage_define("discovery", 100)
-        progress:stage_define("db_sync", 100)
-        progress:stage_define("file_scan", 10000)
-        progress:stage_define("analysis", 1000)
-        progress:stage_define("finalizing", 100)
 
         log.debug("Requesting refresh for: %s", project_root)
         
         rpc.request("refresh", req, function(method, msg)
-            local stage   = msg.stage   or msg[2]
-            local current = msg.current or msg[3]
-            local total   = msg.total   or msg[4]
-            local message = msg.message or msg[5]
-            if method == "progress" and stage then
-                progress:stage_update(stage, current, total, message)
+            if method == "progress_plan" then
+                -- サーバーから最初に送られてくるフェーズ計画でプログレスを初期化する。
+                local phases = msg.phases or msg[2] or {}
+                progress:define_from_plan(phases)
+            elseif method == "progress" then
+                local stage   = msg.stage   or msg[2]
+                local current = msg.current or msg[3]
+                local total   = msg.total   or msg[4]
+                local message = msg.message or msg[5]
+                if stage then
+                    progress:stage_update(stage, current, total, message)
+                end
             end
         end, function(success, result_or_err)
             active_refreshes[project_root_norm] = nil

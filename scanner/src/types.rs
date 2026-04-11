@@ -128,6 +128,23 @@ pub struct Progress {
     pub message: String,
 }
 
+/// A single phase entry sent in the progress_plan notification.
+#[derive(Serialize, Debug, Clone)]
+pub struct PhaseInfo {
+    pub name: String,
+    pub label: String,
+    pub weight: f64,
+}
+
+/// The plan notification sent at the very start of a refresh so that the
+/// client can build its progress UI from server-defined phases.
+#[derive(Serialize, Debug)]
+pub struct ProgressPlan {
+    #[serde(rename = "type")]
+    pub msg_type: String,
+    pub phases: Vec<PhaseInfo>,
+}
+
 #[derive(Debug, Clone)]
 pub struct ModuleDef {
     pub name: String,
@@ -308,9 +325,12 @@ pub enum QueryRequest {
 use std::io::{self, Write};
 
 pub trait ProgressReporter: Send + Sync {
-
     fn report(&self, stage: &str, current: usize, total: usize, message: &str);
 
+    /// Send the phase plan once at the start of a refresh so the client
+    /// can build its progress UI from server-defined phases instead of
+    /// hardcoded weights.
+    fn report_plan(&self, phases: &[PhaseInfo]);
 }
 
 
@@ -347,6 +367,19 @@ impl ProgressReporter for StdoutReporter {
 
         }
 
+    }
+
+    fn report_plan(&self, phases: &[PhaseInfo]) {
+        let plan = ProgressPlan {
+            msg_type: "progress_plan".to_string(),
+            phases: phases.to_vec(),
+        };
+        if let Ok(mut json) = serde_json::to_string(&plan) {
+            json.push('\n');
+            let mut stdout = io::stdout().lock();
+            let _ = stdout.write_all(json.as_bytes());
+            let _ = stdout.flush();
+        }
     }
 
 }

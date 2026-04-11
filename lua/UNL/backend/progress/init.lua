@@ -63,10 +63,21 @@ function M.create_for_refresh(conf, opts)
     update=function() end,
     finish=function() end,
     stage_define = function() end,
-    stage_update = function() end }
+    stage_update = function() end,
+    define_from_plan = function() end }
 
   local W = {}
   function W:open() if inst.open then inst:open() end end
+
+  --- Called once with the phase plan sent by the server at refresh start.
+  --- phases: array of { name, label, weight }
+  function W:define_from_plan(phases)
+    events.emit{
+      category="progress", purpose="refresh",
+      phase="define_from_plan", phases=phases,
+    }
+    if inst.define_from_plan then inst:define_from_plan(phases) end
+  end
 
   -- 新規: multi-stage 用の透過メソッド (必要なければ削除可)
   function W:stage_define(name, total)

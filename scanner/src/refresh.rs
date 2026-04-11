@@ -9,7 +9,7 @@ use rusqlite::{params, Connection};
 use ignore::{WalkBuilder, WalkState};
 use regex::Regex;
 use tree_sitter::Query;
-use crate::types::{RefreshRequest, ModuleDef, ComponentDef, ProgressReporter, InputFile, ParseResult};
+use crate::types::{RefreshRequest, ModuleDef, ComponentDef, ProgressReporter, PhaseInfo, InputFile, ParseResult};
 use crate::{scanner, db};
 use crate::db::path::get_or_create_directory;
 
@@ -39,6 +39,16 @@ pub fn run_refresh(req: RefreshRequest, reporter: Arc<dyn ProgressReporter>) -> 
 
     let ue_version = engine_root.as_ref().and_then(|r| get_ue_version(r));
     if !project_root.exists() { return Err(anyhow::anyhow!("Project root does not exist: {:?}", project_root)); }
+
+    // Send the phase plan first so the Lua client can build its progress UI
+    // without any hardcoded weights on its side.
+    reporter.report_plan(&[
+        PhaseInfo { name: "discovery".into(),  label: "Discovery".into(),  weight: 0.05 },
+        PhaseInfo { name: "db_sync".into(),    label: "DB Sync".into(),    weight: 0.15 },
+        PhaseInfo { name: "analysis".into(),   label: "Analysis".into(),   weight: 0.65 },
+        PhaseInfo { name: "finalizing".into(), label: "Finalizing".into(), weight: 0.15 },
+    ]);
+
     reporter.report("discovery", 0, 100, &format!("Scanning: {:?}", project_root));
 
     let project_name = get_name_from_root(&project_root);

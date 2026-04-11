@@ -52,6 +52,10 @@ local spec = {
     end
 
     local r = {}
+    function r:define_from_plan(phases)
+      aggr:define_from_plan(phases)
+      push(string.format("Plan: %d phases", #phases))
+    end
     function r:stage_define(name, total)
       aggr:define(name, total); push(aggr:format(name, 0, total))
     end

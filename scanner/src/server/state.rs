@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 use tokio::sync::mpsc;
 use tracing::info;
 use serde::{Serialize, Deserialize};
-use crate::types::{Progress, ProgressReporter, ConfigCache};
+use crate::types::{Progress, ProgressPlan, PhaseInfo, ProgressReporter, ConfigCache};
 use crate::db;
 use lru::LruCache;
 use std::num::NonZeroUsize;
@@ -25,6 +25,21 @@ impl ProgressReporter for RpcProgressReporter {
             message: message.to_string(),
         };
         let notification = (2, "progress", p);
+        if let Ok(vec) = rmp_serde::to_vec(&notification) {
+            let mut out = Vec::with_capacity(vec.len() + 4);
+            let len = vec.len() as u32;
+            out.extend_from_slice(&len.to_be_bytes());
+            out.extend_from_slice(&vec);
+            let _ = self.tx.blocking_send(out);
+        }
+    }
+
+    fn report_plan(&self, phases: &[PhaseInfo]) {
+        let plan = ProgressPlan {
+            msg_type: "progress_plan".to_string(),
+            phases: phases.to_vec(),
+        };
+        let notification = (2, "progress_plan", plan);
         if let Ok(vec) = rmp_serde::to_vec(&notification) {
             let mut out = Vec::with_capacity(vec.len() + 4);
             let len = vec.len() as u32;

@@ -29,6 +29,9 @@ local spec = {
     local aggr = Aggregator.new(opts.weights)
     
     local r = {}
+    function r:define_from_plan(phases)
+      aggr:define_from_plan(phases)
+    end
     function r:open()
       status_manager.set({ active = true, percentage = 0, message = "Starting...", title = opts.title or "Task" })
     end

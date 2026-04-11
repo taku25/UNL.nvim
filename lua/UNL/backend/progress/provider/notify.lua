@@ -24,6 +24,9 @@ local spec = {
     end
 
     local r = {}
+    function r:define_from_plan(phases)
+      aggr:define_from_plan(phases)
+    end
     function r:stage_define(name, total)
       aggr:define(name, total)
       emit(name, 0, total)

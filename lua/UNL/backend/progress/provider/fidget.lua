@@ -30,13 +30,16 @@ local spec = {
       local now = vim.loop.hrtime() / 1e6
       if now - last >= throttle_ms then
         last = now
-        -- "Analysis: 1234/5678 (42%)" 形式
-        local display_msg = aggr:format(name, done, total)
+        -- fidget が percentage を表示するので、message 側にはパーセントを含めない
+        local display_msg = aggr:format_no_pct(name, done, total)
         handle:report({ percentage = aggr:percentage(), message = display_msg })
       end
     end
 
     local r = {}
+    function r:define_from_plan(phases)
+      aggr:define_from_plan(phases)
+    end
     function r:stage_define(name, total)
       aggr:define(name, total)
       throttled(name, 0, total)
