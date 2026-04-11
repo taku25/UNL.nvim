@@ -118,6 +118,40 @@ pub fn get_files_in_modules(conn: &Connection, modules: Vec<String>, extensions:
     Ok(json!(results))
 }
 
+/// パスの一部（部分文字列）でファイルを検索する。`#include` ナビゲーション等で使用。
+pub fn search_files_by_path_part(conn: &Connection, part: &str) -> anyhow::Result<Value> {
+    let sql = format!("
+        {}
+        SELECT dp.full_path || '/' || sn.text as path,
+               sm.text as module_name,
+               rd.full_path as module_root,
+               f.extension
+        FROM files f
+        JOIN dir_paths dp ON f.directory_id = dp.id
+        JOIN strings sn ON f.filename_id = sn.id
+        LEFT JOIN modules m ON f.module_id = m.id
+        LEFT JOIN strings sm ON m.name_id = sm.id
+        LEFT JOIN dir_paths rd ON m.root_directory_id = rd.id
+        WHERE (dp.full_path || '/' || sn.text) LIKE ?
+        LIMIT 100
+    ", PATH_CTE);
+
+    let pattern = format!("%{}%", part);
+    let mut stmt = conn.prepare(&sql)?;
+    let mut rows = stmt.query([pattern])?;
+
+    let mut results = Vec::new();
+    while let Some(row) = rows.next()? {
+        results.push(json!({
+            "path": row.get::<_, String>(0)?,
+            "module_name": row.get::<_, Option<String>>(1)?,
+            "module_root": row.get::<_, Option<String>>(2)?,
+            "extension": row.get::<_, String>(3)?,
+        }));
+    }
+    Ok(json!(results))
+}
+
 pub fn get_files_in_modules_async<F>(conn: &Connection, modules: Vec<String>, extensions: Option<Vec<String>>, filter: Option<String>, mut on_items: F) -> anyhow::Result<Value>
 where F: FnMut(Vec<Value>) -> anyhow::Result<()> {
     let sql = format!("

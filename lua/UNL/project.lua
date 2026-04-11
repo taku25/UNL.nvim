@@ -66,7 +66,7 @@ function M.get_maps(start_path, on_complete)
           name = tostring(row.name),
           type = tostring(row.type or ""),
           scope = tostring(row.scope or ""),
-          module_root = tostring(row.root_path),
+          module_root = tostring(row.module_root or ""),
           path = row.build_cs_path and tostring(row.build_cs_path) or nil,
           owner_name = tostring(row.owner_name or ""),
           component_name = tostring(row.component_name or ""),

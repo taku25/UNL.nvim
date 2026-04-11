@@ -37,6 +37,9 @@ pub fn process_query(conn: &Connection, request: QueryRequest) -> anyhow::Result
         
         QueryRequest::GetClassFilePath { class_name } => 
             util::get_class_file_path(conn, &class_name),
+
+        QueryRequest::SearchFilesByPathPart { part } =>
+            file::search_files_by_path_part(conn, &part),
         
         QueryRequest::ParseBuffer { content, file_path, line, character } => 
             buffer::parse_buffer(content, file_path, line, character),
