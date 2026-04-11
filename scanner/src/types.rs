@@ -296,6 +296,13 @@ pub enum QueryRequest {
     GetConfigData {
         engine_root: Option<String>,
     },
+    GotoDefinition {
+        content: String,
+        line: u32,
+        character: u32,
+        #[serde(default)]
+        file_path: Option<String>,
+    },
 }
 
 use std::io::{self, Write};

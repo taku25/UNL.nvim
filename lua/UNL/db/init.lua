@@ -125,6 +125,13 @@ function M.find_symbol_in_module(module, symbol, callback)
     remote.find_symbol_in_module(module, symbol, callback)
 end
 
+--- カーソル位置のシンボル定義をサーバー側 tree-sitter で解析して返す
+--- params: { content, line, character, file_path? }
+--- callback(result): result は { file_path, line_number, symbol_name, class_name } または nil
+function M.goto_definition(params, callback)
+    remote.goto_definition(params, callback)
+end
+
 --- *.Target.cs ファイルの一覧を取得
 function M.get_target_files(callback)
     remote.get_target_files(callback)

@@ -10,6 +10,7 @@ pub mod config;
 pub mod file;
 pub mod search;
 pub mod util;
+pub mod goto;
 
 pub fn process_query(conn: &Connection, request: QueryRequest) -> anyhow::Result<Value> {
     match request {
@@ -46,6 +47,16 @@ pub fn process_query(conn: &Connection, request: QueryRequest) -> anyhow::Result
         
         QueryRequest::ParseBuffer { content, file_path, line, character } => 
             buffer::parse_buffer(content, file_path, line, character),
+
+        // Goto definition / symbol search
+        QueryRequest::GotoDefinition { content, line, character, file_path } =>
+            goto::goto_definition(conn, content, line, character, file_path),
+        QueryRequest::FindSymbolInInheritanceChain { class_name, symbol_name, .. } =>
+            Ok(goto::find_symbol_in_inheritance_chain(conn, &class_name, &symbol_name)?
+                .unwrap_or(Value::Null)),
+        QueryRequest::FindSymbolInModule { module, symbol } =>
+            Ok(goto::find_symbol_in_module(conn, &module, &symbol)?
+                .unwrap_or(Value::Null)),
 
         // Assets / Components
         QueryRequest::GetAssets => asset::get_assets(conn),

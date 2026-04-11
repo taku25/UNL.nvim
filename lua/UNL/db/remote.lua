@@ -165,6 +165,16 @@ function M.find_symbol_in_module(module, symbol, cb)
     M.request("FindSymbolInModule", { module = module, symbol = symbol }, cb)
 end
 
+function M.goto_definition(params, cb)
+    -- params: { content, line, character, file_path? }
+    M.request("GotoDefinition", {
+        content   = params.content,
+        line      = params.line,
+        character = params.character,
+        file_path = params.file_path,
+    }, cb)
+end
+
 function M.find_class_by_name(name, cb)
     M.request("FindClassByName", { name = name }, cb)
 end
