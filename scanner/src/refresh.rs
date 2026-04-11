@@ -1,16 +1,16 @@
 use std::fs;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use rayon::prelude::*;
 use rusqlite::{params, Connection};
-use ignore::WalkBuilder;
+use ignore::{WalkBuilder, WalkState};
 use regex::Regex;
 use tree_sitter::Query;
 use crate::types::{RefreshRequest, ModuleDef, ComponentDef, ProgressReporter, InputFile, ParseResult};
 use crate::{scanner, db};
-use crate::db::path::{PATH_CTE, get_or_create_directory};
+use crate::db::path::get_or_create_directory;
 
 #[derive(serde::Deserialize, Debug)]
 #[allow(non_snake_case)]
@@ -43,7 +43,6 @@ pub fn run_refresh(req: RefreshRequest, reporter: Arc<dyn ProgressReporter>) -> 
     let project_name = get_name_from_root(&project_root);
     let engine_name = engine_root.as_ref().map(|r| get_name_from_root(r));
     let mut component_defs = Vec::new();
-    let mut module_build_files = Vec::new();
 
     let uproject_path = fs::read_dir(&project_root)?.filter_map(|e| e.ok()).find(|e| e.path().extension().map_or(false, |ext| ext == "uproject")).map(|e| e.path());
     component_defs.push(ComponentDef { name: project_name.clone(), display_name: project_root.file_name().unwrap().to_string_lossy().to_string(), comp_type: "Game".to_string(), root_path: project_root.clone(), uproject_path: uproject_path.clone(), uplugin_path: None, owner_name: project_name.clone() });
@@ -59,32 +58,92 @@ pub fn run_refresh(req: RefreshRequest, reporter: Arc<dyn ProgressReporter>) -> 
 
     let excludes: HashSet<String> = req.config.excludes_directory.iter().map(|s| s.to_lowercase()).collect();
     let include_exts: HashSet<String> = req.config.include_extensions.iter().map(|e| e.to_lowercase()).collect();
-    let mut files_scanned = 0;
-    let mut all_discovered_files = Vec::new();
 
-    for s_root in &search_roots {
-        let root_owner = if engine_root.as_ref().map_or(false, |er| s_root.starts_with(er)) { engine_name.as_ref().unwrap().clone() } else { project_name.clone() };
-        let walker = WalkBuilder::new(s_root).hidden(false).git_ignore(false).filter_entry({
-            let excludes = excludes.clone();
-            move |entry| { if let Some(name) = entry.file_name().to_str() { if excludes.contains(&name.to_lowercase()) { return false; } } true }
-        }).build();
+    // ① Parallel walk: collect discovered files, plugins, and build.cs files concurrently
+    let all_discovered_files: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+    let module_build_files: Arc<Mutex<Vec<(PathBuf, String)>>> = Arc::new(Mutex::new(Vec::new()));
+    let plugin_components: Arc<Mutex<Vec<ComponentDef>>> = Arc::new(Mutex::new(Vec::new()));
+    let files_scanned = Arc::new(AtomicUsize::new(0));
 
-        for entry in walker.filter_map(|e| e.ok()) {
-            files_scanned += 1;
-            if files_scanned % 5000 == 0 { reporter.report("discovery", 10, 100, &format!("Discovery: {} files seen...", files_scanned)); }
+    let excludes_a = Arc::new(excludes);
+    let include_exts_a = Arc::new(include_exts);
+    let engine_root_a: Arc<Option<PathBuf>> = Arc::new(engine_root.clone());
+    let engine_name_a: Arc<Option<String>> = Arc::new(engine_name.clone());
+    let project_root_a = Arc::new(project_root.clone());
+    let project_name_a = Arc::new(project_name.clone());
+
+    let mut builder = WalkBuilder::new(&search_roots[0]);
+    for root in search_roots.iter().skip(1) { builder.add(root); }
+    builder.hidden(false).git_ignore(false);
+
+    {
+        let excludes = Arc::clone(&excludes_a);
+        builder.filter_entry(move |e| {
+            if let Some(name) = e.file_name().to_str() {
+                if excludes.contains(&name.to_lowercase()) { return false; }
+            }
+            true
+        });
+    }
+
+    builder.build_parallel().run(|| {
+        let adf       = Arc::clone(&all_discovered_files);
+        let mbf       = Arc::clone(&module_build_files);
+        let pc        = Arc::clone(&plugin_components);
+        let counter   = Arc::clone(&files_scanned);
+        let exts      = Arc::clone(&include_exts_a);
+        let er        = Arc::clone(&engine_root_a);
+        let en        = Arc::clone(&engine_name_a);
+        let pr        = Arc::clone(&project_root_a);
+        let pn        = Arc::clone(&project_name_a);
+        let reporter  = Arc::clone(&reporter);
+
+        Box::new(move |result| {
+            let entry = match result { Ok(e) => e, Err(_) => return WalkState::Continue };
+            let count = counter.fetch_add(1, Ordering::Relaxed) + 1;
+            if count % 5000 == 0 {
+                reporter.report("discovery", 10, 100, &format!("Discovery: {} files seen...", count));
+            }
             let path = entry.path();
-            let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
+            let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
+            let root_owner = if er.as_ref().as_ref().map_or(false, |er| path.starts_with(er)) {
+                en.as_ref().as_ref().cloned().unwrap_or_else(|| "Engine".to_string())
+            } else {
+                pn.as_ref().clone()
+            };
+
             if ext == "uplugin" {
-                let plugin_root = path.parent().unwrap();
-                let owner = if plugin_root.starts_with(&project_root) { project_name.clone() } else { engine_name.as_ref().cloned().unwrap_or_else(|| "Engine".to_string()) };
-                component_defs.push(ComponentDef { name: get_name_from_root(plugin_root), display_name: path.file_stem().unwrap().to_string_lossy().to_string(), comp_type: "Plugin".to_string(), root_path: plugin_root.to_path_buf(), uproject_path: None, uplugin_path: Some(path.to_path_buf()), owner_name: owner });
+                if let Some(plugin_root) = path.parent() {
+                    let owner = if plugin_root.starts_with(pr.as_ref()) { pn.as_ref().clone() }
+                                else { en.as_ref().as_ref().cloned().unwrap_or_else(|| "Engine".to_string()) };
+                    let comp = ComponentDef {
+                        name: get_name_from_root(plugin_root),
+                        display_name: path.file_stem().unwrap_or_default().to_string_lossy().to_string(),
+                        comp_type: "Plugin".to_string(),
+                        root_path: plugin_root.to_path_buf(),
+                        uproject_path: None,
+                        uplugin_path: Some(path.to_path_buf()),
+                        owner_name: owner,
+                    };
+                    pc.lock().unwrap().push(comp);
+                }
             } else if path.file_name().map_or(false, |n| n.to_string_lossy().to_lowercase().ends_with(".build.cs")) {
-                module_build_files.push((path.to_path_buf(), root_owner.to_string()));
+                mbf.lock().unwrap().push((path.to_path_buf(), root_owner));
             }
-            if entry.file_type().map_or(false, |t| t.is_file()) && include_exts.contains(&ext.to_lowercase()) {
-                all_discovered_files.push((normalize_path(path), ext.to_lowercase()));
+
+            if entry.file_type().map_or(false, |t| t.is_file()) && exts.contains(&ext) {
+                adf.lock().unwrap().push((normalize_path(path), ext));
             }
-        }
+            WalkState::Continue
+        })
+    });
+
+    // Merge parallel results
+    let all_discovered_files = Arc::try_unwrap(all_discovered_files).unwrap().into_inner().unwrap();
+    let module_build_files   = Arc::try_unwrap(module_build_files).unwrap().into_inner().unwrap();
+    {
+        let mut found = plugin_components.lock().unwrap();
+        component_defs.extend(found.drain(..));
     }
 
     let mut seen_names = HashSet::new();
@@ -135,14 +194,38 @@ pub fn run_refresh(req: RefreshRequest, reporter: Arc<dyn ProgressReporter>) -> 
     let mut string_cache = HashMap::new();
     let mut dir_cache = HashMap::new();
 
+    // ② Load all directory entries once, then reconstruct paths in Rust — avoids recursive PATH_CTE
     let mut existing_mtimes = HashMap::new();
     {
         let count: i64 = conn.query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0)).unwrap_or(0);
         if count > 0 {
-            let sql = format!("{} SELECT dp.full_path || '/' || sn.text as path, f.mtime FROM files f JOIN dir_paths dp ON f.directory_id = dp.id JOIN strings sn ON f.filename_id = sn.id", PATH_CTE);
-            let mut stmt = conn.prepare(&sql)?;
-            let rows = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))?;
-            for r in rows { if let Ok((p, m)) = r { existing_mtimes.insert(p, m); } }
+            // Build id → (parent_id, name_segment) map
+            let mut dir_map: HashMap<i64, (Option<i64>, String)> = HashMap::new();
+            {
+                let mut stmt = conn.prepare(
+                    "SELECT d.id, d.parent_id, s.text FROM directories d JOIN strings s ON d.name_id = s.id"
+                )?;
+                let rows = stmt.query_map([], |row| Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, Option<i64>>(1)?,
+                    row.get::<_, String>(2)?,
+                )))?;
+                for r in rows.flatten() { dir_map.insert(r.0, (r.1, r.2)); }
+            }
+            // Reconstruct full paths per file without recursive SQL
+            let mut stmt = conn.prepare(
+                "SELECT f.directory_id, s.text, f.mtime FROM files f JOIN strings s ON f.filename_id = s.id"
+            )?;
+            let rows = stmt.query_map([], |row| Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+            )))?;
+            for r in rows.flatten() {
+                let (dir_id, filename, mtime) = r;
+                let full = reconstruct_path(&dir_map, dir_id, &filename);
+                existing_mtimes.insert(full, mtime);
+            }
         }
     }
 
@@ -244,6 +327,20 @@ pub fn run_refresh(req: RefreshRequest, reporter: Arc<dyn ProgressReporter>) -> 
 
 fn normalize_path(path: &Path) -> String { path.to_string_lossy().replace(char::from(92), "/") }
 fn get_name_from_root(path: &Path) -> String { path.file_name().and_then(|s| s.to_str()).unwrap_or("Unknown").to_string() }
+
+/// Reconstruct a slash-separated full path from the in-memory directory map.
+fn reconstruct_path(dir_map: &HashMap<i64, (Option<i64>, String)>, mut dir_id: i64, filename: &str) -> String {
+    let mut segments: Vec<String> = vec![filename.to_string()];
+    loop {
+        match dir_map.get(&dir_id) {
+            Some((Some(parent_id), name)) => { segments.push(name.clone()); dir_id = *parent_id; }
+            Some((None, name))            => { segments.push(name.clone()); break; }
+            None                          => break,
+        }
+    }
+    segments.reverse();
+    segments.join("/")
+}
 fn resolve_deep(name: &str, name_to_def: &HashMap<String, &ModuleDef>, memo: &mut HashMap<String, HashSet<String>>, stack: &mut Vec<String>) -> HashSet<String> {
     if let Some(cached) = memo.get(name) { return cached.clone(); }
     if stack.contains(&name.to_string()) { return HashSet::new(); }

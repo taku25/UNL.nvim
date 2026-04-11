@@ -38,6 +38,9 @@ pub fn process_query(conn: &Connection, request: QueryRequest) -> anyhow::Result
         QueryRequest::GetClassFilePath { class_name } => 
             util::get_class_file_path(conn, &class_name),
 
+        QueryRequest::GetClassesInModules { modules, symbol_type } =>
+            class::get_classes_in_modules(conn, modules, symbol_type),
+
         QueryRequest::SearchFilesByPathPart { part } =>
             file::search_files_by_path_part(conn, &part),
         
@@ -64,6 +67,9 @@ where F: FnMut(Vec<Value>) -> anyhow::Result<()> {
             
         QueryRequest::SearchFilesInModulesAsync { modules, filter, limit } => 
             asset::search_files_in_modules_async(conn, modules, filter, limit, on_items),
+
+        QueryRequest::GetClassesInModulesAsync { modules, symbol_type } =>
+            class::get_classes_in_modules_async(conn, modules, symbol_type, on_items),
             
         _ => process_query(conn, request)
     }

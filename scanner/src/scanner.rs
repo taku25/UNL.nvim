@@ -1,11 +1,33 @@
 use std::fs::File;
 use std::cell::RefCell;
 use std::path::Path;
+use std::sync::OnceLock;
 use tree_sitter::{Parser, Query, QueryCursor, Node};
 use streaming_iterator::StreamingIterator;
 use sha2::{Sha256, Digest};
 use memmap2::Mmap;
+use regex::Regex;
 use crate::types::{InputFile, ParseResult, ParseData, ClassInfo, MemberInfo};
+
+struct CleanRegexes {
+    keywords: Vec<Regex>,
+    api: Regex,
+    macros: Regex,
+}
+
+static CLEAN_REGEXES: OnceLock<CleanRegexes> = OnceLock::new();
+
+fn get_clean_regexes() -> &'static CleanRegexes {
+    CLEAN_REGEXES.get_or_init(|| {
+        let kws = ["virtual","static","inline","FORCEINLINE","FORCEINLINE_DEBUGGABLE",
+                   "const","friend","class","struct","enum","typename"];
+        CleanRegexes {
+            keywords: kws.iter().map(|kw| Regex::new(&format!(r"\b{}\b", kw)).unwrap()).collect(),
+            api:    Regex::new(r"\b[A-Z0-9_]+_API\b").unwrap(),
+            macros: Regex::new(r"UFUNCTION\(.*?\)|UPROPERTY\(.*?\)").unwrap(),
+        }
+    })
+}
 
 thread_local! {
     static PARSER: RefCell<Parser> = RefCell::new(Parser::new());
@@ -284,11 +306,11 @@ fn find_declarator_node<'a>(node: Node<'a>) -> Option<Node<'a>> {
 }
 
 fn clean_type_string(s: &str) -> String {
+    let cr = get_clean_regexes();
     let mut clean = s.trim().to_string();
-    let keywords = ["virtual", "static", "inline", "FORCEINLINE", "FORCEINLINE_DEBUGGABLE", "const", "friend", "class", "struct", "enum", "typename"];
-    for kw in keywords { if let Ok(re) = regex::Regex::new(&format!(r"\b{}\b", kw)) { clean = re.replace_all(&clean, "").to_string(); } }
-    if let Ok(re) = regex::Regex::new(r"\b[A-Z0-9_]+_API\b") { clean = re.replace_all(&clean, "").to_string(); }
-    if let Ok(re) = regex::Regex::new(r"UFUNCTION\(.*?\)|UPROPERTY\(.*?\)") { clean = re.replace_all(&clean, "").to_string(); }
+    for re in &cr.keywords { clean = re.replace_all(&clean, "").to_string(); }
+    clean = cr.api.replace_all(&clean, "").to_string();
+    clean = cr.macros.replace_all(&clean, "").to_string();
     clean = clean.replace(";", "").replace(":", " : ").replace("  ", " ").trim().to_string();
     if clean.contains('<') && clean.contains('>') { return clean; }
     clean.split_whitespace().last().unwrap_or("").to_string()

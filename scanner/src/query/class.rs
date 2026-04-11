@@ -1,5 +1,6 @@
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, params, ToSql};
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use crate::db::path::{PATH_CTE};
 
 pub fn get_file_symbols(conn: &Connection, file_path: &str) -> anyhow::Result<Value> {
@@ -86,6 +87,124 @@ pub fn get_class_members(conn: &Connection, class_name: &str) -> anyhow::Result<
         }));
     }
     Ok(json!(results))
+}
+
+/// モジュール群に属するクラス一覧を返す（同期版）。
+/// 戻り値: [{p: path, i: [[name, line, type, base], ...]}] の grouped 形式
+pub fn get_classes_in_modules(
+    conn: &Connection,
+    modules: Vec<String>,
+    symbol_type: Option<String>,
+) -> anyhow::Result<Value> {
+    if modules.is_empty() {
+        return Ok(json!([]));
+    }
+
+    // path → Vec<[name, line, type, base]>
+    let mut grouped: HashMap<String, Vec<Value>> = HashMap::new();
+
+    for chunk in modules.chunks(500) {
+        let placeholders = chunk.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let type_clause = if symbol_type.is_some() { " AND c.symbol_type = ?" } else { "" };
+        let sql = format!(
+            "{}
+             SELECT sc.text, sb.text, dp.full_path || '/' || sf.text, c.line_number, c.symbol_type
+             FROM classes c
+             JOIN strings sc ON c.name_id = sc.id
+             LEFT JOIN strings sb ON c.base_class_id = sb.id
+             JOIN files f ON c.file_id = f.id
+             JOIN dir_paths dp ON f.directory_id = dp.id
+             JOIN strings sf ON f.filename_id = sf.id
+             JOIN modules m ON f.module_id = m.id
+             JOIN strings sm ON m.name_id = sm.id
+             WHERE sm.text IN ({}){}
+             ORDER BY dp.full_path || '/' || sf.text, c.line_number",
+            PATH_CTE, placeholders, type_clause
+        );
+
+        let mut dyn_params: Vec<&dyn ToSql> = chunk.iter().map(|s| s as &dyn ToSql).collect();
+        if let Some(ref st) = symbol_type {
+            dyn_params.push(st);
+        }
+
+        let mut stmt = conn.prepare(&sql)?;
+        let mut rows = stmt.query(rusqlite::params_from_iter(dyn_params))?;
+        while let Some(row) = rows.next()? {
+            let name: String = row.get(0)?;
+            let base: Option<String> = row.get(1)?;
+            let path: String = row.get(2)?;
+            let line: i64 = row.get(3)?;
+            let sym_type: String = row.get(4)?;
+            grouped.entry(path).or_default().push(json!([name, line, sym_type, base]));
+        }
+    }
+
+    let result: Vec<Value> = grouped.into_iter().map(|(p, i)| json!({"p": p, "i": i})).collect();
+    Ok(json!(result))
+}
+
+/// モジュール群に属するクラス一覧をストリーミング配信する（非同期版）。
+/// on_items に渡す各アイテム: {name, base, path, line, type}
+pub fn get_classes_in_modules_async<F>(
+    conn: &Connection,
+    modules: Vec<String>,
+    symbol_type: Option<String>,
+    mut on_items: F,
+) -> anyhow::Result<Value>
+where
+    F: FnMut(Vec<Value>) -> anyhow::Result<()>,
+{
+    if modules.is_empty() {
+        return Ok(json!(0));
+    }
+
+    let mut total_sent = 0usize;
+
+    for chunk in modules.chunks(500) {
+        let placeholders = chunk.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let type_clause = if symbol_type.is_some() { " AND c.symbol_type = ?" } else { "" };
+        let sql = format!(
+            "{}
+             SELECT sc.text, sb.text, dp.full_path || '/' || sf.text, c.line_number, c.symbol_type
+             FROM classes c
+             JOIN strings sc ON c.name_id = sc.id
+             LEFT JOIN strings sb ON c.base_class_id = sb.id
+             JOIN files f ON c.file_id = f.id
+             JOIN dir_paths dp ON f.directory_id = dp.id
+             JOIN strings sf ON f.filename_id = sf.id
+             JOIN modules m ON f.module_id = m.id
+             JOIN strings sm ON m.name_id = sm.id
+             WHERE sm.text IN ({}){}",
+            PATH_CTE, placeholders, type_clause
+        );
+
+        let mut dyn_params: Vec<&dyn ToSql> = chunk.iter().map(|s| s as &dyn ToSql).collect();
+        if let Some(ref st) = symbol_type {
+            dyn_params.push(st);
+        }
+
+        let mut stmt = conn.prepare(&sql)?;
+        let mut rows = stmt.query(rusqlite::params_from_iter(dyn_params))?;
+        let mut batch: Vec<Value> = Vec::new();
+        while let Some(row) = rows.next()? {
+            let name: String = row.get(0)?;
+            let base: Option<String> = row.get(1)?;
+            let path: String = row.get(2)?;
+            let line: i64 = row.get(3)?;
+            let sym_type: String = row.get(4)?;
+            batch.push(json!({"name": name, "base": base, "path": path, "line": line, "type": sym_type}));
+            if batch.len() >= 200 {
+                total_sent += batch.len();
+                on_items(std::mem::take(&mut batch))?;
+            }
+        }
+        if !batch.is_empty() {
+            total_sent += batch.len();
+            on_items(std::mem::take(&mut batch))?;
+        }
+    }
+
+    Ok(json!(total_sent))
 }
 
 pub fn find_symbol_usages(conn: &Connection, symbol_name: &str, limit: usize) -> anyhow::Result<Value> {
