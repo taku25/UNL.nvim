@@ -14,10 +14,14 @@ function M.execute(opts)
             return
         end
 
-        -- 2. Fetch detailed status via RPC
+        -- 2. Fetch detailed status via RPC (accumulate lines, parse once complete)
+        local lines = {}
         scanner.run_command("status", {}, function(line)
-            local ok, msg = pcall(vim.json.decode, line)
-            if ok then
+            table.insert(lines, line)
+        end, function(_ok)
+            local raw = table.concat(lines, "\n")
+            local parse_ok, msg = pcall(vim.json.decode, raw)
+            if parse_ok and type(msg) == "table" then
                 print("--- UNL Server Status ---")
                 print("Status: " .. tostring(msg.status))
                 print("Active Projects:")
@@ -25,7 +29,8 @@ function M.execute(opts)
                     print("  - " .. p)
                 end
             else
-                print("Raw Status: " .. line)
+                print("--- UNL Server Status ---")
+                print(raw ~= "" and raw or "(no response)")
             end
         end)
     end)
