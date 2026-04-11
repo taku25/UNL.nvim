@@ -2,7 +2,8 @@ use rusqlite::{Connection, params, OptionalExtension};
 use serde_json::{json, Value};
 use tree_sitter::{Parser, Point, Node, Query, QueryCursor, StreamingIterator};
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use parking_lot::Mutex;
 use crate::server::state::CompletionCache;
 
 struct RequestContext<'a> {
@@ -632,7 +633,7 @@ fn fetch_members_recursive(
     
     // 1. Try Memory Cache
     if let Some(c_mutex) = &cache {
-        let mut c = c_mutex.lock().unwrap();
+        let mut c = c_mutex.lock();
         if let Some(cached) = c.get(&cache_key, "") {
             if let Some(arr) = cached.as_array() {
                 return Ok(arr.clone());
@@ -642,7 +643,7 @@ fn fetch_members_recursive(
 
     // 2. Try Persistent Cache
     if let Some(pc_mutex) = &persistent_cache {
-        let pc = pc_mutex.lock().unwrap();
+        let pc = pc_mutex.lock();
         let mut stmt = pc.prepare("SELECT value FROM persistent_cache WHERE key = ?")?;
         let res: rusqlite::Result<Vec<u8>> = stmt.query_row([&cache_key], |row| row.get(0));
         if let Ok(blob) = res {
@@ -786,13 +787,13 @@ fn fetch_members_recursive(
 
     // 3. Store in Memory Cache
     if let Some(c_mutex) = &cache {
-        let mut c = c_mutex.lock().unwrap();
+        let mut c = c_mutex.lock();
         c.put(&cache_key, "", result_json.clone());
     }
 
     // 4. Store in Persistent Cache
     if let Some(pc_mutex) = &persistent_cache {
-        let pc = pc_mutex.lock().unwrap();
+        let pc = pc_mutex.lock();
         if let Ok(blob) = serde_json::to_vec(&result_json) {
             let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
             let _ = pc.execute("INSERT OR REPLACE INTO persistent_cache (key, value, last_used) VALUES (?, ?, ?)", params![cache_key, blob, now]);

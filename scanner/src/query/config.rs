@@ -135,7 +135,7 @@ pub fn get_config_data_with_cache(state: &AppState, project_root_str: &str, engi
     let root_key = crate::server::utils::normalize_path_key(project_root_str);
     
     {
-        let caches = state.config_caches.lock().unwrap();
+        let caches = state.config_caches.lock();
         if let Some(cache) = caches.get(&root_key) {
             if !cache.is_dirty {
                 return Ok(cache.data.clone());
@@ -147,7 +147,7 @@ pub fn get_config_data_with_cache(state: &AppState, project_root_str: &str, engi
     let data = get_config_data_internal(project_root_str, engine_root_opt)?;
     
     {
-        let mut caches = state.config_caches.lock().unwrap();
+        let mut caches = state.config_caches.lock();
         caches.insert(root_key, ConfigCache {
             data: data.clone(),
             is_dirty: false,

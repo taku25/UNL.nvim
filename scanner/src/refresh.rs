@@ -1,7 +1,8 @@
 use std::fs;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use parking_lot::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use rayon::prelude::*;
 use rusqlite::{params, Connection};
@@ -45,7 +46,7 @@ pub fn run_refresh(req: RefreshRequest, reporter: Arc<dyn ProgressReporter>) -> 
     let mut component_defs = Vec::new();
 
     let uproject_path = fs::read_dir(&project_root)?.filter_map(|e| e.ok()).find(|e| e.path().extension().map_or(false, |ext| ext == "uproject")).map(|e| e.path());
-    component_defs.push(ComponentDef { name: project_name.clone(), display_name: project_root.file_name().unwrap().to_string_lossy().to_string(), comp_type: "Game".to_string(), root_path: project_root.clone(), uproject_path: uproject_path.clone(), uplugin_path: None, owner_name: project_name.clone() });
+    component_defs.push(ComponentDef { name: project_name.clone(), display_name: project_root.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| project_name.clone()), comp_type: "Game".to_string(), root_path: project_root.clone(), uproject_path: uproject_path.clone(), uplugin_path: None, owner_name: project_name.clone() });
 
     if let Some(ref eroot) = engine_root {
         component_defs.push(ComponentDef { name: engine_name.as_ref().unwrap().clone(), display_name: "Engine".to_string(), comp_type: "Engine".to_string(), root_path: eroot.clone(), uproject_path: None, uplugin_path: None, owner_name: engine_name.as_ref().unwrap().clone() });
@@ -125,24 +126,24 @@ pub fn run_refresh(req: RefreshRequest, reporter: Arc<dyn ProgressReporter>) -> 
                         uplugin_path: Some(path.to_path_buf()),
                         owner_name: owner,
                     };
-                    pc.lock().unwrap().push(comp);
+                    pc.lock().push(comp);
                 }
             } else if path.file_name().map_or(false, |n| n.to_string_lossy().to_lowercase().ends_with(".build.cs")) {
-                mbf.lock().unwrap().push((path.to_path_buf(), root_owner));
+                mbf.lock().push((path.to_path_buf(), root_owner));
             }
 
             if entry.file_type().map_or(false, |t| t.is_file()) && exts.contains(&ext) {
-                adf.lock().unwrap().push((normalize_path(path), ext));
+                adf.lock().push((normalize_path(path), ext));
             }
             WalkState::Continue
         })
     });
 
     // Merge parallel results
-    let all_discovered_files = Arc::try_unwrap(all_discovered_files).unwrap().into_inner().unwrap();
-    let module_build_files   = Arc::try_unwrap(module_build_files).unwrap().into_inner().unwrap();
+    let all_discovered_files = Arc::try_unwrap(all_discovered_files).unwrap().into_inner();
+    let module_build_files   = Arc::try_unwrap(module_build_files).unwrap().into_inner();
     {
-        let mut found = plugin_components.lock().unwrap();
+        let mut found = plugin_components.lock();
         component_defs.extend(found.drain(..));
     }
 

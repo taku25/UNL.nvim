@@ -12,7 +12,7 @@ pub async fn handle_asset_scan(state: Arc<AppState>, project_root: String) {
     struct ScanGuard { state: Arc<AppState>, root: String }
     impl Drop for ScanGuard {
         fn drop(&mut self) {
-            let mut active = self.state.active_asset_scans.lock().unwrap();
+            let mut active = self.state.active_asset_scans.lock();
             active.remove(&self.root);
             info!("Asset scan flag cleared for: {}", self.root);
         }
@@ -79,7 +79,7 @@ pub async fn handle_asset_scan(state: Arc<AppState>, project_root: String) {
         info!("--- Asset Scan Completed: {:?} ({} files, {} errors) ---", project_root, count, error_count);
 
         {
-            let mut all_graphs = state.asset_graphs.lock().unwrap();
+            let mut all_graphs = state.asset_graphs.lock();
             all_graphs.insert(root_key.clone(), graph);
         }
     }
@@ -94,7 +94,7 @@ pub async fn update_single_asset(state: Arc<AppState>, project_root: &str, file_
     }).await;
 
     if let Ok(Ok((asset_path, parent, imports, functions))) = parse_res {
-        let mut graphs = state.asset_graphs.lock().unwrap();
+        let mut graphs = state.asset_graphs.lock();
         if let Some(graph) = graphs.get_mut(&root_key) {
             add_to_graph(graph, asset_path, parent, imports, functions);
             info!("Incremental asset update: {}", file_path.display());

@@ -1,4 +1,5 @@
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use parking_lot::Mutex;
 use std::path::{PathBuf};
 use std::time::{Duration, Instant};
 use std::collections::{HashMap, HashSet};
@@ -31,6 +32,9 @@ async fn main() -> anyhow::Result<()> {
         .with_writer(Arc::new(log_file))
         .init();
     info!("--- UNL Server Starting (MsgPack) ---");
+    std::panic::set_hook(Box::new(|info| {
+        tracing::error!("PANIC: {}", info);
+    }));
 
     let (tx, mut rx) = mpsc::channel::<PathBuf>(100);
     let _watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
@@ -79,7 +83,7 @@ async fn main() -> anyhow::Result<()> {
         loop {
             tokio::time::sleep(Duration::from_secs(60)).await;
             sys.refresh_processes();
-            let mut clients = state_for_lifecycle.active_clients.lock().unwrap();
+            let mut clients = state_for_lifecycle.active_clients.lock();
             let mut to_remove = Vec::new();
             for &pid in clients.iter() {
                 if sys.process(Pid::from(pid as usize)).is_none() {
@@ -91,13 +95,13 @@ async fn main() -> anyhow::Result<()> {
                 clients.remove(&pid);
             }
             if clients.is_empty() {
-                let last = *state_for_lifecycle.last_activity.lock().unwrap();
+                let last = *state_for_lifecycle.last_activity.lock();
                 if last.elapsed() > Duration::from_secs(600) {
                     info!("No active clients for 600s. Shutting down UNL Server...");
                     std::process::exit(0);
                 }
             } else {
-                *state_for_lifecycle.last_activity.lock().unwrap() = Instant::now();
+                *state_for_lifecycle.last_activity.lock() = Instant::now();
             }
         }
     });

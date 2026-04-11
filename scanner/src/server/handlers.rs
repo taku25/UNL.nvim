@@ -20,7 +20,7 @@ pub async fn handle_delete_project(state: &AppState, params: &Value) -> anyhow::
     let req: DeleteProjectRequest = convert_params(params)?;
     let root_key = normalize_path_key(&req.project_root);
     let removed = {
-        let mut projects = state.projects.lock().unwrap();
+        let mut projects = state.projects.lock();
         projects.remove(&root_key).is_some()
     };
     if removed {
@@ -45,7 +45,7 @@ pub async fn handle_setup(state: Arc<AppState>, params: &Value) -> anyhow::Resul
     let req: SetupRequest = convert_params(params)?;
     let db_path_native = normalize_to_native(&req.db_path);
     {
-        let mut conns = state.connections.lock().unwrap();
+        let mut conns = state.connections.lock();
         conns.remove(&db_path_native);
     }
     let root_key = normalize_path_key(&req.project_root);
@@ -70,7 +70,7 @@ pub async fn handle_setup(state: Arc<AppState>, params: &Value) -> anyhow::Resul
     }).await??;
 
     {
-        let mut projects = state.projects.lock().unwrap();
+        let mut projects = state.projects.lock();
         projects.insert(root_key.clone(), ProjectContext { 
             db_path: normalize_to_unix(&req.db_path), 
             cache_db_path: req.cache_db_path.as_ref().map(|p| normalize_to_unix(p)),
@@ -96,7 +96,7 @@ pub async fn handle_refresh(state: &AppState, params: &Value, tx: mpsc::Sender<V
     let root_key = normalize_path_key(&req.project_root);
 
     {
-        let mut active = state.active_refreshes.lock().unwrap();
+        let mut active = state.active_refreshes.lock();
         if active.contains(&root_key) {
             info!("Refresh already in progress for project: {}. Skipping redundant request.", root_key);
             return Ok(Value::String("Refresh already in progress".to_string()));
@@ -110,14 +110,14 @@ pub async fn handle_refresh(state: &AppState, params: &Value, tx: mpsc::Sender<V
     }
     impl<'a> Drop for RefreshGuard<'a> {
         fn drop(&mut self) {
-            let mut active = self.state.active_refreshes.lock().unwrap();
+            let mut active = self.state.active_refreshes.lock();
             active.remove(&self.root);
         }
     }
     let _guard = RefreshGuard { state, root: root_key.clone() };
 
     let db_path_unix = {
-        let mut projects = state.projects.lock().unwrap();
+        let mut projects = state.projects.lock();
         if let Some(path) = &req.db_path {
              let path_u = normalize_to_unix(path);
              let cache_path_u = req.cache_db_path.as_ref().map(|p| normalize_to_unix(p));
@@ -138,14 +138,17 @@ pub async fn handle_refresh(state: &AppState, params: &Value, tx: mpsc::Sender<V
     };
     
     let db_path_native = normalize_to_native(&db_path_unix);
+    // Extract cache path before acquiring connection locks to avoid nested lock ordering issues
+    let cache_path_to_remove = {
+        let projects = state.projects.lock();
+        projects.get(&root_key).and_then(|ctx| ctx.cache_db_path.clone())
+    };
     {
-        let mut conns = state.connections.lock().unwrap();
+        let mut conns = state.connections.lock();
         conns.remove(&db_path_native);
-        let mut p_conns = state.persistent_cache_connections.lock().unwrap();
-        if let Some(ctx) = state.projects.lock().unwrap().get(&root_key) {
-            if let Some(cache_path) = &ctx.cache_db_path {
-                p_conns.remove(&normalize_to_native(cache_path));
-            }
+        let mut p_conns = state.persistent_cache_connections.lock();
+        if let Some(cache_path) = cache_path_to_remove {
+            p_conns.remove(&normalize_to_native(&cache_path));
         }
     }
 
@@ -157,7 +160,7 @@ pub async fn handle_refresh(state: &AppState, params: &Value, tx: mpsc::Sender<V
     
     {
         let cache_arc = state.get_completion_cache(&root_key);
-        let mut cache = cache_arc.lock().unwrap();
+        let mut cache = cache_arc.lock();
         cache.clear();
         info!("Cleared completion cache after refresh for: {}", root_key);
     }
@@ -173,7 +176,7 @@ pub async fn handle_watch(state: &AppState, params: &Value) -> anyhow::Result<Va
     let root_native = normalize_to_native(&req.project_root);
     let root_path_native = PathBuf::from(&root_native);
     if !root_path_native.exists() { return Err(anyhow::anyhow!("Path does not exist: {}", root_native)); }
-    let mut watcher = state.watcher.lock().unwrap();
+    let mut watcher = state.watcher.lock();
     match watcher.watch(&root_path_native, notify::RecursiveMode::Recursive) {
         Ok(_) => { info!("Watcher: Started watching: {}", root_native); Ok(Value::String("Watch started".to_string())) }
         Err(e) => { error!("Watcher: Failed to start watching {}: {}", root_native, e); Err(e.into()) }
@@ -187,13 +190,13 @@ pub async fn handle_query(state: Arc<AppState>, params: &Value, tx: mpsc::Sender
     let req: ServerQueryRequest = convert_params(params)?;
     let root_key = normalize_path_key(&req.project_root);
     {
-        let active = state.active_refreshes.lock().unwrap();
+        let active = state.active_refreshes.lock();
         if active.contains(&root_key) { return Ok(json!([])); }
     }
     {
-        let graphs = state.asset_graphs.lock().unwrap();
+        let graphs = state.asset_graphs.lock();
         if !graphs.contains_key(&root_key) {
-            let mut active_scans = state.active_asset_scans.lock().unwrap();
+            let mut active_scans = state.active_asset_scans.lock();
             if !active_scans.contains(&root_key) {
                 active_scans.insert(root_key.clone());
                 let state_clone = state.clone();
@@ -203,7 +206,7 @@ pub async fn handle_query(state: Arc<AppState>, params: &Value, tx: mpsc::Sender
         }
     }
     let (db_path_unix, cache_db_path_native) = {
-        let projects = state.projects.lock().unwrap();
+        let projects = state.projects.lock();
         let ctx = projects.get(&root_key).ok_or_else(|| anyhow::anyhow!("Project not found"))?;
         (ctx.db_path.clone(), ctx.cache_db_path.as_ref().map(|p| normalize_to_native(p)))
     };
@@ -214,17 +217,19 @@ pub async fn handle_query(state: Arc<AppState>, params: &Value, tx: mpsc::Sender
     tokio::task::spawn_blocking(move || {
         match req.query {
             QueryRequest::GetAssetUsages { asset_path } => {
-                { let active_scans = state.active_asset_scans.lock().unwrap(); if active_scans.contains(&root_key) { return Ok(json!({ "status": "scanning", "references": [], "derived": [] })); } }
-                let graphs = state.asset_graphs.lock().unwrap();
+                { let active_scans = state.active_asset_scans.lock(); if active_scans.contains(&root_key) { return Ok(json!({ "status": "scanning", "references": [], "derived": [] })); } }
+                let graphs = state.asset_graphs.lock();
                 if let Some(graph) = graphs.get(&root_key) {
                     let mut result_refs: HashSet<String> = HashSet::new();
                     let mut result_derived: HashSet<String> = HashSet::new();
                     let class_name = if asset_path.starts_with("/Script/") { asset_path.rfind('.').map(|idx| &asset_path[idx+1..]).unwrap_or(&asset_path) } else { &asset_path };
                     let mut try_names = vec![class_name.to_lowercase()];
                     let prefixes = ['a', 'u', 'f', 'e', 't', 's'];
-                    if class_name.len() > 2 {
-                        let first = class_name.chars().next().unwrap().to_ascii_lowercase();
-                        if prefixes.contains(&first) && class_name.chars().nth(1).unwrap().is_uppercase() { try_names.push(class_name[1..].to_lowercase()); }
+                    if let Some(first_char) = class_name.chars().next() {
+                        let first = first_char.to_ascii_lowercase();
+                        if prefixes.contains(&first) && class_name.chars().nth(1).map_or(false, |c| c.is_uppercase()) {
+                            try_names.push(class_name[1..].to_lowercase());
+                        }
                     }
                     for name in &try_names {
                         let dot_name = format!(".{}", name);
@@ -263,15 +268,17 @@ pub async fn handle_query(state: Arc<AppState>, params: &Value, tx: mpsc::Sender
                 Ok(json!({ "dependencies": [], "parent_class": null }))
             }
             QueryRequest::FindDerivedClasses { base_class } => {
-                { let active_scans = state.active_asset_scans.lock().unwrap(); if active_scans.contains(&root_key) { return Ok(json!([{ "name": "Scanning...", "path": "", "symbol_type": "scanning" }])); } }
+                { let active_scans = state.active_asset_scans.lock(); if active_scans.contains(&root_key) { return Ok(json!([{ "name": "Scanning...", "path": "", "symbol_type": "scanning" }])); } }
                 let mut results = crate::query::process_query(&conn, QueryRequest::FindDerivedClasses { base_class: base_class.clone() })?.as_array().cloned().unwrap_or_default();
-                let graphs = state.asset_graphs.lock().unwrap();
+                let graphs = state.asset_graphs.lock();
                 if let Some(graph) = graphs.get(&root_key) {
                     let mut try_names = vec![base_class.to_lowercase()];
                     let prefixes = ['a', 'u', 'f', 'e', 't', 's'];
-                    if base_class.len() > 2 {
-                        let first = base_class.chars().next().unwrap().to_ascii_lowercase();
-                        if prefixes.contains(&first) && base_class.chars().nth(1).unwrap().is_uppercase() { try_names.push(base_class[1..].to_lowercase()); }
+                    if let Some(first_char) = base_class.chars().next() {
+                        let first = first_char.to_ascii_lowercase();
+                        if prefixes.contains(&first) && base_class.chars().nth(1).map_or(false, |c| c.is_uppercase()) {
+                            try_names.push(base_class[1..].to_lowercase());
+                        }
                     }
                     for name in &try_names {
                         let dot_name = format!(".{}", name);
@@ -288,7 +295,7 @@ pub async fn handle_query(state: Arc<AppState>, params: &Value, tx: mpsc::Sender
                 Ok(json!(results))
             }
             QueryRequest::GetAssets => {
-                let graphs = state.asset_graphs.lock().unwrap();
+                let graphs = state.asset_graphs.lock();
                 if let Some(graph) = graphs.get(&root_key) {
                     let mut all_assets: HashSet<String> = HashSet::new();
                     for assets in graph.references.values() { for a in assets { all_assets.insert(a.to_string()); } }
@@ -336,22 +343,22 @@ pub async fn handle_scan(state: &AppState, params: &Value) -> anyhow::Result<Val
         let query = tree_sitter::Query::new(&language, scanner::QUERY_STR).unwrap();
         let include_query = tree_sitter::Query::new(&language, scanner::INCLUDE_QUERY_STR).unwrap();
         let results: Vec<crate::types::ParseResult> = req.files.into_iter().filter_map(|input| scanner::process_file(&input, &language, &query, &include_query).ok()).collect();
-        let mut conn = conn_arc.lock().unwrap();
+        let mut conn = conn_arc.lock();
         db::save_to_db(&mut conn, &results, Arc::new(crate::types::StdoutReporter))?;
         Ok(serde_json::json!(results.len()))
     }).await?
 }
 
 pub async fn get_status(state: &AppState) -> anyhow::Result<Value> {
-    let projects = state.projects.lock().unwrap();
+    let projects = state.projects.lock();
     let project_list: Vec<Value> = projects.keys().map(|p| serde_json::json!(p)).collect();
-    let clients = state.active_clients.lock().unwrap();
+    let clients = state.active_clients.lock();
     let client_list: Vec<Value> = clients.iter().map(|&pid| serde_json::json!(pid)).collect();
     Ok(serde_json::json!({ "status": "running", "active_projects": project_list, "active_clients": client_list }))
 }
 
 pub async fn list_projects(state: &AppState) -> anyhow::Result<Value> {
-    let projects = state.projects.lock().unwrap();
+    let projects = state.projects.lock();
     let list: Vec<Value> = projects.iter().map(|(root, ctx)| {
         serde_json::json!({ "root": root, "db_path": ctx.db_path, "vcs_hash": ctx.vcs_hash })
     }).collect();

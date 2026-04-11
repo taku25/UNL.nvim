@@ -1,4 +1,4 @@
-use std::sync::{Arc};
+use std::sync::Arc;
 use std::path::{PathBuf};
 use crate::server::state::{AppState};
 use crate::server::utils::{normalize_to_native};
@@ -17,7 +17,7 @@ pub async fn handle_file_change(state: Arc<AppState>, path: PathBuf) {
     if !path.exists() { return; }
     let path_str_unix_lower = path_str_unix.to_lowercase();
     let target = {
-        let projects = state.projects.lock().unwrap();
+        let projects = state.projects.lock();
         let mut res = None;
         for (root, ctx) in projects.iter() {
             if path_str_unix_lower.starts_with(&root.to_lowercase()) {
@@ -31,7 +31,7 @@ pub async fn handle_file_change(state: Arc<AppState>, path: PathBuf) {
     if let Some((root_clone, db_path_unix)) = target {
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
         if ext == "ini" {
-            let mut caches = state.config_caches.lock().unwrap();
+            let mut caches = state.config_caches.lock();
             if let Some(cache) = caches.get_mut(&root_clone) { cache.is_dirty = true; }
             return;
         }
@@ -48,7 +48,7 @@ pub async fn handle_file_change(state: Arc<AppState>, path: PathBuf) {
         let conn_arc = match state.get_connection(&db_path_native) { Ok(c) => c, Err(_) => return };
         let path_str_for_scan = path_str_unix.clone();
         tokio::task::spawn_blocking(move || {
-            let mut conn = conn_arc.lock().unwrap();
+            let mut conn = conn_arc.lock();
             match db::get_module_id_for_path(&conn, &path_str_for_scan) {
                 Ok(Some(mod_id)) => {
                     tracing::info!("File change detected, re-scanning: {}", path_str_for_scan);
@@ -63,7 +63,7 @@ pub async fn handle_file_change(state: Arc<AppState>, path: PathBuf) {
                             tracing::error!("Watcher: Failed to save scan results: {}", e);
                         } else {
                             let cache_arc = state.get_completion_cache(&root_clone);
-                            let mut cache = cache_arc.lock().unwrap();
+                            let mut cache = cache_arc.lock();
                             for cls in classes_to_invalidate { cache.invalidate_class(&cls); }
                         }
                     }

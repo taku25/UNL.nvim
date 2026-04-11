@@ -1,4 +1,5 @@
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use parking_lot::Mutex;
 use std::path::{Path, PathBuf};
 use std::time::{Instant};
 use std::collections::{HashMap, HashSet};
@@ -125,7 +126,7 @@ pub struct AppState {
 impl AppState {
     pub fn save_registry(&self) -> anyhow::Result<()> {
         if let Some(path) = &self.registry_path {
-            let projects = self.projects.lock().unwrap();
+            let projects = self.projects.lock();
             let json = serde_json::to_string_pretty(&*projects)?;
             std::fs::write(path, json)?;
         }
@@ -140,15 +141,17 @@ impl AppState {
     }
 
     pub fn register_client(&self, pid: u32) {
-        let mut clients = self.active_clients.lock().unwrap();
-        if clients.insert(pid) {
-            info!("Registered new client PID: {}", pid);
+        {
+            let mut clients = self.active_clients.lock();
+            if clients.insert(pid) {
+                info!("Registered new client PID: {}", pid);
+            }
         }
-        *self.last_activity.lock().unwrap() = Instant::now();
+        *self.last_activity.lock() = Instant::now();
     }
 
     pub fn get_connection(&self, db_path_native: &str) -> anyhow::Result<Arc<Mutex<rusqlite::Connection>>> {
-        let mut conns = self.connections.lock().unwrap();
+        let mut conns = self.connections.lock();
         if let Some(conn) = conns.get(db_path_native) {
             return Ok(Arc::clone(conn));
         }
@@ -189,7 +192,7 @@ impl AppState {
     }
 
     pub fn get_completion_cache(&self, project_root: &str) -> Arc<Mutex<CompletionCache>> {
-        let mut caches = self.completion_caches.lock().unwrap();
+        let mut caches = self.completion_caches.lock();
         if let Some(cache) = caches.get(project_root) {
             return Arc::clone(cache);
         }
@@ -199,7 +202,7 @@ impl AppState {
     }
 
     pub fn get_persistent_cache_connection(&self, cache_db_path: &str) -> anyhow::Result<Arc<Mutex<rusqlite::Connection>>> {
-        let mut conns = self.persistent_cache_connections.lock().unwrap();
+        let mut conns = self.persistent_cache_connections.lock();
         if let Some(conn) = conns.get(cache_db_path) {
             return Ok(Arc::clone(conn));
         }
