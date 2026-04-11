@@ -75,11 +75,12 @@ function M.execute(opts, on_complete)
         log.debug("Requesting refresh for: %s", project_root)
         
         rpc.request("refresh", req, function(method, msg)
-            local stage = msg.stage or msg[2]
+            local stage   = msg.stage   or msg[2]
             local current = msg.current or msg[3]
+            local total   = msg.total   or msg[4]
             local message = msg.message or msg[5]
             if method == "progress" and stage then
-                progress:stage_update(stage, current, message)
+                progress:stage_update(stage, current, total, message)
             end
         end, function(success, result_or_err)
             active_refreshes[project_root_norm] = nil

@@ -26,38 +26,27 @@ local spec = {
 
     local throttle_ms = opts.throttle_ms or 80
     local last = 0
-    local function throttled(msg)
+    local function throttled(name, done, total)
       local now = vim.loop.hrtime() / 1e6
       if now - last >= throttle_ms then
         last = now
-        local total_pct = aggr:percentage()
-        local stage_info = aggr:current_stage_info()
-        
-        local display_pct = total_pct
-        local display_msg = msg
-        
-        if stage_info then
-          -- ステージ内の進捗率を表示のメインにする
-          display_pct = math.floor(stage_info.ratio * 100 + 0.5)
-          -- メッセージに全体の進捗を添える
-          display_msg = string.format("[%d%%] %s", total_pct, msg or stage_info.name)
-        end
-        
-        handle:report({ percentage = display_pct, message = display_msg })
+        -- "Analysis: 1234/5678 (42%)" 形式
+        local display_msg = aggr:format(name, done, total)
+        handle:report({ percentage = aggr:percentage(), message = display_msg })
       end
     end
 
     local r = {}
     function r:stage_define(name, total)
       aggr:define(name, total)
-      throttled("define:" .. name)
+      throttled(name, 0, total)
     end
-    function r:stage_update(name, done, msg)
-      aggr:update(name, done)
-      throttled(msg or ("update:" .. name))
+    function r:stage_update(name, done, total, msg)
+      aggr:update(name, done, total)
+      throttled(name, done, total)
     end
     function r:update(stage, message)
-      throttled(message or stage)
+      throttled(stage, nil, nil)
     end
     function r:finish(success)
       if success then handle:finish() else handle:cancel() end

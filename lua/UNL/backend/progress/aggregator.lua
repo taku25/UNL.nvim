@@ -2,6 +2,16 @@
 local Aggregator = {}
 Aggregator.__index = Aggregator
 
+-- ユーザーに表示されるステージ名（英語）
+local STAGE_LABELS = {
+  discovery  = "Discovery",
+  db_sync    = "DB Sync",
+  analysis   = "Analysis",
+  finalizing = "Finalizing",
+  file_scan  = "File Scan",
+  complete   = "Complete",
+}
+
 local function normalize(weights)
   local sum = 0
   for _, v in pairs(weights) do sum = sum + v end
@@ -33,11 +43,13 @@ end
 --   end
 --   s.done = math.min(s.total, math.max(done or s.done, 0))
 -- end
-function Aggregator:update(name, done)
+function Aggregator:update(name, done, total)
   local s = self.stages[name]
   -- ステージが未定義の場合は何もしない
-  if not s then
-    return
+  if not s then return end
+  -- total が提供された場合はステージの合計値を更新する（Rust 側から実際のファイル数が来る）
+  if total and total > 0 then
+    s.total = total
   end
   s.done = math.min(s.total, math.max(done or s.done, 0))
 end
@@ -50,6 +62,20 @@ function Aggregator:percentage()
     end
   end
   return math.floor(pct * 100 + 0.5)
+end
+
+-- "Analysis: 1234/5678 (42%)" または "Discovery (5%)" 形式の文字列を返す
+function Aggregator:format(name, done, total)
+  local label = STAGE_LABELS[name] or name
+  local pct   = self:percentage()
+  local s     = self.stages[name]
+  local t     = total or (s and s.total) or 0
+  local d     = done  or (s and s.done)  or 0
+  if t > 0 then
+    return string.format("%s: %d/%d (%d%%)", label, d, t, pct)
+  else
+    return string.format("%s (%d%%)", label, pct)
+  end
 end
 
 function Aggregator:current_stage_info()

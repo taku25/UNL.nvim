@@ -76,12 +76,12 @@ function M.create_for_refresh(conf, opts)
     }
     if inst.stage_define then inst:stage_define(name, total) end
   end
-  function W:stage_update(name, done, msg)
+  function W:stage_update(name, done, total, msg)
     events.emit{
       category="progress", purpose="refresh",
-      phase="stage_update", stage=name, done=done, message=msg,
+      phase="stage_update", stage=name, done=done, total=total, message=msg,
     }
-    if inst.stage_update then inst:stage_update(name, done, msg) end
+    if inst.stage_update then inst:stage_update(name, done, total, msg) end
   end
 
   function W:update(stage, message, uopts)

@@ -51,22 +51,19 @@ local spec = {
       vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
     end
 
-    local function fmt(stage)
-      return string.format("[%3d%%] %s", aggr:percentage(), stage or "")
-    end
-
     local r = {}
     function r:stage_define(name, total)
-      aggr:define(name, total); push(fmt("define:" .. name))
+      aggr:define(name, total); push(aggr:format(name, 0, total))
     end
-    function r:stage_update(name, done, msg)
-      aggr:update(name, done); push(fmt(msg or ("update:" .. name)))
+    function r:stage_update(name, done, total, msg)
+      aggr:update(name, done, total); push(aggr:format(name, done, total))
     end
     function r:update(stage, message)
-      push(fmt(message or stage))
+      push(aggr:format(stage, nil, nil))
     end
     function r:finish(success)
-      push(success and fmt("DONE") or fmt("FAILED"))
+      local pct = aggr:percentage()
+      push(success and string.format("Complete (%d%%)", pct) or "Failed")
       vim.defer_fn(function()
         if win and vim.api.nvim_win_is_valid(win) then
           pcall(vim.api.nvim_win_close, win, true)

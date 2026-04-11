@@ -34,11 +34,11 @@ local spec = {
     end
     function r:stage_define(name, total)
       aggr:define(name, total)
-      status_manager.set({ message = "define: " .. name, percentage = aggr:percentage() })
+      status_manager.set({ message = aggr:format(name, 0, total), percentage = aggr:percentage() })
     end
-    function r:stage_update(name, done, msg)
-      aggr:update(name, done)
-      status_manager.set({ message = msg or ("update: " .. name), percentage = aggr:percentage() })
+    function r:stage_update(name, done, total, msg)
+      aggr:update(name, done, total)
+      status_manager.set({ message = aggr:format(name, done, total), percentage = aggr:percentage() })
     end
     function r:update(stage, message)
       status_manager.set({ message = message or stage, percentage = aggr:percentage() })

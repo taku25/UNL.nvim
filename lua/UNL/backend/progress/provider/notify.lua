@@ -14,34 +14,33 @@ local spec = {
   create = function(opts)
     if opts.enabled == false then return nil end
     local aggr = Aggregator.new(opts.weights)
-    local throttle_ms = opts.throttle_ms or 50 -- Reduced from 120
+    local throttle_ms = opts.throttle_ms or 50
     local title = opts.title or "UNL Refresh"
     local last = 0
 
-    local function emit(stage)
-      local pct = aggr:percentage()
-      local msg = string.format("%s %d%% (%s)", title, pct, stage or "")
-      vim.notify(msg, vim.log.levels.INFO, { title = title })
+    local function emit(name, done, total)
+      local msg = aggr:format(name, done, total)
+      vim.notify(string.format("%s  %s", title, msg), vim.log.levels.INFO, { title = title })
     end
 
     local r = {}
     function r:stage_define(name, total)
       aggr:define(name, total)
-      emit("define:" .. name)
+      emit(name, 0, total)
     end
-    function r:stage_update(name, done, msg)
-      aggr:update(name, done)
+    function r:stage_update(name, done, total, msg)
+      aggr:update(name, done, total)
       local now = vim.loop.hrtime() / 1e6
       if now - last >= throttle_ms then
         last = now
-        emit(msg or ("update:" .. name))
+        emit(name, done, total)
       end
     end
     function r:update(stage, message)
-      emit(message or stage)
+      emit(stage, nil, nil)
     end
     function r:finish(success)
-      local final = success and (title .. " completed (100%)") or (title .. " failed")
+      local final = success and (title .. "  Complete (100%)") or (title .. "  Failed")
       vim.notify(final, success and vim.log.levels.INFO or vim.log.levels.ERROR, { title = title })
     end
     return r
