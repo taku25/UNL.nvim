@@ -79,7 +79,7 @@ pub const PATH_CTE: &str = "
     WITH RECURSIVE dir_paths(id, full_path) AS (
         SELECT d.id, s.text FROM directories d JOIN strings s ON d.name_id = s.id WHERE d.parent_id IS NULL
         UNION ALL
-        SELECT d.id, dp.full_path || '/' || s.text
+        SELECT d.id, CASE WHEN dp.full_path = '/' THEN '/' || s.text ELSE dp.full_path || '/' || s.text END
         FROM directories d
         JOIN dir_paths dp ON d.parent_id = dp.id
         JOIN strings s ON d.name_id = s.id
