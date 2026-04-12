@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 use crate::server::state::{AppState, ProjectContext, RpcProgressReporter};
 use crate::server::utils::{convert_params, normalize_to_unix, normalize_to_native, normalize_path_key};
 use crate::server::asset::handle_asset_scan;
-use crate::types::{RefreshRequest, ScanRequest, QueryRequest, SetupRequest};
+use crate::types::{RefreshRequest, ScanRequest, QueryRequest, SetupRequest, ModifyUprojectAddModuleRequest, ModifyTargetAddModuleRequest, ModifyResult};
 use crate::{scanner, db, refresh};
 
 #[derive(Deserialize)]
@@ -363,4 +363,35 @@ pub async fn list_projects(state: &AppState) -> anyhow::Result<Value> {
         serde_json::json!({ "root": root, "db_path": ctx.db_path, "vcs_hash": ctx.vcs_hash })
     }).collect();
     Ok(json!(list))
+}
+
+/// Adds a module to a `.uproject` / `.uplugin` JSON file (synchronous).
+pub async fn handle_modify_uproject_add_module(params: &Value) -> anyhow::Result<Value> {
+    let req: ModifyUprojectAddModuleRequest = convert_params(params)?;
+    let result = tokio::task::spawn_blocking(move || {
+        crate::modify::uproject::add_module(
+            &req.file_path,
+            &req.module_name,
+            &req.module_type,
+            &req.loading_phase,
+        )
+    }).await?;
+
+    match result {
+        Ok(()) => Ok(serde_json::to_value(ModifyResult { success: true, message: None })?),
+        Err(e) => Ok(serde_json::to_value(ModifyResult { success: false, message: Some(e.to_string()) })?),
+    }
+}
+
+/// Adds a module to a `.Target.cs` C# file (synchronous).
+pub async fn handle_modify_target_add_module(params: &Value) -> anyhow::Result<Value> {
+    let req: ModifyTargetAddModuleRequest = convert_params(params)?;
+    let result = tokio::task::spawn_blocking(move || {
+        crate::modify::target::add_module(&req.file_path, &req.module_name)
+    }).await?;
+
+    match result {
+        Ok(()) => Ok(serde_json::to_value(ModifyResult { success: true, message: None })?),
+        Err(e) => Ok(serde_json::to_value(ModifyResult { success: false, message: Some(e.to_string()) })?),
+    }
 }

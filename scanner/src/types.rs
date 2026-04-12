@@ -322,6 +322,29 @@ pub enum QueryRequest {
     },
 }
 
+/// Request to add a module entry to a .uproject or .uplugin JSON file.
+#[derive(Debug, Deserialize)]
+pub struct ModifyUprojectAddModuleRequest {
+    pub file_path: String,
+    pub module_name: String,
+    pub module_type: String,
+    pub loading_phase: String,
+}
+
+/// Request to register a module in a .Target.cs C# file.
+#[derive(Debug, Deserialize)]
+pub struct ModifyTargetAddModuleRequest {
+    pub file_path: String,
+    pub module_name: String,
+}
+
+/// Generic result for file-modification RPC calls.
+#[derive(Debug, Serialize)]
+pub struct ModifyResult {
+    pub success: bool,
+    pub message: Option<String>,
+}
+
 use std::io::{self, Write};
 
 pub trait ProgressReporter: Send + Sync {

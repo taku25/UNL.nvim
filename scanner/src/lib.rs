@@ -6,3 +6,4 @@ pub mod query;
 pub mod completion;
 pub mod uasset;
 pub mod server;
+pub mod modify;
