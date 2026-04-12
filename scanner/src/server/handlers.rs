@@ -213,7 +213,7 @@ pub async fn handle_query(state: Arc<AppState>, params: &Value, tx: mpsc::Sender
     let db_path_native = normalize_to_native(&db_path_unix);
     let conn = state.get_read_only_connection(&db_path_native)?;
     let persistent_cache_conn = if let Some(path) = cache_db_path_native { state.get_persistent_cache_connection(&path).ok() } else { None };
-    let is_async = matches!(req.query, QueryRequest::GetFilesInModulesAsync { .. } | QueryRequest::SearchFilesInModulesAsync { .. } | QueryRequest::GetClassesInModulesAsync { .. });
+    let is_async = matches!(req.query, QueryRequest::GetFilesInModulesAsync { .. } | QueryRequest::SearchFilesInModulesAsync { .. } | QueryRequest::GetClassesInModulesAsync { .. } | QueryRequest::FindSymbolUsagesAsync { .. });
     tokio::task::spawn_blocking(move || {
         match req.query {
             QueryRequest::GetAssetUsages { asset_path } => {

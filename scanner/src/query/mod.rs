@@ -11,6 +11,7 @@ pub mod file;
 pub mod search;
 pub mod util;
 pub mod goto;
+pub mod usage;
 
 pub fn process_query(conn: &Connection, request: QueryRequest) -> anyhow::Result<Value> {
     match request {
@@ -28,8 +29,8 @@ pub fn process_query(conn: &Connection, request: QueryRequest) -> anyhow::Result
             class::get_file_symbols(conn, &file_path),
         QueryRequest::GetClassMembers { class_name } => 
             class::get_class_members(conn, &class_name),
-        QueryRequest::FindSymbolUsages { symbol_name, limit } => 
-            class::find_symbol_usages(conn, &symbol_name, limit.unwrap_or(100)),
+        QueryRequest::FindSymbolUsages { symbol_name, file_path } =>
+            usage::find_symbol_usages(conn, &symbol_name, file_path.as_deref()),
         
         QueryRequest::GetModules => 
             module::get_modules(conn),
@@ -85,6 +86,9 @@ where F: FnMut(Vec<Value>) -> anyhow::Result<()> {
 
         QueryRequest::GetClassesInModulesAsync { modules, symbol_type } =>
             class::get_classes_in_modules_async(conn, modules, symbol_type, on_items),
+
+        QueryRequest::FindSymbolUsagesAsync { symbol_name, file_path } =>
+            usage::find_symbol_usages_async(conn, &symbol_name, file_path.as_deref(), on_items),
             
         _ => process_query(conn, request)
     }

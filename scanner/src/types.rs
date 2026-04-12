@@ -309,7 +309,16 @@ pub enum QueryRequest {
         asset_path: String,
     },
     GetAssets,
-    FindSymbolUsages { symbol_name: String, limit: Option<usize> },
+    FindSymbolUsages {
+        symbol_name: String,
+        #[serde(default)]
+        file_path: Option<String>,
+    },
+    FindSymbolUsagesAsync {
+        symbol_name: String,
+        #[serde(default)]
+        file_path: Option<String>,
+    },
     GetConfigData {
         engine_root: Option<String>,
     },

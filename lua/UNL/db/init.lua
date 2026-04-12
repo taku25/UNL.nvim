@@ -168,8 +168,12 @@ function M.get_assets(callback)
 end
 
 --- 指定したシンボル名が C++ 内で使用されている箇所を検索
-function M.find_symbol_usages(symbol_name, callback)
-    remote.find_symbol_usages(symbol_name, callback)
+function M.find_symbol_usages(symbol_name, file_path, callback)
+    remote.find_symbol_usages(symbol_name, file_path, callback)
+end
+
+function M.find_symbol_usages_streaming(symbol_name, file_path, on_partial, on_complete)
+    remote.find_symbol_usages_streaming(symbol_name, file_path, on_partial, on_complete)
 end
 
 --- メンバーの戻り値型を更新 (書き込み操作)

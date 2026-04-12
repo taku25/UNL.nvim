@@ -107,8 +107,12 @@ function M.get_assets(callback)
     M.request("GetAssets", {}, callback)
 end
 
-function M.find_symbol_usages(symbol_name, cb)
-    M.request("FindSymbolUsages", { symbol_name = symbol_name }, cb)
+function M.find_symbol_usages(symbol_name, file_path, cb)
+    M.request("FindSymbolUsages", { symbol_name = symbol_name, file_path = file_path }, cb)
+end
+
+function M.find_symbol_usages_streaming(symbol_name, file_path, on_partial, on_complete)
+    M.request_streaming("FindSymbolUsagesAsync", { symbol_name = symbol_name, file_path = file_path }, on_partial, on_complete)
 end
 
 -- Standard Wrappers
