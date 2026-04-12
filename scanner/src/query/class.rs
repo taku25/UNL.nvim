@@ -244,35 +244,36 @@ where
 }
 
 /// `EHostType::Type` や `ELoadingPhase::Type` のような enum の値一覧を返す。
-/// enum_name は "EHostType::Type" (namespace付き) でも "EHostType" (名前のみ) でも受け付ける。
+/// DBには name = "EHostType::Type" (フルネーム) として保存されているので、そのまま検索する。
+/// フォールバックとして namespace なし ("EHostType") でも検索する。
 pub fn get_enum_values(conn: &Connection, enum_name: &str) -> anyhow::Result<Value> {
-    // "Foo::Type" の場合は "Type" がクラス名、"Foo" が namespace
-    let (class_name, namespace) = if let Some(pos) = enum_name.rfind("::") {
-        (&enum_name[pos + 2..], Some(&enum_name[..pos]))
-    } else {
-        (enum_name, None)
-    };
+    // まず渡された文字列をそのまま name として検索（"EHostType::Type" など）
+    let class_id: i64 = conn.query_row(
+        "SELECT c.id FROM classes c
+         JOIN strings sn ON c.name_id = sn.id
+         WHERE sn.text = ?
+         LIMIT 1",
+        params![enum_name],
+        |r| r.get(0),
+    ).unwrap_or(0);
 
-    // クラスIDを引く
-    let class_id: i64 = if let Some(ns) = namespace {
-        conn.query_row(
-            "SELECT c.id FROM classes c
-             JOIN strings sn ON c.name_id = sn.id
-             JOIN strings sns ON c.namespace_id = sns.id
-             WHERE sn.text = ? AND sns.text = ?
-             LIMIT 1",
-            params![class_name, ns],
-            |r| r.get(0),
-        ).unwrap_or(0)
+    // 見つからなかった場合、"::" より後ろだけでも試みる（"Type" など）
+    let class_id = if class_id == 0 {
+        if let Some(pos) = enum_name.rfind("::") {
+            let short_name = &enum_name[pos + 2..];
+            conn.query_row(
+                "SELECT c.id FROM classes c
+                 JOIN strings sn ON c.name_id = sn.id
+                 WHERE sn.text = ?
+                 LIMIT 1",
+                params![short_name],
+                |r| r.get(0),
+            ).unwrap_or(0)
+        } else {
+            0
+        }
     } else {
-        conn.query_row(
-            "SELECT c.id FROM classes c
-             JOIN strings sn ON c.name_id = sn.id
-             WHERE sn.text = ?
-             LIMIT 1",
-            params![class_name],
-            |r| r.get(0),
-        ).unwrap_or(0)
+        class_id
     };
 
     if class_id == 0 {
