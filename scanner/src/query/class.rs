@@ -243,6 +243,56 @@ where
     Ok(json!(total_sent))
 }
 
+/// `EHostType::Type` や `ELoadingPhase::Type` のような enum の値一覧を返す。
+/// enum_name は "EHostType::Type" (namespace付き) でも "EHostType" (名前のみ) でも受け付ける。
+pub fn get_enum_values(conn: &Connection, enum_name: &str) -> anyhow::Result<Value> {
+    // "Foo::Type" の場合は "Type" がクラス名、"Foo" が namespace
+    let (class_name, namespace) = if let Some(pos) = enum_name.rfind("::") {
+        (&enum_name[pos + 2..], Some(&enum_name[..pos]))
+    } else {
+        (enum_name, None)
+    };
+
+    // クラスIDを引く
+    let class_id: i64 = if let Some(ns) = namespace {
+        conn.query_row(
+            "SELECT c.id FROM classes c
+             JOIN strings sn ON c.name_id = sn.id
+             JOIN strings sns ON c.namespace_id = sns.id
+             WHERE sn.text = ? AND sns.text = ?
+             LIMIT 1",
+            params![class_name, ns],
+            |r| r.get(0),
+        ).unwrap_or(0)
+    } else {
+        conn.query_row(
+            "SELECT c.id FROM classes c
+             JOIN strings sn ON c.name_id = sn.id
+             WHERE sn.text = ?
+             LIMIT 1",
+            params![class_name],
+            |r| r.get(0),
+        ).unwrap_or(0)
+    };
+
+    if class_id == 0 {
+        return Ok(json!([]));
+    }
+
+    let mut stmt = conn.prepare(
+        "SELECT s.text FROM enum_values ev
+         JOIN strings s ON ev.name_id = s.id
+         WHERE ev.enum_id = ?
+         ORDER BY ev.line_number ASC"
+    )?;
+    let mut rows = stmt.query(params![class_id])?;
+    let mut results: Vec<Value> = Vec::new();
+    while let Some(row) = rows.next()? {
+        results.push(json!(row.get::<_, String>(0)?));
+    }
+    Ok(json!(results))
+}
+
 pub fn find_symbol_usages(conn: &Connection, symbol_name: &str, limit: usize) -> anyhow::Result<Value> {
     let sql = format!("
         {}

@@ -64,6 +64,10 @@ pub fn process_query(conn: &Connection, request: QueryRequest) -> anyhow::Result
         QueryRequest::GrepAssets { pattern } => asset::grep_assets(conn, pattern, |_| Ok(())),
 
         QueryRequest::GetConfigData { .. } => Err(anyhow::anyhow!("GetConfigData must be handled by server state")),
+
+        QueryRequest::GetEnumValues { enum_name } =>
+            class::get_enum_values(conn, &enum_name),
+
         _ => Err(anyhow::anyhow!("Query type not yet implemented in new structure: {:?}", request)),
     }
 }
