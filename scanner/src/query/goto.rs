@@ -431,7 +431,11 @@ fn find_type_definition(conn: &Connection, name: &str) -> anyhow::Result<Option<
          JOIN dir_paths dp ON f.directory_id = dp.id
          JOIN strings sf ON f.filename_id = sf.id
          WHERE sc.text = ?
-         ORDER BY CASE c.symbol_type WHEN 'class' THEN 0 WHEN 'struct' THEN 1 WHEN 'enum' THEN 2 ELSE 3 END
+         ORDER BY CASE
+           WHEN sf.text LIKE '%.h'   THEN 0
+           WHEN sf.text LIKE '%.hpp' THEN 1
+           ELSE 2
+         END
          LIMIT 1",
         PATH_CTE
     );
