@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use rusqlite::{params, Connection};
 use crate::types::{ParseResult, ProgressReporter};
 
-pub const DB_VERSION: i32 = 14;
+pub const DB_VERSION: i32 = 15;
 
 pub fn ensure_correct_version(db_path: &str) -> anyhow::Result<bool> {
     let mut version_match = false;
@@ -43,7 +43,7 @@ pub fn init_db(conn: &Connection) -> rusqlite::Result<()> {
     conn.busy_timeout(std::time::Duration::from_millis(5000))?;
     
     // 1. Tables (Create all tables first)
-    conn.execute("CREATE TABLE IF NOT EXISTS strings (id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT NOT NULL UNIQUE COLLATE NOCASE)", [])?;
+    conn.execute("CREATE TABLE IF NOT EXISTS strings (id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT NOT NULL UNIQUE)", [])?;
     
     conn.execute(
         "CREATE TABLE IF NOT EXISTS directories (
