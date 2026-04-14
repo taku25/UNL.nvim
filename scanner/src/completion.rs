@@ -435,7 +435,7 @@ fn unwrap_container_type(t: &str) -> String {
             if wrapper == "TMap" {
                 return get_template_argument(inner, 1).to_string();
             } else if wrapper == "TArray" || wrapper == "TSet" {
-                return inner.to_string();
+                return inner.trim().to_string();
             }
         }
     }
