@@ -11,6 +11,10 @@ struct RequestContext<'a> {
     file_cache: HashMap<String, Vec<String>>,
     inheritance_cache: HashMap<(String, String), bool>,
     string_id_cache: HashMap<String, i64>,
+    /// 現在編集中ファイルのDB上のfile_id（遅延取得）
+    current_file_id: Option<i64>,
+    /// 現在ファイルから（推移的に）includeされているfile_idのセット（遅延取得）
+    included_file_ids: Option<std::collections::HashSet<i64>>,
 }
 
 impl<'a> RequestContext<'a> {
@@ -20,6 +24,8 @@ impl<'a> RequestContext<'a> {
             file_cache: HashMap::new(),
             inheritance_cache: HashMap::new(),
             string_id_cache: HashMap::new(),
+            current_file_id: None,
+            included_file_ids: None,
         }
     }
 
@@ -76,6 +82,52 @@ impl<'a> RequestContext<'a> {
 
         Ok(Vec::new())
     }
+
+    /// 現在ファイルからincludeされているファイルIDセットを取得（BFS、推移的）
+    fn get_included_file_ids(&mut self) -> &std::collections::HashSet<i64> {
+        if self.included_file_ids.is_none() {
+            let mut set = std::collections::HashSet::new();
+            if let Some(root_id) = self.current_file_id {
+                let mut queue = vec![root_id];
+                while let Some(fid) = queue.pop() {
+                    if !set.insert(fid) { continue; }
+                    // このファイルが直接includeしているファイルを取得
+                    if let Ok(mut stmt) = self.conn.prepare_cached(
+                        "SELECT resolved_file_id FROM file_includes WHERE file_id = ? AND resolved_file_id IS NOT NULL"
+                    ) {
+                        if let Ok(rows) = stmt.query_map([fid], |row| row.get::<_, i64>(0)) {
+                            for r in rows.flatten() {
+                                if !set.contains(&r) {
+                                    queue.push(r);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            self.included_file_ids = Some(set);
+        }
+        self.included_file_ids.as_ref().unwrap()
+    }
+
+    /// 同名クラスが複数ある場合、現在ファイルのinclude階層内にあるものを優先して絞り込む
+    fn filter_class_ids_by_includes(&mut self, ids: Vec<i64>) -> Vec<i64> {
+        if ids.len() <= 1 || self.current_file_id.is_none() { return ids; }
+
+        // 各クラスのfile_idを取得
+        let with_file: Vec<(i64, Option<i64>)> = ids.iter().filter_map(|&cid| {
+            self.conn.query_row("SELECT file_id FROM classes WHERE id = ?", [cid], |r| r.get::<_, Option<i64>>(0)).ok()
+                .map(|fid| (cid, fid))
+        }).collect();
+
+        let included = self.get_included_file_ids();
+        let filtered: Vec<i64> = with_file.iter()
+            .filter(|(_, fid)| fid.map(|f| included.contains(&f)).unwrap_or(false))
+            .map(|(cid, _)| *cid)
+            .collect();
+
+        if filtered.is_empty() { ids } else { filtered }
+    }
 }
 
 // 補完ロジックのメインエントリー
@@ -90,6 +142,13 @@ pub fn process_completion(
 ) -> anyhow::Result<Value> {
     tracing::info!("--- Completion Request at {}:{} ---", line, character);
     let mut ctx = RequestContext::new(conn);
+
+    // 現在ファイルのfile_idをDBから引いておく（include-aware disambiguation用）
+    // ファイル名だけでなくフルパス（ディレクトリ階層）で一致させる
+    if let Some(ref fp) = _file_path {
+        ctx.current_file_id = get_file_id_by_full_path(conn, fp);
+        tracing::info!("Current file '{}' resolved to file_id: {:?}", fp, ctx.current_file_id);
+    }
     
     let mut parser = Parser::new();
     let language: tree_sitter::Language = tree_sitter_unreal_cpp::LANGUAGE.into();
@@ -666,6 +725,9 @@ fn fetch_members_recursive(
             }
         }
     }
+    // 同名クラスが複数ある場合（standalone_prologue.h等のスタブ vs 本物）、
+    // 現在ファイルのinclude階層内にあるものを優先して絞り込む
+    start_class_ids = ctx.filter_class_ids_by_includes(start_class_ids);
     if start_class_ids.is_empty() { return Ok(Vec::new()); }
 
     let mut result = Vec::new();
@@ -1078,4 +1140,42 @@ fn extract_clean_type(raw: &str) -> String {
         res.pop();
     }
     res.trim().to_string()
+}
+
+/// ファイルのフルパス文字列からDBのfile_idを取得する。
+/// ファイル名だけでなくディレクトリ階層まで照合するため、同名ファイルが複数存在しても正しいIDを返す。
+fn get_file_id_by_full_path(conn: &Connection, file_path: &str) -> Option<i64> {
+    let path = std::path::Path::new(file_path);
+    let filename = path.file_name()?.to_str()?;
+    let parent = path.parent()?;
+
+    let mut current_parent_id: Option<i64> = None;
+    for component in parent.components() {
+        let name = match component {
+            std::path::Component::Normal(s) => s.to_str()?,
+            std::path::Component::RootDir => "/",
+            std::path::Component::Prefix(p) => p.as_os_str().to_str()?,
+            _ => continue,
+        };
+
+        let dir_id: Option<i64> = conn.query_row(
+            "SELECT d.id FROM directories d JOIN strings s ON d.name_id = s.id
+             WHERE (d.parent_id IS ? OR d.parent_id = ?) AND s.text = ?",
+            rusqlite::params![current_parent_id, current_parent_id, name],
+            |r| r.get(0),
+        ).optional().ok().flatten();
+
+        match dir_id {
+            Some(id) => current_parent_id = Some(id),
+            None => return None,
+        }
+    }
+
+    let dir_id = current_parent_id?;
+    conn.query_row(
+        "SELECT f.id FROM files f JOIN strings s ON f.filename_id = s.id
+         WHERE f.directory_id = ? AND s.text = ?",
+        rusqlite::params![dir_id, filename],
+        |r| r.get(0),
+    ).optional().ok().flatten()
 }
