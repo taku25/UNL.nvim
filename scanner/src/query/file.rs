@@ -207,3 +207,73 @@ where F: FnMut(Vec<Value>) -> anyhow::Result<()> {
 
     Ok(json!(total_count))
 }
+
+/// *.Target.cs ファイルの一覧を取得する
+pub fn get_target_files(conn: &Connection) -> anyhow::Result<Value> {
+    let sql = format!("
+        {}
+        SELECT sn.text as filename, dp.full_path || '/' || sn.text as path
+        FROM files f
+        JOIN dir_paths dp ON f.directory_id = dp.id
+        JOIN strings sn ON f.filename_id = sn.id
+        WHERE sn.text LIKE '%.Target.cs'
+    ", PATH_CTE);
+    
+    let mut stmt = conn.prepare(&sql)?;
+    let mut rows = stmt.query([])?;
+    
+    let mut results = Vec::new();
+    while let Some(row) = rows.next()? {
+        results.push(json!({
+            "filename": row.get::<_, String>(0)?,
+            "path": row.get::<_, String>(1)?,
+        }));
+    }
+    Ok(json!(results))
+}
+
+/// 全てのファイルパスをリストで取得する
+pub fn get_all_file_paths(conn: &Connection) -> anyhow::Result<Value> {
+    let sql = format!("
+        {}
+        SELECT dp.full_path || '/' || sn.text as path
+        FROM files f
+        JOIN dir_paths dp ON f.directory_id = dp.id
+        JOIN strings sn ON f.filename_id = sn.id
+    ", PATH_CTE);
+    
+    let mut stmt = conn.prepare(&sql)?;
+    let mut rows = stmt.query([])?;
+    
+    let mut results = Vec::new();
+    while let Some(row) = rows.next()? {
+        results.push(Value::String(row.get(0)?));
+    }
+    Ok(json!(results))
+}
+
+/// 全てのファイルのメタデータ (filename, path, module_name) を取得する
+pub fn get_all_files_metadata(conn: &Connection) -> anyhow::Result<Value> {
+    let sql = format!("
+        {}
+        SELECT sn.text as filename, dp.full_path || '/' || sn.text as path, sm.text as module_name
+        FROM files f
+        JOIN dir_paths dp ON f.directory_id = dp.id
+        JOIN strings sn ON f.filename_id = sn.id
+        LEFT JOIN modules m ON f.module_id = m.id
+        LEFT JOIN strings sm ON m.name_id = sm.id
+    ", PATH_CTE);
+    
+    let mut stmt = conn.prepare(&sql)?;
+    let mut rows = stmt.query([])?;
+    
+    let mut results = Vec::new();
+    while let Some(row) = rows.next()? {
+        results.push(json!({
+            "filename": row.get::<_, String>(0)?,
+            "path": row.get::<_, String>(1)?,
+            "module_name": row.get::<_, Option<String>>(2)?,
+        }));
+    }
+    Ok(json!(results))
+}

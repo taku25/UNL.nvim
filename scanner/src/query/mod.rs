@@ -69,6 +69,10 @@ pub fn process_query(conn: &Connection, request: QueryRequest) -> anyhow::Result
         QueryRequest::GetEnumValues { enum_name } =>
             class::get_enum_values(conn, &enum_name),
 
+        QueryRequest::GetTargetFiles => file::get_target_files(conn),
+        QueryRequest::GetAllFilePaths => file::get_all_file_paths(conn),
+        QueryRequest::GetAllFilesMetadata => file::get_all_files_metadata(conn),
+
         _ => Err(anyhow::anyhow!("Query type not yet implemented in new structure: {:?}", request)),
     }
 }
