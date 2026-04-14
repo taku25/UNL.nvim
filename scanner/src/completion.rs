@@ -655,7 +655,17 @@ fn fetch_members_recursive(
         }
     }
 
-    let start_class_ids = ctx.get_class_ids_by_name(class_name)?;
+    // テンプレート引数付きの型名（例: TArray<FGameplayTag>）はDBにそのまま登録されていないことが多い。
+    // まずフル名で検索し、見つからなければ '<' 以前のベース名（例: TArray）で再試行する。
+    let mut start_class_ids = ctx.get_class_ids_by_name(class_name)?;
+    if start_class_ids.is_empty() {
+        if let Some(base) = class_name.split('<').next() {
+            let base = base.trim();
+            if !base.is_empty() && base != class_name {
+                start_class_ids = ctx.get_class_ids_by_name(base)?;
+            }
+        }
+    }
     if start_class_ids.is_empty() { return Ok(Vec::new()); }
 
     let mut result = Vec::new();
