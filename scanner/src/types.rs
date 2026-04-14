@@ -244,6 +244,7 @@ pub enum QueryRequest {
     GetClassProperties { class_name: String },
     GetClassMembersRecursive { class_name: String, namespace: Option<String> },
     SearchFilesByPathPart { part: String },
+    SearchFilesByPathPartAsync { part: String },
     GetEnumValues { enum_name: String },
     GetComponents,
     GetModules,

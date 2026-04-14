@@ -125,6 +125,10 @@ function M.search_files(part, cb)
     M.request("SearchFiles", { part = part }, cb)
 end
 
+function M.search_files_by_path_part_async(part, on_partial, on_complete)
+    M.request_streaming("SearchFilesByPathPartAsync", { part = part }, on_partial, on_complete)
+end
+
 function M.load_component_data(component, cb)
     M.request("LoadComponentData", { component = component }, cb)
 end

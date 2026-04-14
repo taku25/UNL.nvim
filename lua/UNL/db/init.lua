@@ -120,6 +120,11 @@ function M.search_files_by_path_part(part, callback)
     remote.search_files_by_path_part(part, callback)
 end
 
+--- パスの一部からファイルを検索 (非同期ストリーミング)
+function M.search_files_by_path_part_async(part, on_partial, on_complete)
+    remote.search_files_by_path_part_async(part, on_partial, on_complete)
+end
+
 --- 特定モジュール内のシンボルを検索
 function M.find_symbol_in_module(module, symbol, callback)
     remote.find_symbol_in_module(module, symbol, callback)

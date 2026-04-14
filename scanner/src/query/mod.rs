@@ -43,6 +43,8 @@ pub fn process_query(conn: &Connection, request: QueryRequest) -> anyhow::Result
         QueryRequest::GetClassesInModules { modules, symbol_type } =>
             class::get_classes_in_modules(conn, modules, symbol_type),
 
+        QueryRequest::SearchFiles { part } =>
+            file::search_files_by_path_part(conn, &part),
         QueryRequest::SearchFilesByPathPart { part } =>
             file::search_files_by_path_part(conn, &part),
         
@@ -88,7 +90,11 @@ where F: FnMut(Vec<Value>) -> anyhow::Result<()> {
         QueryRequest::SearchFilesInModulesAsync { modules, filter, limit } => 
             asset::search_files_in_modules_async(conn, modules, filter, limit, on_items),
 
+        QueryRequest::SearchFilesByPathPartAsync { part } =>
+            file::search_files_by_path_part_async(conn, &part, on_items),
+
         QueryRequest::GetClassesInModulesAsync { modules, symbol_type } =>
+
             class::get_classes_in_modules_async(conn, modules, symbol_type, on_items),
 
         QueryRequest::FindSymbolUsagesAsync { symbol_name, file_path } =>

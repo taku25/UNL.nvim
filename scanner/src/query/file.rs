@@ -118,38 +118,85 @@ pub fn get_files_in_modules(conn: &Connection, modules: Vec<String>, extensions:
     Ok(json!(results))
 }
 
-/// パスの一部（部分文字列）でファイルを検索する。`#include` ナビゲーション等で使用。
+/// パスの一部（部分文字列）でファイルを検索する。
 pub fn search_files_by_path_part(conn: &Connection, part: &str) -> anyhow::Result<Value> {
+    let pattern = format!("%{}%", part);
+    
+    // 1. ファイル名 (sn.text) 優先検索 (インデックスが効くため高速)
     let sql = format!("
         {}
-        SELECT dp.full_path || '/' || sn.text as path,
-               sm.text as module_name,
-               rd.full_path as module_root,
-               f.extension
+        SELECT sn.text as filename, dp.full_path || '/' || sn.text as path,
+               sm.text as module_name, rd.full_path as module_root
         FROM files f
-        JOIN dir_paths dp ON f.directory_id = dp.id
         JOIN strings sn ON f.filename_id = sn.id
+        JOIN dir_paths dp ON f.directory_id = dp.id
         LEFT JOIN modules m ON f.module_id = m.id
         LEFT JOIN strings sm ON m.name_id = sm.id
         LEFT JOIN dir_paths rd ON m.root_directory_id = rd.id
-        WHERE (dp.full_path || '/' || sn.text) LIKE ?
-        LIMIT 100
+        WHERE sn.text LIKE ?
+        LIMIT 500
     ", PATH_CTE);
 
-    let pattern = format!("%{}%", part);
     let mut stmt = conn.prepare(&sql)?;
-    let mut rows = stmt.query([pattern])?;
-
+    let mut rows = stmt.query([&pattern])?;
+    
     let mut results = Vec::new();
     while let Some(row) = rows.next()? {
         results.push(json!({
-            "path": row.get::<_, String>(0)?,
-            "module_name": row.get::<_, Option<String>>(1)?,
-            "module_root": row.get::<_, Option<String>>(2)?,
-            "extension": row.get::<_, String>(3)?,
+            "filename": row.get::<_, String>(0)?,
+            "path": row.get::<_, String>(1)?,
+            "module_name": row.get::<_, Option<String>>(2)?,
+            "module_root": row.get::<_, Option<String>>(3)?,
         }));
     }
+    
+    // 2. 結果が少ない場合はフルパス検索 (低速だがフォールバック)
+    if results.len() < 50 {
+        let sql_full = format!("
+            {}
+            SELECT sn.text as filename, dp.full_path || '/' || sn.text as path,
+                   sm.text as module_name, rd.full_path as module_root
+            FROM files f
+            JOIN strings sn ON f.filename_id = sn.id
+            JOIN dir_paths dp ON f.directory_id = dp.id
+            LEFT JOIN modules m ON f.module_id = m.id
+            LEFT JOIN strings sm ON m.name_id = sm.id
+            LEFT JOIN dir_paths rd ON m.root_directory_id = rd.id
+            WHERE (dp.full_path || '/' || sn.text) LIKE ?
+            LIMIT 100
+        ", PATH_CTE);
+        
+        let mut stmt = conn.prepare(&sql_full)?;
+        let mut rows = stmt.query([&pattern])?;
+        while let Some(row) = rows.next()? {
+            let path: String = row.get(1)?;
+            if !results.iter().any(|r| r["path"] == path) {
+                results.push(json!({
+                    "filename": row.get::<_, String>(0)?,
+                    "path": path,
+                    "module_name": row.get::<_, Option<String>>(2)?,
+                    "module_root": row.get::<_, Option<String>>(3)?,
+                }));
+            }
+            if results.len() >= 500 { break; }
+        }
+    }
+
     Ok(json!(results))
+}
+
+pub fn search_files_by_path_part_async<F>(conn: &Connection, part: &str, mut on_items: F) -> anyhow::Result<Value>
+where F: FnMut(Vec<Value>) -> anyhow::Result<()> {
+    let results = search_files_by_path_part(conn, part)?;
+    if let Value::Array(items) = results {
+        let count = items.len();
+        if !items.is_empty() {
+            on_items(items)?;
+        }
+        Ok(json!(count))
+    } else {
+        Ok(json!(0))
+    }
 }
 
 pub fn get_files_in_modules_async<F>(conn: &Connection, modules: Vec<String>, extensions: Option<Vec<String>>, filter: Option<String>, mut on_items: F) -> anyhow::Result<Value>
