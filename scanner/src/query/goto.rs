@@ -298,11 +298,13 @@ pub fn find_symbol_in_inheritance_chain(
          JOIN dir_paths dp ON f.directory_id = dp.id
          JOIN strings sf ON f.filename_id = sf.id
          WHERE m.class_id = ? AND sm.text = ?
-         ORDER BY CASE
-           WHEN sf.text LIKE '%.h'   THEN 0
-           WHEN sf.text LIKE '%.hpp' THEN 1
-           ELSE 2
-         END
+         ORDER BY
+           CASE WHEN m.access = 'impl' THEN 1 ELSE 0 END,
+           CASE
+             WHEN sf.text LIKE '%.h'   THEN 0
+             WHEN sf.text LIKE '%.hpp' THEN 1
+             ELSE 2
+           END
          LIMIT 1",
         PATH_CTE
     );
@@ -464,11 +466,13 @@ fn find_member_anywhere(conn: &Connection, symbol_name: &str) -> anyhow::Result<
          JOIN dir_paths dp ON f.directory_id = dp.id
          JOIN strings sf ON f.filename_id = sf.id
          WHERE sm.text = ?
-         ORDER BY CASE
-           WHEN sf.text LIKE '%.h'   THEN 0
-           WHEN sf.text LIKE '%.hpp' THEN 1
-           ELSE 2
-         END
+         ORDER BY
+           CASE WHEN m.access = 'impl' THEN 1 ELSE 0 END,
+           CASE
+             WHEN sf.text LIKE '%.h'   THEN 0
+             WHEN sf.text LIKE '%.hpp' THEN 1
+             ELSE 2
+           END
          LIMIT 1",
         PATH_CTE
     );
