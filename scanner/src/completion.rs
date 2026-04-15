@@ -733,6 +733,10 @@ fn fetch_members_recursive(
     let mut result = Vec::new();
     let mut queue = start_class_ids;
     let mut visited = HashMap::new();
+    // 同名クラスが複数IDある場合（.hと複数.cpp実装）に親クラスが重複キューされないよう
+    // クラス名単位でも訪問済みを追跡する
+    let mut visited_class_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+    visited_class_names.insert(class_name.to_string());
     let prefix_search = prefix.as_ref().map(|p| format!("{}%", p));
 
     while let Some(current_class_id) = queue.pop() {
@@ -841,8 +845,13 @@ fn fetch_members_recursive(
         })?;
         for p in p_rows {
             let (p_id, p_name) = p?;
+            // 同名クラスを複数エントリ経由で重複キューしない（BFSの指数的膨張を防ぐ）
+            if visited_class_names.contains(&p_name) { continue; }
+            visited_class_names.insert(p_name.clone());
             if let Some(id) = p_id {
-                queue.push(id);
+                if !visited.contains_key(&id) {
+                    queue.push(id);
+                }
             }
             // IDがある場合でも、名前で再検索して他のID（前方宣言など）も網羅する
             let ids = ctx.get_class_ids_by_name(&p_name)?;
@@ -852,7 +861,7 @@ fn fetch_members_recursive(
                 }
             }
         }
-        if result.len() >= 500 { break; }
+        if result.len() >= 2000 { break; }
     }
 
     let result_json = json!(result);
