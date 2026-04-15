@@ -731,6 +731,7 @@ fn fetch_members_recursive(
     if start_class_ids.is_empty() { return Ok(Vec::new()); }
 
     let mut result = Vec::new();
+    let mut seen_members: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
     let mut queue = start_class_ids;
     let mut visited = HashMap::new();
     // 同名クラスが複数IDある場合（.hと複数.cpp実装）に親クラスが重複キューされないよう
@@ -758,7 +759,7 @@ fn fetch_members_recursive(
         if prefix_search.is_some() {
             sql.push_str(" AND smn.text LIKE ?");
         }
-        sql.push_str(" ORDER BY smn.text ASC LIMIT 200");
+        sql.push_str(" AND (m.access IS NULL OR m.access != 'impl') ORDER BY smn.text ASC LIMIT 200");
 
         let mut mem_stmt = ctx.conn.prepare(&sql)?;
         
@@ -810,6 +811,11 @@ fn fetch_members_recursive(
 
             if !is_accessible { continue; }
 
+            let ret = r_type.unwrap_or_default();
+            let dedup_key = (m_name.clone(), ret.clone());
+            if seen_members.contains(&dedup_key) { continue; }
+            seen_members.insert(dedup_key);
+
             let doc = if let Some(path) = f_path {
                 let mut comment = extract_comment_from_file(&path, line, &mut ctx.file_cache);
                 if let Some(d) = &detail {
@@ -824,7 +830,7 @@ fn fetch_members_recursive(
             result.push(json!({ 
                 "label": m_name, 
                 "kind": map_kind(&m_type), 
-                "detail": r_type.unwrap_or_default(), 
+                "detail": ret, 
                 "documentation": doc, 
                 "insertText": m_name 
             }));
