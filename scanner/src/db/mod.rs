@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use rusqlite::{params, Connection};
 use crate::types::{ParseResult, ProgressReporter};
 
-pub const DB_VERSION: i32 = 16;
+pub const DB_VERSION: i32 = 17;
 
 pub fn ensure_correct_version(db_path: &str) -> anyhow::Result<bool> {
     let mut version_match = false;
@@ -359,12 +359,10 @@ pub fn save_to_db(conn: &mut Connection, results: &[ParseResult], reporter: Arc<
     Ok(())
 }
 
-/// file_includes.resolved_file_id をフルパスのサフィックスマッチングで解決する。
-/// 単純なファイル名だけのマッチ (LIMIT 1) では同名ファイルが複数ある場合に誤ったファイルを
-/// 選んでしまうため (例: スタブ版 Array.h vs 本物の Engine/.../Containers/Array.h)、
-/// インクルードパス文字列をサフィックスとして照合し正しいファイルを選ぶ。
+/// file_includes.resolved_file_id をファイル名マッチングで解決する（ファイル名が一意のケースのみ）。
+/// 同名ファイルが複数存在する場合は NULL のままとし、クエリ時に base_filename_id で検索する。
 fn resolve_file_includes_by_path(conn: &mut Connection) -> anyhow::Result<()> {
-    // Pass 1: ファイル名が一意の場合は高速パス（従来どおり）
+    // ファイル名が一意の場合のみ高速に解決する（SQLレベルで完結）
     conn.execute(
         "UPDATE file_includes
          SET resolved_file_id = (
@@ -374,70 +372,6 @@ fn resolve_file_includes_by_path(conn: &mut Connection) -> anyhow::Result<()> {
            AND (SELECT COUNT(*) FROM files f WHERE f.filename_id = file_includes.base_filename_id) = 1",
         [],
     )?;
-
-    // Pass 2: ファイル名が複数一致するケース ── インクルードパス文字列のサフィックスで絞り込む
-    let unresolved: Vec<(i64, String)> = {
-        let mut stmt = conn.prepare(
-            "SELECT fi.rowid, si.text
-             FROM file_includes fi
-             JOIN strings si ON fi.include_path_id = si.id
-             WHERE fi.resolved_file_id IS NULL
-               AND (SELECT COUNT(*) FROM files f WHERE f.filename_id = fi.base_filename_id) > 1",
-        )?;
-        let x = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?
-            .filter_map(|r| r.ok())
-            .collect();
-        x
-    };
-
-    if unresolved.is_empty() {
-        return Ok(());
-    }
-
-    // 全ファイルのフルパスを PATH_CTE で取得（1回だけ）
-    let all_file_paths: Vec<(i64, String)> = {
-        let sql = format!(
-            "{} SELECT f.id, dp.full_path || '/' || sn.text
-             FROM files f
-             JOIN dir_paths dp ON f.directory_id = dp.id
-             JOIN strings sn ON f.filename_id = sn.id",
-            crate::db::path::PATH_CTE
-        );
-        let mut stmt = conn.prepare(&sql)?;
-        let x = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?
-            .filter_map(|r| r.ok())
-            .collect();
-        x
-    };
-
-    let tx = conn.transaction()?;
-    for (rowid, inc_path) in unresolved {
-        // インクルードパスをUnix区切りに正規化 (例: "Containers/Array.h")
-        let inc_norm = inc_path.replace('\\', "/").to_lowercase();
-        let suffix = format!("/{}", inc_norm);
-
-        // フルパスがインクルードパスで終わるファイルを探す。
-        // 複数マッチした場合はフルパスが最短のもの（より具体的なディレクトリ構造）を優先。
-        let best = all_file_paths
-            .iter()
-            .filter_map(|(fid, fpath)| {
-                let fpath_norm = fpath.replace('\\', "/").to_lowercase();
-                if fpath_norm.ends_with(&suffix) || fpath_norm == inc_norm {
-                    Some((*fid, fpath_norm.len()))
-                } else {
-                    None
-                }
-            })
-            .min_by_key(|(_, len)| *len);
-
-        if let Some((fid, _)) = best {
-            tx.execute(
-                "UPDATE file_includes SET resolved_file_id = ? WHERE rowid = ?",
-                params![fid, rowid],
-            )?;
-        }
-    }
-    tx.commit()?;
     Ok(())
 }
 
