@@ -7,6 +7,7 @@ pub mod completion;
 pub mod uasset;
 pub mod server;
 pub mod modify;
+pub mod vcs;
 
 // Backward compatibility: existing code using `scanner::` continues to work.
 // Future language parsers will live alongside cpp: parser::verse, parser::blueprint, etc.

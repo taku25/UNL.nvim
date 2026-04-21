@@ -10,7 +10,7 @@ use ignore::{WalkBuilder, WalkState};
 use regex::Regex;
 use tree_sitter::Query;
 use crate::types::{RefreshRequest, ModuleDef, ComponentDef, ProgressReporter, PhaseInfo, InputFile, ParseResult};
-use crate::{scanner, db};
+use crate::{scanner, db, vcs};
 use crate::db::path::get_or_create_directory;
 
 #[derive(serde::Deserialize, Debug)]
@@ -40,16 +40,41 @@ pub fn run_refresh(req: RefreshRequest, reporter: Arc<dyn ProgressReporter>) -> 
     let ue_version = engine_root.as_ref().and_then(|r| get_ue_version(r));
     if !project_root.exists() { return Err(anyhow::anyhow!("Project root does not exist: {:?}", project_root)); }
 
+    // === VCS Integration: determine whether engine scan can be skipped ===
+    // Read stored revisions before walk (DB may not exist yet on first run).
+    let stored_engine_rev: Option<String> = Connection::open(Path::new(&db_path_native)).ok()
+        .and_then(|c| c.query_row("SELECT value FROM project_meta WHERE key = 'vcs_engine_revision'", [], |r| r.get::<_, String>(0)).ok());
+    let stored_game_rev: Option<String> = Connection::open(Path::new(&db_path_native)).ok()
+        .and_then(|c| c.query_row("SELECT value FROM project_meta WHERE key = 'vcs_game_revision'", [], |r| r.get::<_, String>(0)).ok());
+    // stored_game_rev is reserved for future game-side incremental optimization
+    // (git diff --name-status to skip parsing unchanged committed game files).
+    let _ = &stored_game_rev;
+
+    // Detect VCS providers for game and engine roots.
+    let game_vcs = vcs::detect(&project_root);
+    let current_game_rev = game_vcs.current_revision(&project_root);
+    // Engine may be a git submodule with its own .git ref, so detect independently.
+    let current_engine_rev = engine_root.as_ref().and_then(|er| vcs::detect(er).current_revision(er));
+
+    // Skip engine walk when its VCS revision is identical to the stored one.
+    let engine_rev_same = match (&stored_engine_rev, &current_engine_rev) {
+        (Some(stored), Some(current)) => stored == current,
+        _ => false,
+    };
+
     // Send the phase plan first so the Lua client can build its progress UI
     // without any hardcoded weights on its side.
     reporter.report_plan(&[
-        PhaseInfo { name: "discovery".into(),  label: "Discovery".into(),  weight: 0.05 },
+        PhaseInfo { name: "discovery".into(),  label: "Discovery".into(),  weight: if engine_rev_same { 0.02 } else { 0.05 } },
         PhaseInfo { name: "db_sync".into(),    label: "DB Sync".into(),    weight: 0.15 },
         PhaseInfo { name: "analysis".into(),   label: "Analysis".into(),   weight: 0.65 },
         PhaseInfo { name: "finalizing".into(), label: "Finalizing".into(), weight: 0.15 },
     ]);
 
     reporter.report("discovery", 0, 100, &format!("Scanning: {:?}", project_root));
+    if engine_rev_same {
+        reporter.report("discovery", 0, 100, &format!("Engine revision unchanged ({}), skipping engine scan.", current_engine_rev.as_deref().unwrap_or("?")));
+    }
 
     let project_name = get_name_from_root(&project_root);
     let engine_name = engine_root.as_ref().map(|r| get_name_from_root(r));
@@ -59,13 +84,22 @@ pub fn run_refresh(req: RefreshRequest, reporter: Arc<dyn ProgressReporter>) -> 
     component_defs.push(ComponentDef { name: project_name.clone(), display_name: project_root.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| project_name.clone()), comp_type: "Game".to_string(), root_path: project_root.clone(), uproject_path: uproject_path.clone(), uplugin_path: None, owner_name: project_name.clone() });
 
     if let Some(ref eroot) = engine_root {
-        component_defs.push(ComponentDef { name: engine_name.as_ref().unwrap().clone(), display_name: "Engine".to_string(), comp_type: "Engine".to_string(), root_path: eroot.clone(), uproject_path: None, uplugin_path: None, owner_name: engine_name.as_ref().unwrap().clone() });
+        // Only register engine component when we are actually scanning it.
+        // When engine_rev_same, the component entry from the previous scan is
+        // preserved in the DB (we skip the unconditional DELETE below).
+        if !engine_rev_same {
+            component_defs.push(ComponentDef { name: engine_name.as_ref().unwrap().clone(), display_name: "Engine".to_string(), comp_type: "Engine".to_string(), root_path: eroot.clone(), uproject_path: None, uplugin_path: None, owner_name: engine_name.as_ref().unwrap().clone() });
+        }
     }
 
     let mut search_roots = vec![project_root.clone()];
-    if (req.scope.as_deref().unwrap_or("Full") == "Full" || req.scope.as_deref().unwrap_or("Full") == "Engine") && engine_root.is_some() {
+    // Only walk the engine when its revision changed (or VCS is unavailable).
+    // When skipped, engine files and modules are preserved from the previous DB state.
+    if !engine_rev_same && (req.scope.as_deref().unwrap_or("Full") == "Full" || req.scope.as_deref().unwrap_or("Full") == "Engine") && engine_root.is_some() {
         search_roots.push(engine_root.as_ref().unwrap().clone());
     }
+    // Normalised walked-root strings used later to scope the cleanup pass.
+    let walked_root_strs: Vec<String> = search_roots.iter().map(|r| normalize_path(r)).collect();
 
     let excludes: HashSet<String> = req.config.excludes_directory.iter().map(|s| s.to_lowercase()).collect();
     let include_exts: HashSet<String> = req.config.include_extensions.iter().map(|e| e.to_lowercase()).collect();
@@ -162,9 +196,13 @@ pub fn run_refresh(req: RefreshRequest, reporter: Arc<dyn ProgressReporter>) -> 
 
     let mut module_defs = Vec::new();
     if let Some(ref eroot) = engine_root {
-        let e_name = engine_name.as_ref().unwrap();
-        module_defs.push(ModuleDef { name: "_EngineConfig".to_string(), path: eroot.join("Engine/Config"), root: eroot.join("Engine/Config"), public_deps: vec![], private_deps: vec![], mod_type: "Config".to_string(), owner_name: e_name.clone(), component_name: Some(e_name.clone()) });
-        module_defs.push(ModuleDef { name: "_EngineShaders".to_string(), path: eroot.join("Engine/Shaders"), root: eroot.join("Engine/Shaders"), public_deps: vec![], private_deps: vec![], mod_type: "Shader".to_string(), owner_name: e_name.clone(), component_name: Some(e_name.clone()) });
+        // Only re-add engine static modules when we are scanning the engine.
+        // When engine_rev_same, these entries remain in the DB unchanged.
+        if !engine_rev_same {
+            let e_name = engine_name.as_ref().unwrap();
+            module_defs.push(ModuleDef { name: "_EngineConfig".to_string(), path: eroot.join("Engine/Config"), root: eroot.join("Engine/Config"), public_deps: vec![], private_deps: vec![], mod_type: "Config".to_string(), owner_name: e_name.clone(), component_name: Some(e_name.clone()) });
+            module_defs.push(ModuleDef { name: "_EngineShaders".to_string(), path: eroot.join("Engine/Shaders"), root: eroot.join("Engine/Shaders"), public_deps: vec![], private_deps: vec![], mod_type: "Shader".to_string(), owner_name: e_name.clone(), component_name: Some(e_name.clone()) });
+        }
     }
     module_defs.push(ModuleDef { name: "_GameConfig".to_string(), path: project_root.join("Config"), root: project_root.join("Config"), public_deps: vec![], private_deps: vec![], mod_type: "Config".to_string(), owner_name: project_name.clone(), component_name: Some(project_name.clone()) });
 
@@ -205,13 +243,13 @@ pub fn run_refresh(req: RefreshRequest, reporter: Arc<dyn ProgressReporter>) -> 
     let mut string_cache = HashMap::new();
     let mut dir_cache = HashMap::new();
 
-    // ② Load all directory entries once, then reconstruct paths in Rust — avoids recursive PATH_CTE
+    // ② Load all directory entries once, then reconstruct paths in Rust — avoids recursive PATH_CTE.
+    // dir_map is kept alive so we can also reconstruct engine module root paths below.
+    let mut dir_map: HashMap<i64, (Option<i64>, String)> = HashMap::new();
     let mut existing_mtimes = HashMap::new();
     {
         let count: i64 = conn.query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0)).unwrap_or(0);
         if count > 0 {
-            // Build id → (parent_id, name_segment) map
-            let mut dir_map: HashMap<i64, (Option<i64>, String)> = HashMap::new();
             {
                 let mut stmt = conn.prepare(
                     "SELECT d.id, d.parent_id, s.text FROM directories d JOIN strings s ON d.name_id = s.id"
@@ -223,7 +261,6 @@ pub fn run_refresh(req: RefreshRequest, reporter: Arc<dyn ProgressReporter>) -> 
                 )))?;
                 for r in rows.flatten() { dir_map.insert(r.0, (r.1, r.2)); }
             }
-            // Reconstruct full paths per file without recursive SQL
             let mut stmt = conn.prepare(
                 "SELECT f.directory_id, s.text, f.mtime FROM files f JOIN strings s ON f.filename_id = s.id"
             )?;
@@ -240,9 +277,37 @@ pub fn run_refresh(req: RefreshRequest, reporter: Arc<dyn ProgressReporter>) -> 
         }
     }
 
+    // When engine scan is skipped, load the existing engine module IDs from the
+    // DB so that game files can still be assigned to the correct module.
+    let engine_mod_ids: HashMap<String, i64> = if engine_rev_same && engine_name.is_some() {
+        let mut stmt = conn.prepare(
+            "SELECT m.id, m.root_directory_id FROM modules m WHERE m.owner_name = ?"
+        )?;
+        let rows = stmt.query_map(params![engine_name.as_ref().unwrap()], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+        })?;
+        let mut map = HashMap::new();
+        for r in rows.flatten() {
+            let (mod_id, root_dir_id) = r;
+            let path = reconstruct_dir_path(&dir_map, root_dir_id);
+            map.insert(path, mod_id);
+        }
+        map
+    } else {
+        HashMap::new()
+    };
+
     let tx = conn.transaction()?;
-    tx.execute("DELETE FROM components", [])?;
-    tx.execute("DELETE FROM modules", [])?;
+    // When the engine revision is unchanged, preserve engine components/modules
+    // in the DB — they are expensive to rebuild and nothing has changed.
+    if engine_rev_same && engine_name.is_some() {
+        let en = engine_name.as_ref().unwrap();
+        tx.execute("DELETE FROM components WHERE owner_name != ?", params![en])?;
+        tx.execute("DELETE FROM modules WHERE owner_name != ?", params![en])?;
+    } else {
+        tx.execute("DELETE FROM components", [])?;
+        tx.execute("DELETE FROM modules", [])?;
+    }
     
     let mut mod_id_map = HashMap::new();
     for comp in &component_defs {
@@ -265,6 +330,9 @@ pub fn run_refresh(req: RefreshRequest, reporter: Arc<dyn ProgressReporter>) -> 
         tx.last_insert_rowid()
     };
     tx.commit()?;
+
+    // Merge preserved engine module IDs so that file→module assignment is correct.
+    mod_id_map.extend(engine_mod_ids);
 
     let mut sorted_roots: Vec<_> = mod_id_map.into_iter().collect();
     sorted_roots.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
@@ -294,7 +362,10 @@ pub fn run_refresh(req: RefreshRequest, reporter: Arc<dyn ProgressReporter>) -> 
 
     let tx = conn.transaction()?;
     for (path, _) in &existing_mtimes {
-        if !current_on_disk.contains(path) {
+        // Only clean up files that belong to a root we actually walked.
+        // Engine files are intentionally preserved when engine scan is skipped.
+        let in_walked_root = walked_root_strs.iter().any(|r| path.starts_with(r.as_str()));
+        if in_walked_root && !current_on_disk.contains(path) {
             let p = Path::new(path);
             let dir_id = get_or_create_directory(&tx, &mut string_cache, &mut dir_cache, p.parent().unwrap_or(Path::new("")))?;
             let fn_id = db::get_or_create_string(&tx, &mut string_cache, p.file_name().unwrap().to_str().unwrap())?;
@@ -333,6 +404,15 @@ pub fn run_refresh(req: RefreshRequest, reporter: Arc<dyn ProgressReporter>) -> 
     }
 
     reporter.report("complete", 100, 100, "Refresh complete.");
+
+    // Persist VCS revisions so the next refresh can detect unchanged roots.
+    if let Some(ref rev) = current_game_rev {
+        let _ = conn.execute("INSERT OR REPLACE INTO project_meta (key, value) VALUES (?, ?)", params!["vcs_game_revision", rev]);
+    }
+    if let Some(ref rev) = current_engine_rev {
+        let _ = conn.execute("INSERT OR REPLACE INTO project_meta (key, value) VALUES (?, ?)", params!["vcs_engine_revision", rev]);
+    }
+
     Ok(())
 }
 
@@ -342,6 +422,20 @@ fn get_name_from_root(path: &Path) -> String { path.file_name().and_then(|s| s.t
 /// Reconstruct a slash-separated full path from the in-memory directory map.
 fn reconstruct_path(dir_map: &HashMap<i64, (Option<i64>, String)>, mut dir_id: i64, filename: &str) -> String {
     let mut segments: Vec<String> = vec![filename.to_string()];
+    loop {
+        match dir_map.get(&dir_id) {
+            Some((Some(parent_id), name)) => { segments.push(name.clone()); dir_id = *parent_id; }
+            Some((None, name))            => { segments.push(name.clone()); break; }
+            None                          => break,
+        }
+    }
+    segments.reverse();
+    segments.join("/")
+}
+
+/// Reconstruct a slash-separated directory path (no trailing filename) from the dir_map.
+fn reconstruct_dir_path(dir_map: &HashMap<i64, (Option<i64>, String)>, mut dir_id: i64) -> String {
+    let mut segments: Vec<String> = vec![];
     loop {
         match dir_map.get(&dir_id) {
             Some((Some(parent_id), name)) => { segments.push(name.clone()); dir_id = *parent_id; }
