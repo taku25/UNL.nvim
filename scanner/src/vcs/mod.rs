@@ -5,8 +5,8 @@
 
 pub mod git;
 pub mod none;
-// TODO: pub mod perforce;  -- P4 integration (p4 changes / p4 fstat)
-// TODO: pub mod svn;       -- SVN integration (svn info / svn diff)
+pub mod perforce;
+pub mod svn;
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -93,23 +93,33 @@ impl VcsProvider for BuildVersionProvider {
 ///
 /// Detection order:
 ///   1. Git (`.git` directory / file, or `git rev-parse` succeeds)
-///   2. TODO: Perforce (P4CONFIG / `.p4config` present)
-///   3. TODO: SVN (`.svn` present)
+///   2. Perforce (`.p4config` present, or `p4 changes` succeeds in the dir)
+///   3. SVN (`.svn` directory present)
 ///   4. `Engine/Build/Build.version` (binary UE from Epic Launcher)
 ///   5. NoVcs (always returns `None` → mtime-based fallback)
 pub fn detect(root: &Path) -> Box<dyn VcsProvider> {
-    // Git: .git can be a directory (normal clone) or a file (submodule/worktree)
+    // 1. Git: .git can be a directory (normal clone) or a file (submodule/worktree)
     if root.join(".git").exists() {
         return Box::new(git::GitProvider);
     }
-    // Fallback: git rev-parse works even without a .git at root (sparse checkouts, etc.)
+    // Fallback: git rev-parse works even without a .git at root (sparse checkouts etc.)
     if git::GitProvider.current_revision(root).is_some() {
         return Box::new(git::GitProvider);
     }
-    // TODO: P4CONFIG / .p4config detection
-    // TODO: .svn directory detection
 
-    // Binary UE engine (Epic Launcher): use Build.version as a stable fingerprint.
+    // 2. Perforce: .p4config file (name may be overridden by P4CONFIG env var),
+    //    or p4 changes succeeds meaning the directory is inside a mapped workspace.
+    let p4config_name = std::env::var("P4CONFIG").unwrap_or_else(|_| ".p4config".to_string());
+    if root.join(&p4config_name).exists() || perforce::detect_revision(root).is_some() {
+        return Box::new(perforce::P4Provider);
+    }
+
+    // 3. SVN: .svn working-copy metadata directory.
+    if root.join(".svn").exists() {
+        return Box::new(svn::SvnProvider);
+    }
+
+    // 4. Binary UE engine (Epic Launcher): use Build.version as a stable fingerprint.
     if BuildVersionProvider.current_revision(root).is_some() {
         return Box::new(BuildVersionProvider);
     }
