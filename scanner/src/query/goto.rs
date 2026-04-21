@@ -490,6 +490,109 @@ fn find_member_anywhere(conn: &Connection, symbol_name: &str) -> anyhow::Result<
 }
 
 // ---------------------------------------------------------------------------
+// Local definition search
+// ---------------------------------------------------------------------------
+
+fn search_decl_in_node(node: tree_sitter::Node, src: &[u8], symbol: &str) -> Option<Point> {
+    match node.kind() {
+        "declaration" | "field_declaration" => {
+            if let Some(decl_node) = node.child_by_field_name("declarator") {
+                if let Some(name) = extract_decl_name(decl_node, src) {
+                    if name == symbol {
+                        return Some(decl_node.start_position());
+                    }
+                }
+            }
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                if child.kind() == "init_declarator" {
+                    if let Some(pos) = search_decl_in_node(child, src, symbol) {
+                        return Some(pos);
+                    }
+                }
+            }
+        }
+        "parameter_declaration" | "init_declarator" | "function_definition" => {
+            if let Some(decl_node) = node.child_by_field_name("declarator") {
+                if let Some(name) = extract_decl_name(decl_node, src) {
+                    if name == symbol {
+                        return Some(decl_node.start_position());
+                    }
+                }
+            }
+        }
+        "parameter_list" => {
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                if let Some(pos) = search_decl_in_node(child, src, symbol) {
+                    return Some(pos);
+                }
+            }
+        }
+        "enumerator" => {
+            if let Some(name_node) = node.child_by_field_name("name") {
+                if node_text(&name_node, src) == symbol {
+                    return Some(name_node.start_position());
+                }
+            }
+        }
+        "class_specifier" | "struct_specifier" | "enum_specifier"
+        | "unreal_class_declaration" | "unreal_struct_declaration" => {
+            if let Some(name_node) = node.child_by_field_name("name") {
+                if node_text(&name_node, src) == symbol {
+                    return Some(name_node.start_position());
+                }
+            }
+        }
+        _ => {}
+    }
+    None
+}
+
+fn find_local_definition(
+    root: tree_sitter::Node,
+    src: &[u8],
+    symbol: &str,
+    cursor_point: Point,
+) -> Option<Point> {
+    let mut curr = root.descendant_for_point_range(cursor_point, cursor_point);
+    while let Some(n) = curr {
+        if let Some(parent) = n.parent() {
+            let mut cursor = parent.walk();
+            for child in parent.children(&mut cursor) {
+                if child.start_position() > cursor_point {
+                    let pk = parent.kind();
+                    if pk != "class_specifier"
+                        && pk != "struct_specifier"
+                        && pk != "field_declaration_list"
+                    {
+                        break;
+                    }
+                }
+                if let Some(pos) = search_decl_in_node(child, src, symbol) {
+                    if pos != cursor_point {
+                        return Some(pos);
+                    }
+                }
+            }
+        }
+        if n.kind() == "function_definition" {
+            if let Some(decl) = n.child_by_field_name("declarator") {
+                if let Some(params) = find_descendant_of_kind(decl, "parameter_list") {
+                    if let Some(pos) = search_decl_in_node(params, src, symbol) {
+                        if pos != cursor_point {
+                            return Some(pos);
+                        }
+                    }
+                }
+            }
+        }
+        curr = n.parent();
+    }
+    None
+}
+
+// ---------------------------------------------------------------------------
 // Main entry
 // ---------------------------------------------------------------------------
 
@@ -501,8 +604,19 @@ pub fn goto_definition(
     content: String,
     line: u32,
     character: u32,
-    _file_path: Option<String>,
+    file_path: Option<String>,
 ) -> anyhow::Result<Value> {
+    let language: tree_sitter::Language = tree_sitter_unreal_cpp::LANGUAGE.into();
+    let mut parser = Parser::new();
+    parser
+        .set_language(&language)
+        .map_err(|e| anyhow::anyhow!("Failed to load language: {}", e))?;
+    let tree = parser
+        .parse(&content, None)
+        .ok_or_else(|| anyhow::anyhow!("Failed to parse content"))?;
+    let root = tree.root_node();
+    let src = content.as_bytes();
+
     let ctx = match extract_cursor_context(&content, line, character) {
         Some(c) => c,
         None => return Ok(Value::Null),
@@ -515,6 +629,18 @@ pub fn goto_definition(
         ctx.qualifier_op,
         ctx.enclosing_class,
     );
+
+    // 0. ローカル（カレントバッファ内）の定義を優先的に検索
+    let cursor_point = Point::new(line as usize, character as usize);
+    if let Some(pos) = find_local_definition(root, src, &ctx.symbol, cursor_point) {
+        tracing::debug!("Found local definition for '{}' at {:?}", ctx.symbol, pos);
+        return Ok(json!({
+            "symbol_name": ctx.symbol,
+            "line_number": pos.row + 1,
+            "file_path":   file_path.unwrap_or_default(),
+            "class_name":  ctx.enclosing_class,
+        }));
+    }
 
     // 1. 明示的な修飾子がある場合
     if let Some(ref qual) = ctx.qualifier {
