@@ -339,6 +339,16 @@ pub enum QueryRequest {
         #[serde(default)]
         exact_files: Vec<String>,
     },
+    /// 指定ファイルをインクルードしているファイル一覧を取得する（include 逆引き）
+    /// .cpp を渡した場合は対応する .h を自動的にターゲットとし、
+    /// 結果の .h ファイルに対応する .cpp も合わせて返す。
+    FindIncluders {
+        file_path: String,
+    },
+    /// FindIncluders のストリーミング版（バッチ通知）
+    FindIncludersAsync {
+        file_path: String,
+    },
 }
 
 /// Request to add a module entry to a .uproject or .uplugin JSON file.

@@ -115,6 +115,12 @@ function M.find_symbol_usages_streaming(symbol_name, file_path, on_partial, on_c
     M.request_streaming("FindSymbolUsagesAsync", { symbol_name = symbol_name, file_path = file_path }, on_partial, on_complete)
 end
 
+--- 指定ファイルをインクルードしているファイル一覧をストリーミングで取得する（include 逆引き）
+--- .cpp を渡した場合は対応する .h を自動的にターゲットとする
+function M.find_includers_streaming(file_path, on_partial, on_complete)
+    M.request_streaming("FindIncludersAsync", { file_path = file_path }, on_partial, on_complete)
+end
+
 -- Standard Wrappers
 
 function M.find_derived_classes(base_class, cb)

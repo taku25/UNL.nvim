@@ -93,3 +93,16 @@ pub const FILE_PATH_SELECT: &str = "
     JOIN dir_paths dp ON f.directory_id = dp.id
     JOIN strings sn ON f.filename_id = sn.id
 ";
+
+/// Lua の unl_path.normalize が返す `C:/foo` 形式を
+/// PATH_CTE が生成する `C:///foo` 形式（Prefix("C:") + RootDir("/") + Normal）に変換する。
+/// Linux パスや既に変換済みのパスはそのまま返す。
+pub fn to_db_path_format(path: &str) -> String {
+    let b = path.as_bytes();
+    if b.len() >= 3 && b[1] == b':' && b[2] == b'/' {
+        if b.len() < 5 || !(b[3] == b'/' && b[4] == b'/') {
+            return format!("{}///{}", &path[..2], &path[3..]);
+        }
+    }
+    path.to_string()
+}

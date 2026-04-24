@@ -181,6 +181,12 @@ function M.find_symbol_usages_streaming(symbol_name, file_path, on_partial, on_c
     remote.find_symbol_usages_streaming(symbol_name, file_path, on_partial, on_complete)
 end
 
+--- 指定ファイルをインクルードしているファイル一覧をストリーミングで取得する（include 逆引き）
+--- .cpp を渡した場合は対応する .h を自動的にターゲットとする
+function M.find_includers_streaming(file_path, on_partial, on_complete)
+    remote.find_includers_streaming(file_path, on_partial, on_complete)
+end
+
 --- メンバーの戻り値型を更新 (書き込み操作)
 function M.update_member_return_type(class_name, member_name, return_type, callback)
     remote.update_member_return_type(class_name, member_name, return_type, callback)
