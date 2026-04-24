@@ -330,6 +330,15 @@ pub enum QueryRequest {
         #[serde(default)]
         file_path: Option<String>,
     },
+    /// お気に入りのディレクトリ/ファイルに含まれるファイルを高速取得する
+    GetFilesInFavoritePaths {
+        /// ディレクトリのリスト（末尾 '/' あり、前方一致で展開する）
+        #[serde(default)]
+        dirs: Vec<String>,
+        /// 個別ファイルの完全パスのリスト（完全一致）
+        #[serde(default)]
+        exact_files: Vec<String>,
+    },
 }
 
 /// Request to add a module entry to a .uproject or .uplugin JSON file.

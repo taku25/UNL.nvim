@@ -75,6 +75,9 @@ pub fn process_query(conn: &Connection, request: QueryRequest) -> anyhow::Result
         QueryRequest::GetAllFilePaths => file::get_all_file_paths(conn),
         QueryRequest::GetAllFilesMetadata => file::get_all_files_metadata(conn),
 
+        QueryRequest::GetFilesInFavoritePaths { dirs, exact_files } =>
+            file::get_files_in_favorite_paths(conn, &dirs, &exact_files),
+
         _ => Err(anyhow::anyhow!("Query type not yet implemented in new structure: {:?}", request)),
     }
 }

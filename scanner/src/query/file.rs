@@ -299,6 +299,88 @@ pub fn get_all_file_paths(conn: &Connection) -> anyhow::Result<Value> {
     Ok(json!(results))
 }
 
+/// Lua の unl_path.normalize が返す `C:/foo` 形式を
+/// PATH_CTE が生成する `C:///foo` 形式（Prefix("C:") + RootDir("/") + Normal）に変換する。
+/// Linux パスや既に変換済みのパスはそのまま返す。
+fn to_db_path_format(path: &str) -> String {
+    // Windows 絶対パス: "X:/" で始まり、かつ "X:///" ではない場合に変換
+    let b = path.as_bytes();
+    if b.len() >= 3 && b[1] == b':' && b[2] == b'/' {
+        if b.len() < 5 || !(b[3] == b'/' && b[4] == b'/') {
+            return format!("{}///{}", &path[..2], &path[3..]);
+        }
+    }
+    path.to_string()
+}
+
+/// お気に入りのパスリストに基づいてファイルを取得する。
+/// dirs はディレクトリプレフィックス（末尾 '/' あり）、exact_files は完全パス。
+/// Lua 側の正規化済みパス（C:/...）を DB 形式（C:///...）に自動変換する。
+pub fn get_files_in_favorite_paths(
+    conn: &Connection,
+    dirs: &[String],
+    exact_files: &[String],
+) -> anyhow::Result<Value> {
+    if dirs.is_empty() && exact_files.is_empty() {
+        return Ok(serde_json::json!([]));
+    }
+
+    // WHERE 句を動的に構築
+    let mut conditions: Vec<String> = Vec::new();
+    let mut params: Vec<String> = Vec::new();
+
+    for dir in dirs {
+        let db_dir = to_db_path_format(dir);
+        // 末尾スラッシュを保証した上でプレフィックスマッチ
+        let prefix = if db_dir.ends_with('/') {
+            format!("{}%", db_dir)
+        } else {
+            format!("{}/%", db_dir)
+        };
+        conditions.push("(dp.full_path || '/' || sn.text) LIKE ?".to_string());
+        params.push(prefix);
+    }
+    for file in exact_files {
+        conditions.push("(dp.full_path || '/' || sn.text) = ?".to_string());
+        params.push(to_db_path_format(file));
+    }
+
+    let where_clause = conditions.join(" OR ");
+    let sql = format!(
+        "{}
+        SELECT
+            dp.full_path || '/' || sn.text as path,
+            sn.text as filename,
+            sm.text as module_name,
+            rd.full_path as module_root,
+            f.extension
+        FROM files f
+        JOIN dir_paths dp ON f.directory_id = dp.id
+        JOIN strings sn ON f.filename_id = sn.id
+        LEFT JOIN modules m ON f.module_id = m.id
+        LEFT JOIN strings sm ON m.name_id = sm.id
+        LEFT JOIN dir_paths rd ON m.root_directory_id = rd.id
+        WHERE {}
+        ORDER BY sn.text",
+        PATH_CTE, where_clause
+    );
+
+    let mut stmt = conn.prepare(&sql)?;
+    let mut rows = stmt.query(rusqlite::params_from_iter(params))?;
+
+    let mut results = Vec::new();
+    while let Some(row) = rows.next()? {
+        results.push(serde_json::json!({
+            "path":        row.get::<_, String>(0)?,
+            "filename":    row.get::<_, String>(1)?,
+            "module_name": row.get::<_, Option<String>>(2)?,
+            "module_root": row.get::<_, Option<String>>(3)?,
+            "extension":   row.get::<_, String>(4)?,
+        }));
+    }
+    Ok(serde_json::json!(results))
+}
+
 /// 全てのファイルのメタデータ (filename, path, module_name) を取得する
 pub fn get_all_files_metadata(conn: &Connection) -> anyhow::Result<Value> {
     let sql = format!("

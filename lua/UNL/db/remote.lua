@@ -343,6 +343,10 @@ function M.get_all_file_paths(cb)
     M.request("GetAllFilePaths", {}, cb)
 end
 
+function M.get_files_in_favorite_paths(dirs, exact_files, cb)
+    M.request("GetFilesInFavoritePaths", { dirs = dirs, exact_files = exact_files }, cb)
+end
+
 function M.get_completions(content, line, character, file_path, cb)
     M.request("GetCompletions", {
         content = content,
