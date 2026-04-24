@@ -173,12 +173,12 @@ function M.get_assets(callback)
 end
 
 --- 指定したシンボル名が C++ 内で使用されている箇所を検索
-function M.find_symbol_usages(symbol_name, file_path, callback)
-    remote.find_symbol_usages(symbol_name, file_path, callback)
+function M.find_symbol_usages(symbol_name, file_path, method_name, callback)
+    remote.find_symbol_usages(symbol_name, file_path, method_name, callback)
 end
 
-function M.find_symbol_usages_streaming(symbol_name, file_path, on_partial, on_complete)
-    remote.find_symbol_usages_streaming(symbol_name, file_path, on_partial, on_complete)
+function M.find_symbol_usages_streaming(symbol_name, file_path, method_name, on_partial, on_complete)
+    remote.find_symbol_usages_streaming(symbol_name, file_path, method_name, on_partial, on_complete)
 end
 
 --- 指定ファイルをインクルードしているファイル一覧をストリーミングで取得する（include 逆引き）

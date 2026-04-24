@@ -3,11 +3,11 @@ use rusqlite::types::ToSql;
 use rusqlite::OptionalExtension;
 use serde_json::{json, Value};
 use std::collections::HashSet;
-use std::io::BufRead;
+use tree_sitter::Parser;
 use crate::db::path::{PATH_CTE, to_db_path_format};
 
 const MAX_RESULTS: usize = 300;
-const MAX_FILES: usize = 2000;
+const STREAM_BATCH_SIZE: usize = 15;
 
 fn find_definition_file_ids(conn: &Connection, symbol_name: &str) -> anyhow::Result<Vec<i64>> {
     let mut ids: Vec<i64> = Vec::new();
@@ -107,123 +107,286 @@ fn find_includer_file_ids(conn: &Connection, target_id: i64) -> anyhow::Result<H
     Ok(result)
 }
 
-fn get_file_paths_by_ids(conn: &Connection, ids: &[i64]) -> anyhow::Result<Vec<String>> {
-    let mut results: Vec<String> = Vec::new();
-
-    for chunk in ids.chunks(50) {
-        let placeholders = chunk.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-        let sql = format!(
-            "{} SELECT dp.full_path || '/' || sn.text
-             FROM files f
-             JOIN dir_paths dp ON f.directory_id = dp.id
-             JOIN strings sn ON f.filename_id = sn.id
-             WHERE f.id IN ({})",
-            PATH_CTE, placeholders
-        );
-        let params: Vec<&dyn ToSql> = chunk.iter().map(|id| id as &dyn ToSql).collect();
-        let mut stmt = conn.prepare(&sql)?;
-        let mut rows = stmt.query(rusqlite::params_from_iter(params))?;
-        while let Some(row) = rows.next()? {
-            results.push(row.get(0)?);
-        }
-    }
-
-    Ok(results)
-}
-
-/// 単語境界付きで行内のシンボルを検索し、見つかった場合は列オフセットを返す
-fn find_word_in_line(line: &str, symbol: &str) -> Option<usize> {
-    let sym_len = symbol.len();
-    if sym_len == 0 {
-        return None;
-    }
-    let bytes = line.as_bytes();
-    let mut start = 0;
-
-    while start + sym_len <= bytes.len() {
-        if let Some(rel_pos) = line[start..].find(symbol) {
-            let abs_pos = start + rel_pos;
-            let is_word_char = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
-            let before_ok = abs_pos == 0 || !is_word_char(bytes[abs_pos - 1]);
-            let after_pos = abs_pos + sym_len;
-            let after_ok = after_pos >= bytes.len() || !is_word_char(bytes[after_pos]);
-
-            if before_ok && after_ok {
-                return Some(abs_pos);
-            }
-            start = abs_pos + 1;
-        } else {
-            break;
-        }
-    }
-    None
-}
-
-fn search_in_file(path: &str, symbol_name: &str, results: &mut Vec<Value>) {
-    let file = match std::fs::File::open(path) {
-        Ok(f) => f,
-        Err(_) => return,
+/// tree-sitter でファイルをパースし、class_name が型として参照されている箇所を収集する。
+/// `is_extra` ノード（コメント等）は除外し、クラス/構造体の定義宣言名も除外する。
+/// 戻り値: Vec<(line_1based, col_0based, context_line_trimmed)>
+fn find_type_refs_in_file(path: &str, class_name: &str) -> Vec<(u32, u32, String)> {
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return vec![],
     };
-    let reader = std::io::BufReader::new(file);
+    let language: tree_sitter::Language = tree_sitter_unreal_cpp::LANGUAGE.into();
+    let mut parser = Parser::new();
+    if parser.set_language(&language).is_err() {
+        return vec![];
+    }
+    let tree = match parser.parse(&content, None) {
+        Some(t) => t,
+        None => return vec![],
+    };
+    let src = content.as_bytes();
+    let lines: Vec<&str> = content.lines().collect();
+    let mut results = Vec::new();
+    let mut seen: HashSet<(u32, u32)> = HashSet::new();
+    collect_type_refs(tree.root_node(), src, &lines, class_name, &mut results, &mut seen);
+    results
+}
 
-    for (line_idx, line_result) in reader.lines().enumerate() {
-        if results.len() >= MAX_RESULTS {
-            break;
+fn collect_type_refs(
+    node: tree_sitter::Node,
+    src: &[u8],
+    lines: &[&str],
+    class_name: &str,
+    results: &mut Vec<(u32, u32, String)>,
+    seen: &mut HashSet<(u32, u32)>,
+) {
+    // コメント・文字列リテラル等の extra ノードはスキップ
+    if node.is_extra() {
+        return;
+    }
+
+    match node.kind() {
+        "type_identifier" => {
+            let text = std::str::from_utf8(&src[node.byte_range()]).unwrap_or("");
+            if text == class_name {
+                // クラス/構造体の定義宣言名は除外（使用箇所ではないため）
+                let is_def = node.parent().map(|p| {
+                    matches!(
+                        p.kind(),
+                        "class_specifier" | "struct_specifier"
+                            | "unreal_class_declaration" | "unreal_struct_declaration"
+                    ) && p.child_by_field_name("name")
+                        .map(|n| n.id() == node.id())
+                        .unwrap_or(false)
+                }).unwrap_or(false);
+
+                if !is_def {
+                    let pos = node.start_position();
+                    if seen.insert((pos.row as u32, pos.column as u32)) {
+                        let ctx = lines.get(pos.row)
+                            .map(|l| l.trim().to_string())
+                            .unwrap_or_default();
+                        results.push((pos.row as u32 + 1, pos.column as u32, ctx));
+                    }
+                }
+            }
         }
-        let line = match line_result {
-            Ok(l) => l,
-            Err(_) => continue,
-        };
-        if let Some(col) = find_word_in_line(&line, symbol_name) {
-            results.push(json!({
-                "path": path,
-                "line": line_idx + 1,
-                "col": col,
-                "context": line.trim(),
-            }));
+        "namespace_identifier" => {
+            // qualified_identifier のスコープ部分: AMyActor::StaticClass() など
+            if let Some(parent) = node.parent() {
+                if parent.kind() == "qualified_identifier" {
+                    if let Some(scope) = parent.child_by_field_name("scope") {
+                        if scope.id() == node.id() {
+                            let text = std::str::from_utf8(&src[node.byte_range()]).unwrap_or("");
+                            if text == class_name {
+                                let pos = node.start_position();
+                                if seen.insert((pos.row as u32, pos.column as u32)) {
+                                    let ctx = lines.get(pos.row)
+                                        .map(|l| l.trim().to_string())
+                                        .unwrap_or_default();
+                                    results.push((pos.row as u32 + 1, pos.column as u32, ctx));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
+        _ => {}
+    }
+
+    let mut cursor = node.walk();
+    let children: Vec<_> = node.children(&mut cursor).collect();
+    for child in children {
+        collect_type_refs(child, src, lines, class_name, results, seen);
     }
 }
 
-pub fn find_symbol_usages(
+/// tree-sitter でファイルをパースし、class_name::method_name のメソッド呼び出し箇所を収集する。
+/// カバーするパターン:
+///   - `obj.method()` / `obj->method()`  → field_expression の field_identifier
+///   - `ClassName::method()`              → qualified_identifier (scope == class_name, name == method_name)
+fn find_method_refs_in_file(path: &str, class_name: &str, method_name: &str) -> Vec<(u32, u32, String)> {
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return vec![],
+    };
+    let language: tree_sitter::Language = tree_sitter_unreal_cpp::LANGUAGE.into();
+    let mut parser = Parser::new();
+    if parser.set_language(&language).is_err() {
+        return vec![];
+    }
+    let tree = match parser.parse(&content, None) {
+        Some(t) => t,
+        None => return vec![],
+    };
+    let src = content.as_bytes();
+    let lines: Vec<&str> = content.lines().collect();
+    let mut results = Vec::new();
+    let mut seen: HashSet<(u32, u32)> = HashSet::new();
+    collect_method_refs(tree.root_node(), src, &lines, class_name, method_name, &mut results, &mut seen);
+    results
+}
+
+fn collect_method_refs(
+    node: tree_sitter::Node,
+    src: &[u8],
+    lines: &[&str],
+    class_name: &str,
+    method_name: &str,
+    results: &mut Vec<(u32, u32, String)>,
+    seen: &mut HashSet<(u32, u32)>,
+) {
+    if node.is_extra() {
+        return;
+    }
+
+    match node.kind() {
+        // obj->method() / obj.method() → field_expression の field_identifier
+        "field_identifier" => {
+            let text = std::str::from_utf8(&src[node.byte_range()]).unwrap_or("");
+            if text == method_name {
+                if let Some(parent) = node.parent() {
+                    if parent.kind() == "field_expression" {
+                        let pos = node.start_position();
+                        if seen.insert((pos.row as u32, pos.column as u32)) {
+                            let ctx = lines.get(pos.row)
+                                .map(|l| l.trim().to_string())
+                                .unwrap_or_default();
+                            results.push((pos.row as u32 + 1, pos.column as u32, ctx));
+                        }
+                    }
+                }
+            }
+        }
+        // ClassName::method() → qualified_identifier の name (identifier)
+        "identifier" => {
+            let text = std::str::from_utf8(&src[node.byte_range()]).unwrap_or("");
+            if text == method_name {
+                if let Some(parent) = node.parent() {
+                    if parent.kind() == "qualified_identifier" {
+                        // name フィールドが自分自身であること
+                        if let Some(name_field) = parent.child_by_field_name("name") {
+                            if name_field.id() == node.id() {
+                                // scope が class_name と一致すること
+                                if let Some(scope_node) = parent.child_by_field_name("scope") {
+                                    let scope_text = std::str::from_utf8(&src[scope_node.byte_range()]).unwrap_or("");
+                                    if scope_text == class_name {
+                                        let pos = node.start_position();
+                                        if seen.insert((pos.row as u32, pos.column as u32)) {
+                                            let ctx = lines.get(pos.row)
+                                                .map(|l| l.trim().to_string())
+                                                .unwrap_or_default();
+                                            results.push((pos.row as u32 + 1, pos.column as u32, ctx));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+
+    let mut cursor = node.walk();
+    let children: Vec<_> = node.children(&mut cursor).collect();
+    for child in children {
+        collect_method_refs(child, src, lines, class_name, method_name, results, seen);
+    }
+}
+
+
+/// - `header_path` が Some (DB形式パス) → find_includers ベースのスコープ
+/// - `header_path` が None → symbol_name でクラス定義を DB 検索してフォールバック
+fn resolve_search_scope(
     conn: &Connection,
     symbol_name: &str,
-    _current_file: Option<&str>,
-) -> anyhow::Result<Value> {
-    // 1. シンボルの定義ファイルIDを取得
+    header_path: Option<&str>,
+) -> anyhow::Result<(Vec<Value>, bool)> {
+    if let Some(header) = header_path {
+        let db_path = to_db_path_format(&header.replace('\\', "/"));
+        let path_sql = format!(
+            "{} SELECT f.id FROM files f
+             JOIN dir_paths dp ON f.directory_id = dp.id
+             JOIN strings sn ON f.filename_id = sn.id
+             WHERE dp.full_path || '/' || sn.text = ? LIMIT 1",
+            PATH_CTE
+        );
+        let target_id: Option<i64> = conn
+            .query_row(&path_sql, [&db_path], |r| r.get(0))
+            .optional()?;
+
+        if let Some(tid) = target_id {
+            let including_ids = find_includer_file_ids(conn, tid)?;
+            let mut all_ids: HashSet<i64> = including_ids.clone();
+            all_ids.insert(tid); // ヘッダー自身も検索対象に含める
+            let cpp_peers = find_cpp_peers_of_headers(conn, &including_ids)?;
+            for id in cpp_peers {
+                all_ids.insert(id);
+            }
+            let ids_vec: Vec<i64> = all_ids.into_iter().collect();
+            let files = get_file_paths_with_metadata(conn, &ids_vec)?;
+            return Ok((files, true));
+        }
+        // header が DB に見つからない場合はフォールバックへ
+    }
+
+    // フォールバック: symbol_name でクラス定義ファイルを DB から取得
     let def_ids = find_definition_file_ids(conn, symbol_name)?;
-    let found_definition = !def_ids.is_empty();
-
-    // 2. 定義ファイルをインクルードしているファイルのIDを取得
-    let mut candidate_ids: HashSet<i64> = find_including_file_ids(conn, &def_ids)?;
-
-    // 定義ファイル自身も対象に含める
+    let found = !def_ids.is_empty();
+    let mut candidate_ids = find_including_file_ids(conn, &def_ids)?;
     for id in &def_ids {
         candidate_ids.insert(*id);
     }
+    let ids_vec: Vec<i64> = candidate_ids.into_iter().collect();
+    let files = get_file_paths_with_metadata(conn, &ids_vec)?;
+    Ok((files, found))
+}
 
-    // 上限を超える場合はトランケート
-    let mut ids_vec: Vec<i64> = candidate_ids.into_iter().collect();
-    if ids_vec.len() > MAX_FILES {
-        ids_vec.truncate(MAX_FILES);
-    }
-
-    // 3. ファイルIDからパスを取得
-    let file_paths = get_file_paths_by_ids(conn, &ids_vec)?;
-    let searched_files = file_paths.len();
-
-    // 4. 各ファイルでシンボルを単語境界付きで検索
+/// tree-sitter でシンボル使用箇所を検索する（同期版）。
+/// - `symbol_name`: 検索スコープのクラス名 (例: "AMyActor")
+/// - `file_path`: クラスのヘッダーファイルパス (DB形式、省略時は DB フォールバック)
+/// - `method_name`: Some → メソッド参照検索モード、None → 型参照検索モード
+pub fn find_symbol_usages(
+    conn: &Connection,
+    symbol_name: &str,
+    file_path: Option<&str>,
+    method_name: Option<&str>,
+) -> anyhow::Result<Value> {
+    let (files_meta, found_definition) = resolve_search_scope(conn, symbol_name, file_path)?;
+    let searched_files = files_meta.len();
     let mut results: Vec<Value> = Vec::new();
-    for path in &file_paths {
-        if results.len() >= MAX_RESULTS {
-            break;
+
+    'outer: for item in &files_meta {
+        let path = item["path"].as_str().unwrap_or("");
+        let module_name = item["module_name"].as_str().unwrap_or("").to_string();
+        let module_root = item["module_root"].as_str().unwrap_or("").to_string();
+
+        let refs = if let Some(method) = method_name {
+            find_method_refs_in_file(path, symbol_name, method)
+        } else {
+            find_type_refs_in_file(path, symbol_name)
+        };
+        for (line, col, context) in refs {
+            results.push(json!({
+                "path":        path,
+                "module_name": module_name,
+                "module_root": module_root,
+                "line":        line,
+                "col":         col,
+                "context":     context,
+            }));
+            if results.len() >= MAX_RESULTS {
+                break 'outer;
+            }
         }
-        search_in_file(path, symbol_name, &mut results);
     }
 
     Ok(json!({
-        "results": results,
-        "searched_files": searched_files,
+        "results":          results,
+        "searched_files":   searched_files,
         "found_definition": found_definition,
     }))
 }
@@ -401,58 +564,62 @@ pub fn find_includers(conn: &Connection, file_path: &str) -> anyhow::Result<Valu
     }))
 }
 
-const STREAM_BATCH_SIZE: usize = 15;
-
-/// ファイルを STREAM_BATCH_SIZE ごとにバッチ通知するストリーミング版
+/// tree-sitter でシンボル使用箇所を検索するストリーミング版。
+/// 結果を STREAM_BATCH_SIZE ごとにバッチ通知する。
+/// - `method_name`: Some → メソッド参照検索モード、None → 型参照検索モード
 pub fn find_symbol_usages_async<F>(
     conn: &Connection,
     symbol_name: &str,
-    _current_file: Option<&str>,
+    file_path: Option<&str>,
+    method_name: Option<&str>,
     mut on_items: F,
 ) -> anyhow::Result<Value>
 where
     F: FnMut(Vec<Value>) -> anyhow::Result<()>,
 {
-    let def_ids = find_definition_file_ids(conn, symbol_name)?;
-    let found_definition = !def_ids.is_empty();
+    let (files_meta, found_definition) = resolve_search_scope(conn, symbol_name, file_path)?;
+    let searched_files = files_meta.len();
 
-    let mut candidate_ids: HashSet<i64> = find_including_file_ids(conn, &def_ids)?;
-    for id in &def_ids {
-        candidate_ids.insert(*id);
-    }
-
-    let mut ids_vec: Vec<i64> = candidate_ids.into_iter().collect();
-    if ids_vec.len() > MAX_FILES {
-        ids_vec.truncate(MAX_FILES);
-    }
-
-    let file_paths = get_file_paths_by_ids(conn, &ids_vec)?;
-    let searched_files = file_paths.len();
-
-    let mut total_results = 0;
+    let mut total_results = 0usize;
     let mut batch: Vec<Value> = Vec::new();
 
-    for path in &file_paths {
-        if total_results >= MAX_RESULTS {
-            break;
-        }
-        search_in_file(path, symbol_name, &mut batch);
+    'outer: for item in &files_meta {
+        let path = item["path"].as_str().unwrap_or("");
+        let module_name = item["module_name"].as_str().unwrap_or("").to_string();
+        let module_root = item["module_root"].as_str().unwrap_or("").to_string();
 
-        if batch.len() >= STREAM_BATCH_SIZE {
-            total_results += batch.len();
-            on_items(batch)?;
-            batch = Vec::new();
+        let refs = if let Some(method) = method_name {
+            find_method_refs_in_file(path, symbol_name, method)
+        } else {
+            find_type_refs_in_file(path, symbol_name)
+        };
+        for (line, col, context) in refs {
+            batch.push(json!({
+                "path":        path,
+                "module_name": module_name,
+                "module_root": module_root,
+                "line":        line,
+                "col":         col,
+                "context":     context,
+            }));
+            total_results += 1;
+            if batch.len() >= STREAM_BATCH_SIZE {
+                on_items(std::mem::take(&mut batch))?;
+            }
+            if total_results >= MAX_RESULTS {
+                break 'outer;
+            }
         }
     }
 
-    // 残りを送信
     if !batch.is_empty() {
         on_items(batch)?;
     }
 
     Ok(json!({
-        "searched_files": searched_files,
+        "searched_files":   searched_files,
         "found_definition": found_definition,
+        "total_results":    total_results,
     }))
 }
 

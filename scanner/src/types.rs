@@ -314,11 +314,19 @@ pub enum QueryRequest {
         symbol_name: String,
         #[serde(default)]
         file_path: Option<String>,
+        /// Some(method_name) → method/member 参照検索モード
+        /// None             → 型（class）参照検索モード
+        #[serde(default)]
+        method_name: Option<String>,
     },
     FindSymbolUsagesAsync {
         symbol_name: String,
         #[serde(default)]
         file_path: Option<String>,
+        /// Some(method_name) → method/member 参照検索モード
+        /// None             → 型（class）参照検索モード
+        #[serde(default)]
+        method_name: Option<String>,
     },
     GetConfigData {
         engine_root: Option<String>,

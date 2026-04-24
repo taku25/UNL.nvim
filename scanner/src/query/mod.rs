@@ -29,8 +29,8 @@ pub fn process_query(conn: &Connection, request: QueryRequest) -> anyhow::Result
             class::get_file_symbols(conn, &file_path),
         QueryRequest::GetClassMembers { class_name } => 
             class::get_class_members(conn, &class_name),
-        QueryRequest::FindSymbolUsages { symbol_name, file_path } =>
-            usage::find_symbol_usages(conn, &symbol_name, file_path.as_deref()),
+        QueryRequest::FindSymbolUsages { symbol_name, file_path, method_name } =>
+            usage::find_symbol_usages(conn, &symbol_name, file_path.as_deref(), method_name.as_deref()),
         
         QueryRequest::FindIncluders { file_path } =>
             usage::find_includers(conn, &file_path),
@@ -103,8 +103,8 @@ where F: FnMut(Vec<Value>) -> anyhow::Result<()> {
 
             class::get_classes_in_modules_async(conn, modules, symbol_type, on_items),
 
-        QueryRequest::FindSymbolUsagesAsync { symbol_name, file_path } =>
-            usage::find_symbol_usages_async(conn, &symbol_name, file_path.as_deref(), on_items),
+        QueryRequest::FindSymbolUsagesAsync { symbol_name, file_path, method_name } =>
+            usage::find_symbol_usages_async(conn, &symbol_name, file_path.as_deref(), method_name.as_deref(), on_items),
 
         QueryRequest::FindIncludersAsync { file_path } =>
             usage::find_includers_async(conn, &file_path, on_items),

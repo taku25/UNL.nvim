@@ -107,12 +107,21 @@ function M.get_assets(callback)
     M.request("GetAssets", {}, callback)
 end
 
-function M.find_symbol_usages(symbol_name, file_path, cb)
-    M.request("FindSymbolUsages", { symbol_name = symbol_name, file_path = file_path }, cb)
+function M.find_symbol_usages(symbol_name, file_path, method_name, cb)
+    if type(method_name) == "function" then
+        cb = method_name
+        method_name = nil
+    end
+    M.request("FindSymbolUsages", { symbol_name = symbol_name, file_path = file_path, method_name = method_name }, cb)
 end
 
-function M.find_symbol_usages_streaming(symbol_name, file_path, on_partial, on_complete)
-    M.request_streaming("FindSymbolUsagesAsync", { symbol_name = symbol_name, file_path = file_path }, on_partial, on_complete)
+function M.find_symbol_usages_streaming(symbol_name, file_path, method_name, on_partial, on_complete)
+    if type(method_name) == "function" then
+        on_complete = on_partial
+        on_partial = method_name
+        method_name = nil
+    end
+    M.request_streaming("FindSymbolUsagesAsync", { symbol_name = symbol_name, file_path = file_path, method_name = method_name }, on_partial, on_complete)
 end
 
 --- 指定ファイルをインクルードしているファイル一覧をストリーミングで取得する（include 逆引き）
