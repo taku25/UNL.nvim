@@ -117,6 +117,54 @@ function M.create_for_refresh(conf, opts)
   return W, chosen
 end
 
+--- Generic progress factory for any task (not tied to refresh config).
+--- conf: UNL/UEP config table (may be nil — uses defaults)
+--- opts.title, opts.client_name, opts.purpose
+function M.create(conf, opts)
+  load_providers()
+  opts = opts or {}
+  local ui_conf = (conf and conf.ui and conf.ui.progress) or {}
+
+  local spec = registry.resolve{
+    category = "progress",
+    mode     = ui_conf.mode,
+    disable  = (ui_conf.enable == false),
+    prefer   = ui_conf.prefer,
+    context  = { purpose = opts.purpose or "task" },
+  }
+
+  local inst = spec and spec.create and spec.create{
+    enabled     = not (ui_conf.enable == false),
+    title       = opts.title or "Task",
+    client_name = opts.client_name or "UNL",
+    throttle_ms = ui_conf.throttle_ms,
+    window_progress_max_lines = ui_conf.window_max_lines,
+    window_progress_width     = ui_conf.window_width,
+    window_progress_winblend  = ui_conf.window_winblend,
+  } or {
+    open         = function() end,
+    update       = function() end,
+    finish       = function() end,
+    stage_define = function() end,
+    stage_update = function() end,
+  }
+
+  local W = {}
+  function W:stage_define(name, total)
+    if inst.stage_define then inst:stage_define(name, total) end
+  end
+  function W:stage_update(name, done, total, msg)
+    if inst.stage_update then inst:stage_update(name, done, total, msg) end
+  end
+  function W:update(stage, message)
+    if inst.update then inst:update(stage, message) end
+  end
+  function W:finish(ok)
+    if inst.finish then inst:finish(ok) end
+  end
+  return W
+end
+
 M.events = events
 M.registry = registry
 M.load_providers = load_providers
