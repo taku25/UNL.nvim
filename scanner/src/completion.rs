@@ -219,19 +219,40 @@ pub fn process_completion(
         let p_kind = curr.kind();
         tracing::debug!("Traversing up: kind='{}', text='{}'", p_kind, get_node_text(&curr, content));
 
-        if p_kind == "unreal_macro_argument_list" || p_kind == "macro_argument_list" {
+        if p_kind == "unreal_argument_list" || p_kind == "macro_argument_list" {
             if let Some(parent) = curr.parent() {
-                let macro_name = get_node_text(&parent, content).trim();
-                if let Some(res) = resolve_macro_specifiers(macro_name) {
-                    tracing::info!("Resolved macro specifiers for '{}'", macro_name);
+                let full_text = get_node_text(&parent, content);
+                let macro_name_key = full_text.split('(').next().unwrap_or("").trim();
+                if let Some(res) = resolve_macro_specifiers(macro_name_key) {
+                    tracing::info!("Resolved macro specifiers for '{}'", macro_name_key);
                     return Ok(res);
                 }
                 if let Some(grand) = parent.parent() {
-                   let g_name = get_node_text(&grand, content).trim();
-                   if let Some(res) = resolve_macro_specifiers(g_name) {
-                       tracing::info!("Resolved macro specifiers for grand '{}'", g_name);
+                   let g_text = get_node_text(&grand, content);
+                   let g_key = g_text.split('(').next().unwrap_or("").trim();
+                   if let Some(res) = resolve_macro_specifiers(g_key) {
+                       tracing::info!("Resolved macro specifiers for grand '{}'", g_key);
                        return Ok(res);
                    }
+                }
+            }
+        }
+
+        // meta=(...) のネストされたスペシファイアリストの中にいる場合
+        if p_kind == "unreal_specifier_list" {
+            if let Some(spec_content) = curr.parent() {
+                if spec_content.kind() == "unreal_specifier_content" {
+                    if let Some(spec_node) = spec_content.parent() {
+                        if spec_node.kind() == "unreal_specifier" {
+                            if let Some(key_node) = spec_node.child_by_field_name("key") {
+                                let key_text = get_node_text(&key_node, content).to_lowercase();
+                                if key_text == "meta" {
+                                    tracing::info!("Resolved meta specifiers (nested meta=(...))");
+                                    return Ok(json!(resolve_meta_specifiers()));
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -921,26 +942,166 @@ fn get_ue_snippets(prefix: &str) -> Vec<Value> {
     snippets
 }
 
+fn spec(label: &str, doc: &str) -> Value {
+    json!({ "label": label, "kind": 12, "detail": "Specifier", "documentation": doc })
+}
+fn spec_kv(label: &str, insert: &str, doc: &str) -> Value {
+    json!({ "label": label, "kind": 12, "detail": "Specifier", "documentation": doc, "insertText": insert, "insertTextFormat": 2 })
+}
+
+fn resolve_meta_specifiers() -> Vec<Value> {
+    vec![
+        spec_kv("Tooltip", "Tooltip=\"$1\"", "Tooltip shown when hovering over the property in the editor."),
+        spec_kv("DisplayName", "DisplayName=\"$1\"", "Overrides the display name of the property in the editor."),
+        spec_kv("Category", "Category=\"$1\"", "Override the category for this property in the editor."),
+        spec_kv("Keywords", "Keywords=\"$1\"", "Keywords used to find the property in search."),
+        spec_kv("Units", "Units=\"$1\"", "Specifies the units of the property value (e.g. cm, kg, s)."),
+        spec_kv("ClampMin", "ClampMin=\"$1\"", "Minimum allowed value for numeric properties."),
+        spec_kv("ClampMax", "ClampMax=\"$1\"", "Maximum allowed value for numeric properties."),
+        spec_kv("UIMin", "UIMin=\"$1\"", "Minimum value shown in the editor slider."),
+        spec_kv("UIMax", "UIMax=\"$1\"", "Maximum value shown in the editor slider."),
+        spec_kv("EditCondition", "EditCondition=\"$1\"", "Condition expression that enables/disables editing of this property."),
+        spec("EditConditionHides", "Hide the property entirely when EditCondition is false."),
+        spec("InlineEditConditionToggle", "The bool property acts as an inline toggle for EditCondition."),
+        spec("AllowPrivateAccess", "Allows access from Blueprints even when declared in a private scope."),
+        spec("AllowAbstract", "Allow abstract classes to be selected in object reference pickers."),
+        spec("ExactClass", "Only show objects of exactly this class, not derived classes."),
+        spec("NoSpinbox", "Disable the spinbox widget for numeric properties."),
+        spec("ShowOnlyInnerProperties", "Show the inner properties of a struct directly without a header."),
+        spec("FullyExpand", "Fully expand the property in the details panel."),
+        spec("MultiLine", "Allow multi-line text input for FString/FText properties."),
+        spec("PasswordField", "Show the text property as a password field (obscured input)."),
+        spec("HideInDetailPanel", "Hide this property from the details panel."),
+        spec("HideViewOptions", "Hide the view options button in asset pickers."),
+        spec("ShowTreeView", "Show asset pickers as a tree view."),
+        spec("BindWidget", "Binds this property to a named widget in a UMG widget blueprint."),
+        spec("BindWidgetOptional", "Optionally binds this property to a named widget in a UMG widget blueprint."),
+        spec("BindWidgetAnim", "Binds this property to a widget animation in a UMG widget blueprint."),
+        spec_kv("TitleProperty", "TitleProperty=\"$1\"", "Property name to use as the title for array/set elements in the editor."),
+        spec("ContentDir", "This FDirectoryPath property is relative to the Content directory."),
+        spec("RelativePath", "This FFilePath property shows a relative path picker."),
+        spec("RelativeToGameDir", "This FDirectoryPath property is relative to the Game directory."),
+        spec_kv("FilePathFilter", "FilePathFilter=\"$1\"", "File extension filter for FFilePath properties."),
+        spec_kv("MustImplement", "MustImplement=\"$1\"", "Interface that the selected class must implement."),
+        spec("GetByRef", "Return a const reference instead of a copy when accessed from Blueprints."),
+    ]
+}
+
 fn resolve_macro_specifiers(macro_name: &str) -> Option<Value> {
     let name = macro_name.split('(').next().unwrap_or("").trim();
-    let mut items = Vec::new();
-    match name {
-        "UPROPERTY" => {
-            items.push(json!({ "label": "EditAnywhere", "kind": 12, "detail": "Specifier", "documentation": "Indicates that this property can be edited by property windows, on instances or archetypes." }));
-            items.push(json!({ "label": "BlueprintReadOnly", "kind": 12, "detail": "Specifier", "documentation": "This property can be read from blueprints, but never modified." }));
-            items.push(json!({ "label": "BlueprintReadWrite", "kind": 12, "detail": "Specifier", "documentation": "This property can be read or written from blueprints." }));
-            items.push(json!({ "label": "Category", "kind": 12, "detail": "Specifier", "documentation": "Specifies the category of the property in the Editor UI." }));
-        },
-        "UFUNCTION" => {
-            items.push(json!({ "label": "BlueprintCallable", "kind": 12, "detail": "Specifier", "documentation": "The function can be executed in a Blueprint." }));
-            items.push(json!({ "label": "BlueprintPure", "kind": 12, "detail": "Specifier", "documentation": "The function does not affect the owning object." }));
-        },
-        "UCLASS" | "USTRUCT" => {
-            items.push(json!({ "label": "Blueprintable", "kind": 12, "detail": "Specifier" }));
-            items.push(json!({ "label": "BlueprintType", "kind": 12, "detail": "Specifier" }));
-        },
-        _ => return None
-    }
+    let items: Vec<Value> = match name {
+        "UPROPERTY" => vec![
+            // Visibility / editability
+            spec("EditAnywhere",       "Can be edited by property windows in the editor, on instances and archetypes."),
+            spec("EditDefaultsOnly",   "Can be edited only on archetypes/defaults, not on instances."),
+            spec("EditInstanceOnly",   "Can be edited only on instances, not on archetypes/defaults."),
+            spec("EditFixedSize",      "For dynamic arrays: disables adding/removing elements, but allows editing existing elements."),
+            spec("VisibleAnywhere",    "Visible in all property windows (editor and instances) but not editable."),
+            spec("VisibleDefaultsOnly","Visible on archetypes/defaults, not on instances. Not editable."),
+            spec("VisibleInstanceOnly","Visible on instances, not on archetypes/defaults. Not editable."),
+            // Blueprint access
+            spec("BlueprintReadOnly",  "Can be read from Blueprints but not modified."),
+            spec("BlueprintReadWrite", "Can be read and written from Blueprints."),
+            spec_kv("BlueprintSetter", "BlueprintSetter=\"$1\"", "Designates a custom setter function to be called when this property is set in a Blueprint."),
+            spec_kv("BlueprintGetter", "BlueprintGetter=\"$1\"", "Designates a custom getter function to be called when this property is read in a Blueprint."),
+            spec("BlueprintAssignable","Multicast delegates only — can be assigned in Blueprints."),
+            spec("BlueprintCallable",  "Multicast delegates only — can be called in Blueprints."),
+            spec("BlueprintAuthorityOnly","Only fires in Blueprints running on a machine with network authority."),
+            // Category / Meta
+            spec_kv("Category",        "Category=\"$1\"",        "Specifies the category of the property in the editor UI."),
+            spec_kv("meta",            "meta=($1)",              "Additional metadata specifiers for editor and Blueprint tooling."),
+            // Replication
+            spec("Replicated",         "This property will be replicated over the network."),
+            spec_kv("ReplicatedUsing", "ReplicatedUsing=\"$1\"", "Specifies a callback function that is called when this property is received via replication."),
+            spec("NotReplicated",      "Skip replication for this property in struct context. Struct properties are replicated by default."),
+            // Serialization / Save
+            spec("Transient",          "Property is not serialized; will be zero-filled at load time."),
+            spec("DuplicateTransient", "Property is set to default value during duplication (e.g. copy-paste)."),
+            spec("NonPIEDuplicateTransient","Property is reset to default when duplicated outside PIE."),
+            spec("SaveGame",           "Include this property when saving a game via checkpoint or serialization."),
+            spec("SkipSerialization",  "Property is not serialized but can still be exported."),
+            spec("TextExportTransient","Transient for copy-paste export/import; will be reset to default."),
+            // Asset registry
+            spec("AssetRegistrySearchable","Property and its value will be automatically added to the Asset Registry for the containing asset."),
+            // Misc flags
+            spec("AdvancedDisplay",    "Move this property to the advanced dropdown in the details panel."),
+            spec("SimpleDisplay",      "Always visible in the details panel (overrides advanced display)."),
+            spec("Config",             "Value is loaded from the config file (.ini) and saved to it."),
+            spec("GlobalConfig",       "Works like Config but the value cannot be overridden by subclasses."),
+            spec("Instanced",          "Object properties only. Allows creating instances of sub-objects in the editor."),
+            spec("Export",             "Object properties only. The sub-object referenced should be exported as a sub-object block (serialized inline)."),
+            spec("NoClear",            "Disables the Clear button for object references in the editor."),
+            spec("Interp",             "Indicates the value can be driven over time by a Matinee or Sequencer float track."),
+            spec("NonTransactional",   "Changes to the value of this property are not included in the editor undo/redo transaction."),
+            spec("WithSerializer",     "This property has a custom serializer. Used internally."),
+        ],
+        "UFUNCTION" => vec![
+            spec("BlueprintCallable",            "Can be called from Blueprints and other visual scripting."),
+            spec("BlueprintPure",                "Does not affect the owning object in any way; no output pin on execution path."),
+            spec("BlueprintImplementableEvent",  "Base implementation is empty; Blueprint subclasses can override it."),
+            spec("BlueprintNativeEvent",         "Designed to be overridden by a Blueprint, but has a native default implementation."),
+            spec("Exec",                         "Can be called from in-game console commands."),
+            spec("Server",                       "Called on the server only. Requires Reliable or Unreliable."),
+            spec("Client",                       "Called on the owning client. Requires Reliable or Unreliable."),
+            spec("NetMulticast",                 "Called on the server and all clients. Requires Reliable or Unreliable."),
+            spec("Reliable",                     "Replicated function call is reliable (guaranteed delivery)."),
+            spec("Unreliable",                   "Replicated function call may be dropped in bad network conditions."),
+            spec("WithValidation",               "Declares a separate validation function (_Validate suffix) for network RPC."),
+            spec("BlueprintAuthorityOnly",       "Only executes in Blueprints on the authority (server)."),
+            spec("BlueprintCosmetic",            "Only executes in Blueprints on clients (never on dedicated server)."),
+            spec("CallInEditor",                 "This function can be called from within the editor on selected instances via a button."),
+            spec("CustomThunk",                  "Allows custom thunk function generation. Used for template functions exposed to Blueprints."),
+            spec("SealedEvent",                  "This event cannot be overridden in Blueprint subclasses."),
+            spec("ServiceRequest",               "An RPC function that is a service request."),
+            spec("ServiceResponse",              "An RPC function that is a service response."),
+            spec_kv("Category",                  "Category=\"$1\"", "Specifies the category in the Blueprint action menu."),
+            spec_kv("meta",                      "meta=($1)",        "Additional metadata for Blueprint tooling."),
+        ],
+        "UCLASS" => vec![
+            spec("Blueprintable",                "This class can be used as a base class for creating Blueprints."),
+            spec("NotBlueprintable",             "This class cannot be used as a base class for Blueprints."),
+            spec("BlueprintType",                "This class can be used as a variable type in Blueprints."),
+            spec("Abstract",                     "Prevents direct instantiation. Must be subclassed."),
+            spec("Placeable",                    "Can be placed in a level, in the UI Scene, or in a Blueprint."),
+            spec("NotPlaceable",                 "Cannot be placed in editor views; overrides inherited Placeable."),
+            spec("EditInlineNew",                "Supports creating new objects of this class from the editor property window."),
+            spec("NotEditInlineNew",             "Disables inline creation of objects of this class."),
+            spec("MinimalAPI",                   "Only exports the class type and its constructor. Sufficient for type-casting."),
+            spec("Transient",                    "Objects of this class are never saved to disk."),
+            spec("DefaultToInstanced",           "All instances of this class are considered 'instanced' by default."),
+            spec("Deprecated",                   "This class is deprecated; objects will not be serialized."),
+            spec("PerObjectConfig",              "Config information for this class will be stored per-object."),
+            spec("ConfigDoNotCheckDefaults",     "Do not check the default value when reading config for this class."),
+            spec("HideDropdown",                 "Suppress this class from combo-box class pickers in the editor."),
+            spec("ComponentWrapperClass",        "Used to indicate this class wraps a component for a simpler interface in Blueprints."),
+            spec_kv("Within",                    "Within=\"$1\"",    "Object of this class can only exist within an object of the given class."),
+            spec_kv("Config",                    "Config=\"$1\"",    "Specifies the config file (.ini) this class's config properties use."),
+            spec_kv("ClassGroup",                "ClassGroup=\"$1\"","Indicates the class will be displayed in a specific class group in the Actor Browser."),
+            spec_kv("HideCategories",            "HideCategories=($1)","Hides specified property categories in the editor."),
+            spec_kv("ShowCategories",            "ShowCategories=($1)","Overrides HideCategories to show specified categories."),
+            spec_kv("AutoCollapseCategories",    "AutoCollapseCategories=($1)","Collapses the named categories by default."),
+            spec_kv("AutoExpandCategories",      "AutoExpandCategories=($1)","Expands the named categories by default."),
+            spec_kv("meta",                      "meta=($1)",        "Additional metadata for editor and Blueprint tooling."),
+        ],
+        "USTRUCT" => vec![
+            spec("Atomic",      "Serialized as a single unit even when only individual members change."),
+            spec("BlueprintType", "Can be used as a variable type in Blueprints."),
+            spec("Immutable",   "Struct is immutable; it is an error to attempt to change any property values."),
+            spec("NoExport",    "No auto-generated code will be created for this struct; requires manual declaration."),
+            spec_kv("meta",     "meta=($1)", "Additional metadata for editor and Blueprint tooling."),
+        ],
+        "UENUM" => vec![
+            spec("BlueprintType", "This enum can be used as a variable type in Blueprints."),
+            spec_kv("meta",     "meta=($1)", "Additional metadata for editor and Blueprint tooling."),
+        ],
+        "UINTERFACE" => vec![
+            spec("Blueprintable",  "This interface can be implemented by Blueprints."),
+            spec("BlueprintType",  "This interface can be used as a variable type in Blueprints."),
+            spec("MinimalAPI",     "Only export type information for this interface."),
+            spec_kv("meta",        "meta=($1)", "Additional metadata for editor and Blueprint tooling."),
+        ],
+        _ => return None,
+    };
     if items.is_empty() { None } else { Some(json!(items)) }
 }
 
