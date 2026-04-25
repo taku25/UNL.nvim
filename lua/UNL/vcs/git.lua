@@ -45,7 +45,7 @@ local function spawn_git(args, cwd, on_success)
     end
 end
 
-local function parse_status_output(base_path, output_str, cache_table)
+local function parse_status_output(base_path, output_str, cache_table, exclude_untracked)
     if not output_str or output_str == "" then return end
     for line in output_str:gmatch("[^\r\n]+") do
         if #line > 3 then
@@ -54,7 +54,11 @@ local function parse_status_output(base_path, output_str, cache_table)
             if rel_path:sub(1, 1) == '"' then rel_path = rel_path:sub(2, -2) end
             local abs_path = base_path .. "/" .. rel_path
             local key = make_key(abs_path)
-            if key then cache_table[key] = status end
+            -- exclude_untracked=true のとき、未追跡ファイル(??)をスキップ
+            -- （サブモジュール内のビルドアーティファクトを除外するため）
+            if key and not (exclude_untracked and status == "??") then
+                cache_table[key] = status
+            end
         end
     end
 end
@@ -180,7 +184,7 @@ function M.refresh(start_path, on_complete, logger_name)
                             
                             add_job()
                             spawn_git({"status", "--porcelain", "-u", "--no-renames"}, sub_abs_path, function(sub_stat)
-                                parse_status_output(sub_abs_path, sub_stat, new_status_cache)
+                                parse_status_output(sub_abs_path, sub_stat, new_status_cache, true)
                                 check_done()
                             end)
                         end

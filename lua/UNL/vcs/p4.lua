@@ -4,7 +4,8 @@ local M = {}
 
 -- キャッシュ: [正規化されたパス] = "ステータスコード" (例: "edit", "add", "delete")
 local p4_status_cache = {}
-local is_available = nil -- P4が使えるかどうかのフラグ
+-- P4が使えるかどうかのフラグ (ディレクトリごとにキャッシュ)
+local availability_cache = {}
 
 -- キャッシュキー生成
 local function make_key(path)
@@ -48,15 +49,16 @@ local function spawn_p4(args, cwd, on_success)
     end
 end
 
--- P4が利用可能かチェック (初回のみ)
+-- P4が利用可能かチェック (ディレクトリごとにキャッシュ)
 local function check_availability(cwd, callback)
-    if is_available ~= nil then
-        callback(is_available)
+    local key = unl_path.normalize(cwd or "")
+    if availability_cache[key] ~= nil then
+        callback(availability_cache[key])
         return
     end
     spawn_p4({ "where", "." }, cwd, function(output)
-        is_available = (output ~= nil and output ~= "")
-        callback(is_available)
+        availability_cache[key] = (output ~= nil and output ~= "")
+        callback(availability_cache[key])
     end)
 end
 
