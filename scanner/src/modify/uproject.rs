@@ -46,8 +46,7 @@ pub fn add_module(
     // Pattern 2: Capture the last object in the Modules array
     // Pattern 3: Capture the last pair in the root object (for indentation)
     // ---------------------------------------------------------------------------
-    let query_src = format!(
-        r#"
+    let query_src = r#"
 ( document
   ( object
     ( pair
@@ -84,8 +83,7 @@ pub fn add_module(
     ( pair ) @last.entry .
   )
 )
-"#
-    );
+"#.to_string();
 
     let query = Query::new(&language, &query_src)?;
     let cap_names = query.capture_names();

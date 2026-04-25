@@ -99,10 +99,9 @@ pub const FILE_PATH_SELECT: &str = "
 /// Linux パスや既に変換済みのパスはそのまま返す。
 pub fn to_db_path_format(path: &str) -> String {
     let b = path.as_bytes();
-    if b.len() >= 3 && b[1] == b':' && b[2] == b'/' {
-        if b.len() < 5 || !(b[3] == b'/' && b[4] == b'/') {
+    if b.len() >= 3 && b[1] == b':' && b[2] == b'/'
+        && (b.len() < 5 || !(b[3] == b'/' && b[4] == b'/')) {
             return format!("{}///{}", &path[..2], &path[3..]);
         }
-    }
     path.to_string()
 }

@@ -29,6 +29,12 @@ pub struct UAssetParser {
     pub asset_name: String,
 }
 
+impl Default for UAssetParser {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl UAssetParser {
     pub fn new() -> Self {
         Self {
@@ -128,7 +134,7 @@ impl UAssetParser {
             Ok(s) => s,
             Err(_) => return Err(anyhow::anyhow!("Failed to read PackageName")),
         };
-        self.asset_name = package_full_path.split('/').last().unwrap_or("").to_string();
+        self.asset_name = package_full_path.split('/').next_back().unwrap_or("").to_string();
 
         let package_flags = reader.read_u32::<LittleEndian>()?;
         let name_count = reader.read_i32::<LittleEndian>()?;
@@ -181,7 +187,7 @@ impl UAssetParser {
 
                 let obj_name = self.name_map.get(object_name_idx as usize).cloned().unwrap_or_default();
                 let cls_name = self.name_map.get(class_name_idx as usize).cloned().unwrap_or_default();
-                self.import_map.push(UObjectImport { object_name: obj_name, class_name: cls_name, outer_index: outer_index });
+                self.import_map.push(UObjectImport { object_name: obj_name, class_name: cls_name, outer_index });
             }
         }
 
@@ -246,12 +252,11 @@ impl UAssetParser {
             // --- 6. Resolve Parent from Export Map ---
             let mut bp_parent = None;
             for exp in &self.export_map {
-                if exp.object_name == self.asset_name || exp.object_name == format!("{}_C", self.asset_name) {
-                    if exp.super_index != 0 {
+                if (exp.object_name == self.asset_name || exp.object_name == format!("{}_C", self.asset_name))
+                    && exp.super_index != 0 {
                         bp_parent = Some(self.resolve_path(exp.super_index));
                         break;
                     }
-                }
                 if bp_parent.is_none() && exp.outer_index == 0 && exp.class_index < 0 {
                     let path = self.resolve_path(exp.class_index);
                     if path.starts_with("/Script/") && !path.contains("BlueprintGeneratedClass") {

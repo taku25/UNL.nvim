@@ -278,9 +278,7 @@ pub fn process_completion(
                  return resolve_node_and_fetch_members(&mut ctx, func_node, &root, content, row, None, cache, persistent_cache);
              }
         } else if p_kind == "qualified_identifier" {
-            let field_prefix = if let Some(name_node) = curr.child_by_field_name("name") {
-                Some(get_node_text(&name_node, content).to_string())
-            } else { None };
+            let field_prefix = curr.child_by_field_name("name").map(|name_node| get_node_text(&name_node, content).to_string());
 
             if let Some(scope_node) = curr.child_by_field_name("scope") {
                 tracing::info!("Qualified identifier detected (Case 2), resolving scope with prefix: {:?}", field_prefix);
@@ -309,7 +307,7 @@ pub fn process_completion(
         let mut results = Vec::new();
 
         if let Some(current_class) = get_enclosing_class_name(&node, content) {
-            if let Ok(members) = fetch_members_recursive(&mut ctx, &current_class, Some(prefix.to_string()), cache.as_ref().map(|c| Arc::clone(c)), persistent_cache.clone(), Some(&current_class)) {
+            if let Ok(members) = fetch_members_recursive(&mut ctx, &current_class, Some(prefix.to_string()), cache.as_ref().map(Arc::clone), persistent_cache.clone(), Some(&current_class)) {
                 results.extend(members);
             }
         }
@@ -361,6 +359,7 @@ fn get_prev_meaningful_sibling(node: Node) -> Option<Node> {
     None
 }
 
+#[allow(clippy::too_many_arguments)]
 fn resolve_node_and_fetch_members(
     ctx: &mut RequestContext,
     node: Node,
@@ -1304,14 +1303,14 @@ fn extract_clean_type(raw: &str) -> String {
                 return extract_clean_type(inner);
             }
             // テンプレートを維持する場合
-            return format!("{}<{}>", wrapper.replace('*', "").replace('&', "").trim(), inner).trim().to_string();
+            return format!("{}<{}>", wrapper.replace(['*', '&'], "").trim(), inner).trim().to_string();
         }
     }
 
     // 4. 装飾子の除去
     // * と & を消した後、トリムする。
     // その後、もし末尾に > が残っていたら除去する（DBの不整合対策の最終ガード）
-    let mut res = clean.replace('*', "").replace('&', "").trim().to_string();
+    let mut res = clean.replace(['*', '&'], "").trim().to_string();
     if res.ends_with('>') && !res.contains('<') {
         res.pop();
     }

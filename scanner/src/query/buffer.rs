@@ -78,7 +78,7 @@ pub fn parse_buffer(
     if generated_h_line > 0 && suggested_line > generated_h_line { suggested_line = generated_h_line; }
     if last_include_line == 0 {
         for (i, l) in content.lines().enumerate() {
-            if l.contains("#pragma once") { suggested_line = (i + 2) as usize; break; }
+            if l.contains("#pragma once") { suggested_line = i + 2; break; }
         }
     }
 

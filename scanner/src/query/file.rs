@@ -299,7 +299,7 @@ pub fn get_all_file_paths(conn: &Connection) -> anyhow::Result<Value> {
     Ok(json!(results))
 }
 
-/// NOTE: to_db_path_format は crate::db::path::to_db_path_format に移動しました
+// NOTE: to_db_path_format は crate::db::path::to_db_path_format に移動しました
 
 /// お気に入りのパスリストに基づいてファイルを取得する。
 /// dirs はディレクトリプレフィックス（末尾 '/' あり）、exact_files は完全パス。

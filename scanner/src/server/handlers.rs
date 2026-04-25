@@ -227,7 +227,7 @@ pub async fn handle_query(state: Arc<AppState>, params: &Value, tx: mpsc::Sender
                     let prefixes = ['a', 'u', 'f', 'e', 't', 's'];
                     if let Some(first_char) = class_name.chars().next() {
                         let first = first_char.to_ascii_lowercase();
-                        if prefixes.contains(&first) && class_name.chars().nth(1).map_or(false, |c| c.is_uppercase()) {
+                        if prefixes.contains(&first) && class_name.chars().nth(1).is_some_and(|c| c.is_uppercase()) {
                             try_names.push(class_name[1..].to_lowercase());
                         }
                     }
@@ -246,8 +246,8 @@ pub async fn handle_query(state: Arc<AppState>, params: &Value, tx: mpsc::Sender
                 let root_path_native = PathBuf::from(normalize_to_native(&req.project_root));
                 let rel_path = asset_path.replacen("/Game/", "Content/", 1);
                 let walker = ignore::WalkBuilder::new(&root_path_native).hidden(false).git_ignore(true).build();
-                let target_name_uasset = format!("{}.uasset", rel_path.split('/').last().unwrap_or(""));
-                let target_name_umap = format!("{}.umap", rel_path.split('/').last().unwrap_or(""));
+                let target_name_uasset = format!("{}.uasset", rel_path.split('/').next_back().unwrap_or(""));
+                let target_name_umap = format!("{}.umap", rel_path.split('/').next_back().unwrap_or(""));
                 let mut target_file = None;
                 for entry in walker.filter_map(|e| e.ok()) {
                     let name = entry.file_name().to_str().unwrap_or("");
@@ -258,7 +258,7 @@ pub async fn handle_query(state: Arc<AppState>, params: &Value, tx: mpsc::Sender
                 }
                 if let Some(file) = target_file {
                     let mut parser = crate::uasset::UAssetParser::new();
-                    if let Ok(_) = parser.parse(&file) {
+                    if parser.parse(&file).is_ok() {
                         let mut deps = parser.imports;
                         let parent = parser.parent_class;
                         deps.sort(); deps.dedup();
@@ -276,7 +276,7 @@ pub async fn handle_query(state: Arc<AppState>, params: &Value, tx: mpsc::Sender
                     let prefixes = ['a', 'u', 'f', 'e', 't', 's'];
                     if let Some(first_char) = base_class.chars().next() {
                         let first = first_char.to_ascii_lowercase();
-                        if prefixes.contains(&first) && base_class.chars().nth(1).map_or(false, |c| c.is_uppercase()) {
+                        if prefixes.contains(&first) && base_class.chars().nth(1).is_some_and(|c| c.is_uppercase()) {
                             try_names.push(base_class[1..].to_lowercase());
                         }
                     }
@@ -286,7 +286,7 @@ pub async fn handle_query(state: Arc<AppState>, params: &Value, tx: mpsc::Sender
                             if k.ends_with(&dot_name) || **k == **name {
                                 for asset in v {
                                     let exists = results.iter().any(|r| r["path"].as_str().map(|p| p.to_lowercase()) == Some(asset.to_lowercase()));
-                                    if !exists { results.push(json!({ "name": asset.split('/').last().unwrap_or(asset).replace(".uasset", ""), "path": asset.to_string(), "symbol_type": "uasset" })); }
+                                    if !exists { results.push(json!({ "name": asset.split('/').next_back().unwrap_or(asset).replace(".uasset", ""), "path": asset.to_string(), "symbol_type": "uasset" })); }
                                 }
                             }
                         }
@@ -335,7 +335,7 @@ pub async fn handle_query(state: Arc<AppState>, params: &Value, tx: mpsc::Sender
 
 pub async fn handle_scan(state: &AppState, params: &Value) -> anyhow::Result<Value> {
     let req: ScanRequest = convert_params(params)?;
-    let db_path = req.files.get(0).and_then(|f| f.db_path.clone()).ok_or_else(|| anyhow::anyhow!("No DB path"))?;
+    let db_path = req.files.first().and_then(|f| f.db_path.clone()).ok_or_else(|| anyhow::anyhow!("No DB path"))?;
     let db_path_native = normalize_to_native(&db_path);
     let conn_arc = state.get_connection(&db_path_native)?;
     tokio::task::spawn_blocking(move || {

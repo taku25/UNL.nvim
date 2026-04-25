@@ -16,6 +16,6 @@ pub fn get_class_file_path(conn: &Connection, class_name: &str) -> anyhow::Resul
     ", PATH_CTE);
 
     let mut stmt = conn.prepare(&sql)?;
-    let res = stmt.query_row([class_name], |row| Ok(row.get::<_, String>(0)?)).optional()?;
+    let res = stmt.query_row([class_name], |row| row.get::<_, String>(0)).optional()?;
     Ok(json!(res))
 }

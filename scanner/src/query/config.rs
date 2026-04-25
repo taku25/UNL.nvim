@@ -223,12 +223,10 @@ fn get_available_platforms(project_root: &Path, engine_root: Option<&Path>) -> V
             Some(project_root.join("Config").join(&p_name)),
             Some(project_root.join("Platforms").join(&p_name)),
         ];
-        for path_opt in &paths {
-            if let Some(path) = path_opt {
-                if path.is_dir() {
-                    platforms.insert(p_name.clone());
-                    break;
-                }
+        for path in paths.iter().flatten() {
+            if path.is_dir() {
+                platforms.insert(p_name.clone());
+                break;
             }
         }
     }
@@ -247,7 +245,7 @@ fn resolve_platform(name: &str, platform: &str, is_profile: bool, project_root: 
             let full_path = source.path.to_string_lossy().into_owned();
             
             for (section_name, items) in parsed.sections {
-                let section = resolved_sections.entry(section_name).or_insert_with(BTreeMap::new);
+                let section = resolved_sections.entry(section_name).or_default();
                 for item in items {
                     let entry = section.entry(item.key.clone()).or_insert_with(|| (Value::Null, Vec::new()));
                     entry.0 = apply_op(if entry.0.is_null() { None } else { Some(entry.0.clone()) }, &item.op, &item.value);

@@ -36,7 +36,7 @@ pub async fn handle_asset_scan(state: Arc<AppState>, project_root: String) {
             }).build();
 
         for entry in walker.filter_map(|e| e.ok()) {
-            if entry.file_name() == "Content" && entry.file_type().map_or(false, |t| t.is_dir()) {
+            if entry.file_name() == "Content" && entry.file_type().is_some_and(|t| t.is_dir()) {
                 content_dirs.push(entry.path().to_path_buf());
             }
         }

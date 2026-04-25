@@ -78,6 +78,12 @@ pub struct CompletionCache {
     pub class_to_keys: HashMap<String, HashSet<(String, String)>>,
 }
 
+impl Default for CompletionCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CompletionCache {
     pub fn new() -> Self {
         Self {

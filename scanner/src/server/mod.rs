@@ -16,7 +16,7 @@ pub async fn handle_connection(socket: TcpStream, state: Arc<AppState>) {
     let (tx, mut rx) = mpsc::channel::<Vec<u8>>(2000);
     tokio::spawn(async move {
         while let Some(data) = rx.recv().await {
-            if let Err(_) = write_half.write_all(&data).await { break; }
+            if (write_half.write_all(&data).await).is_err() { break; }
             let _ = write_half.flush().await;
         }
     });

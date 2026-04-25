@@ -80,7 +80,7 @@ pub fn run_refresh(req: RefreshRequest, reporter: Arc<dyn ProgressReporter>) -> 
     let engine_name = engine_root.as_ref().map(|r| get_name_from_root(r));
     let mut component_defs = Vec::new();
 
-    let uproject_path = fs::read_dir(&project_root)?.filter_map(|e| e.ok()).find(|e| e.path().extension().map_or(false, |ext| ext == "uproject")).map(|e| e.path());
+    let uproject_path = fs::read_dir(&project_root)?.filter_map(|e| e.ok()).find(|e| e.path().extension().is_some_and(|ext| ext == "uproject")).map(|e| e.path());
     component_defs.push(ComponentDef { name: project_name.clone(), display_name: project_root.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| project_name.clone()), comp_type: "Game".to_string(), root_path: project_root.clone(), uproject_path: uproject_path.clone(), uplugin_path: None, owner_name: project_name.clone() });
 
     if let Some(ref eroot) = engine_root {
@@ -95,8 +95,10 @@ pub fn run_refresh(req: RefreshRequest, reporter: Arc<dyn ProgressReporter>) -> 
     let mut search_roots = vec![project_root.clone()];
     // Only walk the engine when its revision changed (or VCS is unavailable).
     // When skipped, engine files and modules are preserved from the previous DB state.
-    if !engine_rev_same && (req.scope.as_deref().unwrap_or("Full") == "Full" || req.scope.as_deref().unwrap_or("Full") == "Engine") && engine_root.is_some() {
-        search_roots.push(engine_root.as_ref().unwrap().clone());
+    if !engine_rev_same && (req.scope.as_deref().unwrap_or("Full") == "Full" || req.scope.as_deref().unwrap_or("Full") == "Engine") {
+        if let Some(ref root) = engine_root {
+            search_roots.push(root.clone());
+        }
     }
     // Normalised walked-root strings used later to scope the cleanup pass.
     let walked_root_strs: Vec<String> = search_roots.iter().map(|r| normalize_path(r)).collect();
@@ -151,7 +153,7 @@ pub fn run_refresh(req: RefreshRequest, reporter: Arc<dyn ProgressReporter>) -> 
             }
             let path = entry.path();
             let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
-            let root_owner = if er.as_ref().as_ref().map_or(false, |er| path.starts_with(er)) {
+            let root_owner = if er.as_ref().as_ref().is_some_and(|er| path.starts_with(er)) {
                 en.as_ref().as_ref().cloned().unwrap_or_else(|| "Engine".to_string())
             } else {
                 pn.as_ref().clone()
@@ -172,11 +174,11 @@ pub fn run_refresh(req: RefreshRequest, reporter: Arc<dyn ProgressReporter>) -> 
                     };
                     pc.lock().push(comp);
                 }
-            } else if path.file_name().map_or(false, |n| n.to_string_lossy().to_lowercase().ends_with(".build.cs")) {
+            } else if path.file_name().is_some_and(|n| n.to_string_lossy().to_lowercase().ends_with(".build.cs")) {
                 mbf.lock().push((path.to_path_buf(), root_owner));
             }
 
-            if entry.file_type().map_or(false, |t| t.is_file()) && exts.contains(&ext) {
+            if entry.file_type().is_some_and(|t| t.is_file()) && exts.contains(&ext) {
                 adf.lock().push((normalize_path(path), ext));
             }
             WalkState::Continue
@@ -300,13 +302,15 @@ pub fn run_refresh(req: RefreshRequest, reporter: Arc<dyn ProgressReporter>) -> 
     let tx = conn.transaction()?;
     // When the engine revision is unchanged, preserve engine components/modules
     // in the DB — they are expensive to rebuild and nothing has changed.
-    if engine_rev_same && engine_name.is_some() {
-        let en = engine_name.as_ref().unwrap();
-        tx.execute("DELETE FROM components WHERE owner_name != ?", params![en])?;
-        tx.execute("DELETE FROM modules WHERE owner_name != ?", params![en])?;
-    } else {
-        tx.execute("DELETE FROM components", [])?;
-        tx.execute("DELETE FROM modules", [])?;
+    match (engine_rev_same, engine_name.as_ref()) {
+        (true, Some(en)) => {
+            tx.execute("DELETE FROM components WHERE owner_name != ?", params![en])?;
+            tx.execute("DELETE FROM modules WHERE owner_name != ?", params![en])?;
+        }
+        _ => {
+            tx.execute("DELETE FROM components", [])?;
+            tx.execute("DELETE FROM modules", [])?;
+        }
     }
     
     let mut mod_id_map = HashMap::new();
@@ -361,7 +365,7 @@ pub fn run_refresh(req: RefreshRequest, reporter: Arc<dyn ProgressReporter>) -> 
     }
 
     let tx = conn.transaction()?;
-    for (path, _) in &existing_mtimes {
+    for path in existing_mtimes.keys() {
         // Only clean up files that belong to a root we actually walked.
         // Engine files are intentionally preserved when engine scan is skipped.
         let in_walked_root = walked_root_strs.iter().any(|r| path.starts_with(r.as_str()));
@@ -398,7 +402,7 @@ pub fn run_refresh(req: RefreshRequest, reporter: Arc<dyn ProgressReporter>) -> 
             let fn_id = db::get_or_create_string(&tx, &mut string_cache, p.file_name().unwrap().to_str().unwrap())?;
             // INSERT OR REPLACE で module_id だけ更新されるようにする
             tx.execute("INSERT OR REPLACE INTO files (directory_id, filename_id, extension, mtime, module_id, is_header) VALUES (?, ?, ?, ?, ?, ?)", 
-                params![dir_id, fn_id, ext, mtime as i64, mod_id, if ext == "h" || ext == "hpp" { 1 } else { 0 }])?;
+                params![dir_id, fn_id, ext, { mtime }, mod_id, if ext == "h" || ext == "hpp" { 1 } else { 0 }])?;
         }
         tx.commit()?;
     }

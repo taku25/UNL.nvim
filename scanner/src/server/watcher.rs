@@ -6,14 +6,16 @@ use crate::{scanner, db};
 
 pub async fn handle_file_change(state: Arc<AppState>, path: PathBuf) {
     let path_str_native = path.to_string_lossy().to_string();
-    let path_str_clean = if path_str_native.starts_with(r"\\?\") { &path_str_native[4..] } else if path_str_native.starts_with("//?/") { &path_str_native[4..] } else { &path_str_native };
+    let path_str_clean = path_str_native
+        .strip_prefix(r"\\?\")
+        .or_else(|| path_str_native.strip_prefix("//?/"))
+        .unwrap_or(&path_str_native);
     let mut path_str_unix = path_str_clean.replace('\\', "/");
-    if cfg!(target_os = "windows") {
-        if path_str_unix.len() >= 2 && &path_str_unix[1..2] == ":" {
+    if cfg!(target_os = "windows")
+        && path_str_unix.len() >= 2 && &path_str_unix[1..2] == ":" {
             let drive = &path_str_unix[0..1].to_uppercase();
             path_str_unix.replace_range(0..1, drive);
         }
-    }
     if !path.exists() { return; }
     let path_str_unix_lower = path_str_unix.to_lowercase();
     let target = {
@@ -49,26 +51,23 @@ pub async fn handle_file_change(state: Arc<AppState>, path: PathBuf) {
         let path_str_for_scan = path_str_unix.clone();
         tokio::task::spawn_blocking(move || {
             let mut conn = conn_arc.lock();
-            match db::get_module_id_for_path(&conn, &path_str_for_scan) {
-                Ok(Some(mod_id)) => {
-                    tracing::info!("File change detected, re-scanning: {}", path_str_for_scan);
-                    let language = tree_sitter_unreal_cpp::LANGUAGE.into();
-                    let query = tree_sitter::Query::new(&language, scanner::QUERY_STR).unwrap();
-                    let include_query = tree_sitter::Query::new(&language, scanner::INCLUDE_QUERY_STR).unwrap();
-                    let mtime = std::fs::metadata(&path_str_for_scan).and_then(|m| m.modified()).ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs()).unwrap_or(0);
-                    let input = crate::types::InputFile { path: path_str_for_scan, mtime, old_hash: None, module_id: Some(mod_id), db_path: Some(db_path_native.clone()) };
-                    if let Ok(res) = scanner::process_file(&input, &language, &query, &include_query) { 
-                        let classes_to_invalidate = if let Some(data) = &res.data { data.classes.iter().map(|c| c.class_name.clone()).collect::<Vec<String>>() } else { Vec::new() };
-                        if let Err(e) = db::save_to_db(&mut conn, &[res], Arc::new(crate::types::StdoutReporter)) {
-                            tracing::error!("Watcher: Failed to save scan results: {}", e);
-                        } else {
-                            let cache_arc = state.get_completion_cache(&root_clone);
-                            let mut cache = cache_arc.lock();
-                            for cls in classes_to_invalidate { cache.invalidate_class(&cls); }
-                        }
+            if let Ok(Some(mod_id)) = db::get_module_id_for_path(&conn, &path_str_for_scan) {
+                tracing::info!("File change detected, re-scanning: {}", path_str_for_scan);
+                let language = tree_sitter_unreal_cpp::LANGUAGE.into();
+                let query = tree_sitter::Query::new(&language, scanner::QUERY_STR).unwrap();
+                let include_query = tree_sitter::Query::new(&language, scanner::INCLUDE_QUERY_STR).unwrap();
+                let mtime = std::fs::metadata(&path_str_for_scan).and_then(|m| m.modified()).ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs()).unwrap_or(0);
+                let input = crate::types::InputFile { path: path_str_for_scan, mtime, old_hash: None, module_id: Some(mod_id), db_path: Some(db_path_native.clone()) };
+                if let Ok(res) = scanner::process_file(&input, &language, &query, &include_query) { 
+                    let classes_to_invalidate = if let Some(data) = &res.data { data.classes.iter().map(|c| c.class_name.clone()).collect::<Vec<String>>() } else { Vec::new() };
+                    if let Err(e) = db::save_to_db(&mut conn, &[res], Arc::new(crate::types::StdoutReporter)) {
+                        tracing::error!("Watcher: Failed to save scan results: {}", e);
+                    } else {
+                        let cache_arc = state.get_completion_cache(&root_clone);
+                        let mut cache = cache_arc.lock();
+                        for cls in classes_to_invalidate { cache.invalidate_class(&cls); }
                     }
                 }
-                _ => {}
             }
         });
     }
