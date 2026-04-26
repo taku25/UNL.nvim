@@ -75,9 +75,14 @@ end
 --- プロジェクト全体のステータス更新
 function M.refresh(start_path, on_complete, logger_name)
     if not start_path then return end
-    
+
+    -- 可用性キャッシュを無効化してワークスペース変更を確実に検出する
+    local avail_key = unl_path.normalize(start_path or "")
+    availability_cache[avail_key] = nil
+
     check_availability(start_path, function(available)
         if not available then
+            M.clear()  -- 古いステータスキャッシュを削除
             if on_complete then on_complete() end
             return
         end
@@ -236,6 +241,116 @@ function M.get_changed_files(root, old_hash, new_hash, callback)
                 end
             end)
         end
+    end)
+end
+
+--- 現在の P4 ユーザー名を取得する
+--- @param cwd string
+--- @param callback function(name: string|nil)
+function M.get_user_name(cwd, callback)
+    check_availability(cwd, function(available)
+        if not available then return callback(nil) end
+        spawn_p4({ "user", "-o" }, cwd, function(output)
+            if not output then return callback(nil) end
+            local user = output:match("User:%s+(%S+)")
+            callback(user)
+        end)
+    end)
+end
+
+--- P4 チェンジリストのログを取得する
+--- @param cwd string
+--- @param limit number 最大取得件数
+--- @param author string|nil ユーザーフィルタ
+--- @param callback function(commits: table[]|nil)
+function M.get_log(cwd, limit, author, callback)
+    check_availability(cwd, function(available)
+        if not available then return callback(nil) end
+        local args = { "-ztag", "changes", "-m", tostring(limit), "-l", "-s", "submitted" }
+        if author then
+            table.insert(args, "-u")
+            table.insert(args, author)
+        end
+        table.insert(args, "...")
+        spawn_p4(args, cwd, function(output)
+            if not output then return callback(nil) end
+            local commits = {}
+            local current = {}
+            for line in output:gmatch("[^\r\n]+") do
+                local key, value = line:match("^%.%.%.%s+(%S+)%s+(.+)$")
+                if key then
+                    if key == "change" then
+                        if current.hash then table.insert(commits, current) end
+                        current = { hash = value, vcs = "p4" }
+                    elseif key == "user"  then current.author = value
+                    elseif key == "desc"  then current.message = vim.fn.trim(value)
+                    elseif key == "time"  then
+                        local ts = tonumber(value)
+                        if ts then
+                            local diff = os.time() - ts
+                            if diff < 3600 then
+                                current.date = math.floor(diff / 60) .. " minutes ago"
+                            elseif diff < 86400 then
+                                current.date = math.floor(diff / 3600) .. " hours ago"
+                            else
+                                current.date = math.floor(diff / 86400) .. " days ago"
+                            end
+                        end
+                    end
+                end
+            end
+            if current.hash then table.insert(commits, current) end
+            for _, c in ipairs(commits) do
+                c.message = c.message or "(no description)"
+                c.author  = c.author  or ""
+                c.date    = c.date    or ""
+                c.display = string.format("%s %s (%s)", c.hash, c.message, c.date)
+            end
+            callback(commits)
+        end)
+    end)
+end
+
+--- 特定チェンジリスト時点のファイル内容をデポパスで取得する
+--- @param cwd string
+--- @param changelist string チェンジリスト番号
+--- @param depot_path string フルデポパス (//depot/...)
+--- @param callback function(content: string|nil)
+function M.get_file_at_commit(cwd, changelist, depot_path, callback)
+    if not depot_path or depot_path == "" then return callback(nil) end
+    spawn_p4({ "print", "-q", depot_path .. "@" .. changelist }, cwd, function(content)
+        callback(content)
+    end)
+end
+
+--- チェンジリストの変更ファイル一覧を取得する
+--- @param cwd string
+--- @param changelist string
+--- @param callback function(items: table[]|nil)
+function M.get_commit_files(cwd, changelist, callback)
+    spawn_p4({ "describe", "-s", changelist }, cwd, function(output)
+        if not output then return callback(nil) end
+        local files = {}
+        local in_affected = false
+        for line in output:gmatch("[^\r\n]+") do
+            if line:match("^Affected files") then
+                in_affected = true
+            elseif in_affected then
+                local dp = line:match("^%.%.%.%s+(//[^#]+)")
+                if dp then
+                    dp = vim.fn.trim(dp)
+                    local short = dp:match("//[^/]+/(.+)$") or dp
+                    table.insert(files, {
+                        type          = "file",
+                        path          = short,
+                        name          = vim.fn.fnamemodify(short, ":t"),
+                        full_rel_path = short,
+                        depot_path    = dp,
+                    })
+                end
+            end
+        end
+        callback(files)
     end)
 end
 

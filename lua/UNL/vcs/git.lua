@@ -241,4 +241,135 @@ function M.get_file_content(path, on_success)
     end)
 end
 
+--- Find git root from a given directory
+--- @param cwd string Starting directory
+--- @param callback function(git_root: string|nil)
+local function find_git_root(cwd, callback)
+    spawn_git({"rev-parse", "--show-toplevel"}, cwd, function(output)
+        if not output then return callback(nil) end
+        local root = output:gsub("[\r\n]+", "")
+        if root == "" then return callback(nil) end
+        callback(unl_path.normalize(root))
+    end)
+end
+
+--- 現在の Git ユーザー名を取得する
+--- @param cwd string
+--- @param callback function(name: string|nil)
+function M.get_user_name(cwd, callback)
+    spawn_git({"config", "user.name"}, cwd, function(output)
+        if not output then return callback(nil) end
+        local name = output:gsub("[\r\n]+", "")
+        if name == "" then return callback(nil) end
+        callback(name)
+    end)
+end
+
+--- Git ログを取得する (新しい順)
+--- @param cwd string
+--- @param limit number 最大取得件数
+--- @param author string|nil 著者フィルタ (nil = 全員)
+--- @param callback function(commits: table[]|nil)
+function M.get_log(cwd, limit, author, callback)
+    find_git_root(cwd, function(git_root)
+        if not git_root then return callback(nil) end
+        local SEP = string.char(0x1f)  -- ASCII Unit Separator
+        local format = "%h" .. SEP .. "%s" .. SEP .. "%an" .. SEP .. "%ar"
+        local args = { "log", "--first-parent", "--pretty=format:" .. format, "-n", tostring(limit) }
+        if author then table.insert(args, "--author=" .. author) end
+        spawn_git(args, git_root, function(output)
+            if not output then return callback(nil) end
+            local commits = {}
+            for line in output:gmatch("[^\r\n]+") do
+                local parts = vim.split(line, SEP)
+                if #parts >= 4 then
+                    table.insert(commits, {
+                        hash    = parts[1],
+                        message = parts[2],
+                        author  = parts[3],
+                        date    = parts[4],
+                        display = string.format("%s %s (%s)", parts[1], parts[2], parts[4]),
+                        vcs     = "git",
+                        _root   = git_root,
+                    })
+                end
+            end
+            callback(commits)
+        end)
+    end)
+end
+
+--- 特定コミット時点のファイル内容を取得する
+--- @param cwd string
+--- @param commit_hash string
+--- @param rel_path string git root 相対パス
+--- @param callback function(content: string|nil)
+function M.get_file_at_commit(cwd, commit_hash, rel_path, callback)
+    find_git_root(cwd, function(git_root)
+        if not git_root then return callback(nil) end
+        local fwd_path = rel_path:gsub("\\", "/")
+        spawn_git({ "show", commit_hash .. ":" .. fwd_path }, git_root, callback)
+    end)
+end
+
+--- コミットの変更ファイル一覧を取得する (サブモジュール対応)
+--- @param cwd string
+--- @param commit_hash string
+--- @param callback function(items: table[]|nil)
+function M.get_commit_files(cwd, commit_hash, callback)
+    find_git_root(cwd, function(git_root)
+        if not git_root then return callback(nil) end
+        spawn_git({"show", "--raw", "--pretty=format:", commit_hash}, git_root, function(output)
+            if not output then return callback(nil) end
+            local items = {}
+            local submodule_jobs = 0
+            local is_iterating = true
+            local function check_done()
+                if not is_iterating and submodule_jobs == 0 then
+                    table.sort(items, function(a, b)
+                        if a.type ~= b.type then return a.type == "submodule" end
+                        return a.path < b.path
+                    end)
+                    callback(items)
+                end
+            end
+            for line in output:gmatch("[^\r\n]+") do
+                local _, new_mode, old_hash, new_hash, _, path = line:match("^:(%d+) (%d+) (%x+) (%x+) (%u%d*)%s+(.+)$")
+                if path then
+                    if new_mode == "160000" then
+                        submodule_jobs = submodule_jobs + 1
+                        local sub_abs = unl_path.join(git_root, path)
+                        spawn_git({"diff", "--name-only", old_hash, new_hash}, sub_abs, function(sub_out)
+                            local sub_files = {}
+                            if sub_out then
+                                for sub_line in sub_out:gmatch("[^\r\n]+") do
+                                    if sub_line ~= "" then
+                                        table.insert(sub_files, {
+                                            name = vim.fn.fnamemodify(sub_line, ":t"),
+                                            rel_path = sub_line,
+                                            full_rel_path = path .. "/" .. sub_line,
+                                        })
+                                    end
+                                end
+                            end
+                            table.insert(items, { type = "submodule", path = path, name = path, files = sub_files })
+                            submodule_jobs = submodule_jobs - 1
+                            check_done()
+                        end)
+                    else
+                        table.insert(items, {
+                            type = "file",
+                            path = path,
+                            name = vim.fn.fnamemodify(path, ":t"),
+                            full_rel_path = path,
+                        })
+                    end
+                end
+            end
+            is_iterating = false
+            check_done()
+        end)
+    end)
+end
+
 return M

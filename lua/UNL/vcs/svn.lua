@@ -81,4 +81,92 @@ function M.get_changed_files(root, old_hash, new_hash, callback)
     end)
 end
 
+--- 現在の SVN ユーザー名を取得する
+--- @param cwd string
+--- @param callback function(name: string|nil)
+function M.get_user_name(cwd, callback)
+    spawn_svn({ "info", "--show-item", "wc-root" }, cwd, function(output)
+        if not output then return callback(nil) end
+        spawn_svn({ "log", "-l", "1", "--xml" }, cwd, function(log_output)
+            if not log_output then return callback(nil) end
+            local author = log_output:match("<author>([^<]+)</author>")
+            callback(author)
+        end)
+    end)
+end
+
+--- SVN ログを取得する
+--- @param cwd string
+--- @param limit number 最大取得件数
+--- @param author string|nil 著者フィルタ
+--- @param callback function(commits: table[]|nil)
+function M.get_log(cwd, limit, author, callback)
+    spawn_svn({ "info", "--show-item", "wc-root" }, cwd, function(wc_output)
+        if not wc_output then return callback(nil) end
+        local fetch_limit = author and tostring(limit * 5) or tostring(limit)
+        spawn_svn({ "log", "-l", fetch_limit, "--xml" }, cwd, function(output)
+            if not output then return callback(nil) end
+            local commits = {}
+            for entry in output:gmatch("<logentry(.-)</logentry>") do
+                local rev          = entry:match('revision="(%d+)"')
+                local entry_author = entry:match("<author>([^<]*)</author>") or ""
+                local date_str     = entry:match("<date>([^<]*)</date>") or ""
+                local msg          = entry:match("<msg>([^<]*)</msg>") or "(no message)"
+                if rev then
+                    local include = not (author and entry_author ~= author)
+                    if include and #commits < limit then
+                        local rel_date = date_str
+                        local y, mo, d, h, mi, s = date_str:match("(%d+)-(%d+)-(%d+)T(%d+):(%d+):(%d+)")
+                        if y then
+                            local ts = os.time({ year=y, month=mo, day=d, hour=h, min=mi, sec=s })
+                            local diff = os.time() - ts
+                            if diff < 3600 then
+                                rel_date = math.floor(diff/60) .. " minutes ago"
+                            elseif diff < 86400 then
+                                rel_date = math.floor(diff/3600) .. " hours ago"
+                            else
+                                rel_date = math.floor(diff/86400) .. " days ago"
+                            end
+                        end
+                        table.insert(commits, {
+                            hash    = "r" .. rev,
+                            message = vim.fn.trim(msg),
+                            author  = entry_author,
+                            date    = rel_date,
+                            display = string.format("r%s %s (%s)", rev, vim.fn.trim(msg), rel_date),
+                            vcs     = "svn",
+                            _rev    = rev,
+                        })
+                    end
+                end
+            end
+            callback(commits)
+        end)
+    end)
+end
+
+--- SVN リビジョンの変更ファイル一覧を取得する
+--- @param cwd string
+--- @param revision string リビジョン番号 ("r123" 形式も可)
+--- @param callback function(items: table[]|nil)
+function M.get_commit_files(cwd, revision, callback)
+    local rev = revision:gsub("^r", "")
+    spawn_svn({ "log", "-r", rev, "-v", "--xml" }, cwd, function(output)
+        if not output then return callback(nil) end
+        local files = {}
+        for path_entry in output:gmatch("<path(.-)</path>") do
+            local path = path_entry:match(">(.+)$")
+            if path then
+                table.insert(files, {
+                    type          = "file",
+                    path          = path,
+                    name          = vim.fn.fnamemodify(path, ":t"),
+                    full_rel_path = path,
+                })
+            end
+        end
+        callback(files)
+    end)
+end
+
 return M
