@@ -64,6 +64,13 @@ function M.register_self(callback)
 end
 
 function M.start(on_complete)
+  -- 他インスタンスが管理するサーバーが既に稼働中のケースも含めて早期リターン
+  if M.is_running() then
+    log.debug("Server is already running. Skipping start.")
+    M.register_self(on_complete)
+    return
+  end
+
   if server_job_id then
     log.debug("Server is already managed by this instance (job_id: %d)", server_job_id)
     M.register_self(on_complete)
