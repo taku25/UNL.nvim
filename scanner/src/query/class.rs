@@ -3,6 +3,42 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use crate::db::path::{PATH_CTE};
 
+/// DB 内の全クラスを返す。`extra_where` は `WHERE 1=1` の後に追加するオプション句。
+/// `params` は `extra_where` 内のプレースホルダーに対応するバインド値。
+pub fn get_classes(
+    conn: &Connection,
+    extra_where: Option<&str>,
+    params: &[String],
+) -> anyhow::Result<Value> {
+    let where_clause = extra_where.unwrap_or("");
+    let sql = format!(
+        "{} SELECT sc.text, sb.text, dp.full_path || '/' || sf.text, c.line_number, c.symbol_type
+         FROM classes c
+         JOIN strings sc ON c.name_id = sc.id
+         LEFT JOIN strings sb ON c.base_class_id = sb.id
+         JOIN files f ON c.file_id = f.id
+         JOIN dir_paths dp ON f.directory_id = dp.id
+         JOIN strings sf ON f.filename_id = sf.id
+         WHERE 1=1 {}
+         ORDER BY sc.text",
+        PATH_CTE, where_clause
+    );
+    let dyn_params: Vec<&dyn ToSql> = params.iter().map(|s| s as &dyn ToSql).collect();
+    let mut stmt = conn.prepare(&sql)?;
+    let mut rows = stmt.query(rusqlite::params_from_iter(dyn_params))?;
+    let mut results = Vec::new();
+    while let Some(row) = rows.next()? {
+        results.push(json!({
+            "name": row.get::<_, String>(0)?,
+            "base": row.get::<_, Option<String>>(1)?,
+            "path": row.get::<_, String>(2)?,
+            "line": row.get::<_, i64>(3)?,
+            "type": row.get::<_, String>(4)?,
+        }));
+    }
+    Ok(json!(results))
+}
+
 pub fn get_file_symbols(conn: &Connection, file_path: &str) -> anyhow::Result<Value> {
     // フルパスで file_id を特定する
     let file_id_sql = format!(

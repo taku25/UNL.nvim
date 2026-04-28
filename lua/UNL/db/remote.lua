@@ -206,8 +206,27 @@ function M.search_classes_prefix(prefix, limit, cb)
     M.request("SearchClassesPrefix", { prefix = prefix, limit = limit }, cb)
 end
 
-function M.get_classes(extra_where, params, cb)
-    M.request("GetClasses", { extra_where = extra_where, params = params }, cb)
+function M.get_classes(extra_where, params, cb, project_root_override)
+    local args = { extra_where = extra_where, params = params }
+    if project_root_override then
+        args.project_root = project_root_override
+    end
+    M.request("GetClasses", args, cb)
+end
+
+--- コルーチン対応の非同期版 get_classes
+--- コルーチン内で coroutine.yield() して結果を待つ
+--- 使用例 (Snacks task / vim.async など):
+---   local classes, err = remote.get_classes_async(extra_where, params, project_root)
+function M.get_classes_async(extra_where, params, project_root_override)
+    local co = coroutine.running()
+    assert(co, "get_classes_async must be called from within a coroutine")
+    M.get_classes(extra_where, params, function(result, err)
+        vim.schedule(function()
+            coroutine.resume(co, result, err)
+        end)
+    end, project_root_override)
+    return coroutine.yield()
 end
 
 function M.get_structs(extra_where, params, cb)

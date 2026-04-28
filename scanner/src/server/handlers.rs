@@ -196,7 +196,9 @@ pub async fn handle_query(state: Arc<AppState>, params: &Value, tx: mpsc::Sender
     let root_key = normalize_path_key(&req.project_root);
     {
         let active = state.active_refreshes.lock();
-        if active.contains(&root_key) { return Ok(json!([])); }
+        // GetClasses などの読み取り専用クエリはリフレッシュ中でもDBから読めるものを返す
+        let bypass = matches!(req.query, QueryRequest::GetClasses { .. } | QueryRequest::GetStructsOnly | QueryRequest::SearchSymbols { .. });
+        if active.contains(&root_key) && !bypass { return Ok(json!([])); }
     }
     {
         let graphs = state.asset_graphs.lock();

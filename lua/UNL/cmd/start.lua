@@ -34,11 +34,20 @@ function M.execute(opts)
             log.debug("Start already in progress for %s. Skipping.", root_norm)
             return
         end
-        -- セッション内で既にセットアップ済みかつ強制フラグなし → TCP接続を張らず即リターン
+        -- セッション内で既にセットアップ済みかつ強制フラグなし
+        -- ただし、サーバーが実際に動いているか確認してからスキップ
         if completed_setups[root_norm] and not opts.force then
-            log.debug("Project %s already setup in this session. Skipping.", root_norm)
-            local current_vcs = vcs.get_current_hash(root_norm)
-            vcs_poller.start(root_norm, current_vcs)
+            server_manager.get_status(function(status)
+                if not status then
+                    -- サーバーが停止していたため、キャッシュをクリアして再登録する
+                    log.debug("Server is down for %s despite prior setup. Clearing cache and re-registering...", root_norm)
+                    completed_setups[root_norm] = nil
+                    M.execute(opts)
+                else
+                    local current_vcs = vcs.get_current_hash(root_norm)
+                    vcs_poller.start(root_norm, current_vcs)
+                end
+            end)
             return
         end
         active_starts[root_norm] = true

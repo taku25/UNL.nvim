@@ -5,7 +5,15 @@ local remote = require("UNL.db.remote")
 --- クラス一覧を取得
 function M.get_classes(opts, callback)
     opts = opts or {}
-    remote.get_classes(opts.extra_where, opts.params, callback)
+    remote.get_classes(opts.extra_where, opts.params, callback, opts.project_root)
+end
+
+--- クラス一覧を取得 (coroutine 対応版)
+--- コルーチン内で await 的に使用: local classes, err = M.get_classes_async(opts)
+--- Snacks task の source.fn や vim.async ブロック内で利用可能
+function M.get_classes_async(opts)
+    opts = opts or {}
+    return remote.get_classes_async(opts.extra_where, opts.params, opts.project_root)
 end
 
 --- 構造体一覧を取得

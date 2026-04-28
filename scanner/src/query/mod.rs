@@ -43,6 +43,11 @@ pub fn process_query(conn: &Connection, request: QueryRequest) -> anyhow::Result
         QueryRequest::GetClassFilePath { class_name } => 
             util::get_class_file_path(conn, &class_name),
 
+        QueryRequest::GetClasses { extra_where, params } => {
+            let sql_params = params.unwrap_or_default();
+            class::get_classes(conn, extra_where.as_deref(), &sql_params)
+        }
+
         QueryRequest::GetClassesInModules { modules, symbol_type } =>
             class::get_classes_in_modules(conn, modules, symbol_type),
 
