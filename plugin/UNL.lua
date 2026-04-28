@@ -80,6 +80,11 @@ builder.create({
       desc = "Restart the UNL scanner server.",
       args = {},
     },
+    ["rescan_assets"] = {
+      handler = api.rescan_assets,
+      desc = "Force a full re-scan of all uasset/umap files for the current project.",
+      args = {},
+    },
     -- (将来、ここに :UNL clear_cache のようなコマンドが追加されるかもしれませんね)
   },
 })

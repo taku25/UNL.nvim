@@ -10,6 +10,7 @@ local cmd_cd = require("UNL.cmd.cd")
 local cmd_delete = require("UNL.cmd.delete")
 local cmd_stop = require("UNL.cmd.stop")
 local cmd_restart = require("UNL.cmd.restart")
+local cmd_rescan_assets = require("UNL.cmd.rescan_assets")
 
 local M = {}
 
@@ -64,6 +65,7 @@ function M.cd(opts) cmd_cd.execute(opts) end
 function M.delete(opts) cmd_delete.execute(opts) end
 function M.stop(opts) cmd_stop.execute(opts) end
 function M.restart(opts) cmd_restart.execute(opts) end
+function M.rescan_assets(opts) cmd_rescan_assets.execute(opts) end
 
 function M.register_client()
   require("UNL.scanner.server").register_self()

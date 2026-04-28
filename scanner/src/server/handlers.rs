@@ -84,9 +84,14 @@ pub async fn handle_setup(state: Arc<AppState>, params: &Value) -> anyhow::Resul
     }
     let _ = state.save_registry();
 
-    let state_clone = state.clone();
-    let root_clone = root_key.clone();
-    tokio::spawn(async move { handle_asset_scan(state_clone, root_clone).await; });
+    let already_scanned = { state.asset_graphs.lock().contains_key(&root_key) };
+    let already_scanning = { state.active_asset_scans.lock().contains(&root_key) };
+    if !already_scanned && !already_scanning {
+        state.active_asset_scans.lock().insert(root_key.clone());
+        let state_clone = state.clone();
+        let root_clone = root_key.clone();
+        tokio::spawn(async move { handle_asset_scan(state_clone, root_clone).await; });
+    }
 
     Ok(serde_json::json!({ "status": "ok", "needs_full_refresh": was_empty }))
 }
@@ -363,6 +368,31 @@ pub async fn list_projects(state: &AppState) -> anyhow::Result<Value> {
         serde_json::json!({ "root": root, "db_path": ctx.db_path, "vcs_hash": ctx.vcs_hash })
     }).collect();
     Ok(json!(list))
+}
+
+/// Forces a full re-scan of all uasset/umap files for the given project.
+#[derive(Deserialize)]
+pub struct RescanAssetsRequest { pub project_root: String }
+
+pub async fn handle_rescan_assets(state: Arc<AppState>, params: &Value) -> anyhow::Result<Value> {
+    let req: RescanAssetsRequest = convert_params(params)?;
+    let root_key = normalize_path_key(&req.project_root);
+
+    let already_scanning = { state.active_asset_scans.lock().contains(&root_key) };
+    if already_scanning {
+        return Ok(json!({ "status": "already_scanning" }));
+    }
+
+    // Drop the existing graph so the next query doesn't serve stale data.
+    { state.asset_graphs.lock().remove(&root_key); }
+
+    state.active_asset_scans.lock().insert(root_key.clone());
+    let state_clone = state.clone();
+    let root_clone = req.project_root.clone();
+    tokio::spawn(async move { handle_asset_scan(state_clone, root_clone).await; });
+
+    info!("Manual asset rescan started for: {}", root_key);
+    Ok(json!({ "status": "ok" }))
 }
 
 /// Adds a module to a `.uproject` / `.uplugin` JSON file (synchronous).

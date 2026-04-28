@@ -58,6 +58,7 @@ async fn process_msg(msgid: u64, method: String, params: Value, state: Arc<AppSt
         "status" => handlers::get_status(&state).await,
         "list_projects" => handlers::list_projects(&state).await,
         "delete_project" => handlers::handle_delete_project(&state, &params).await,
+        "rescan_assets" => handlers::handle_rescan_assets(state.clone(), &params).await,
         "modify_uproject_add_module" => handlers::handle_modify_uproject_add_module(&params).await,
         "modify_target_add_module" => handlers::handle_modify_target_add_module(&params).await,
         _ => Err(anyhow::anyhow!("Unknown method")),
