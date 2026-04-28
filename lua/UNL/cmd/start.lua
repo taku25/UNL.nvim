@@ -34,6 +34,13 @@ function M.execute(opts)
             log.debug("Start already in progress for %s. Skipping.", root_norm)
             return
         end
+        -- セッション内で既にセットアップ済みかつ強制フラグなし → TCP接続を張らず即リターン
+        if completed_setups[root_norm] and not opts.force then
+            log.debug("Project %s already setup in this session. Skipping.", root_norm)
+            local current_vcs = vcs.get_current_hash(root_norm)
+            vcs_poller.start(root_norm, current_vcs)
+            return
+        end
         active_starts[root_norm] = true
     end
 
