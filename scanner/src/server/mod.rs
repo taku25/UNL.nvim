@@ -47,7 +47,7 @@ pub async fn handle_connection(socket: TcpStream, state: Arc<AppState>) {
 }
 
 async fn process_msg(msgid: u64, method: String, params: Value, state: Arc<AppState>, tx: mpsc::Sender<Vec<u8>>) {
-    tracing::info!("Received RPC request: method={}, msgid={}", method, msgid);
+    tracing::debug!("Received RPC request: method={}, msgid={}", method, msgid);
     let result = match method.as_str() {
         "ping" => handlers::handle_ping(&state, &params).await,
         "setup" => handlers::handle_setup(state.clone(), &params).await,

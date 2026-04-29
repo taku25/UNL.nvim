@@ -70,8 +70,7 @@ async fn main() -> anyhow::Result<()> {
     tokio::spawn(async move {
         let mut last_event: HashMap<PathBuf, Instant> = HashMap::new();
         while let Some(path) = rx.recv().await {
-            // Shorten debounce to 50ms to catch quick create after remove
-            if let Some(last) = last_event.get(&path) { if last.elapsed() < Duration::from_millis(50) { continue; } }
+            if let Some(last) = last_event.get(&path) { if last.elapsed() < Duration::from_millis(500) { continue; } }
             last_event.insert(path.clone(), Instant::now());
             handle_file_change(state_for_watcher.clone(), path).await;
         }

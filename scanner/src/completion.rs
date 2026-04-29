@@ -140,14 +140,14 @@ pub fn process_completion(
     cache: Option<Arc<Mutex<CompletionCache>>>,
     persistent_cache: Option<Arc<Mutex<Connection>>>,
 ) -> anyhow::Result<Value> {
-    tracing::info!("--- Completion Request at {}:{} ---", line, character);
+    tracing::debug!("--- Completion Request at {}:{} ---", line, character);
     let mut ctx = RequestContext::new(conn);
 
     // 現在ファイルのfile_idをDBから引いておく（include-aware disambiguation用）
     // ファイル名だけでなくフルパス（ディレクトリ階層）で一致させる
     if let Some(ref fp) = _file_path {
         ctx.current_file_id = get_file_id_by_full_path(conn, fp);
-        tracing::info!("Current file '{}' resolved to file_id: {:?}", fp, ctx.current_file_id);
+        tracing::debug!("Current file '{}' resolved to file_id: {:?}", fp, ctx.current_file_id);
     }
     
     let mut parser = Parser::new();
@@ -167,24 +167,24 @@ pub fn process_completion(
     let node = match root.descendant_for_point_range(prev_point, point) {
         Some(n) => n,
         None => {
-            tracing::info!("No node found at cursor position.");
+            tracing::debug!("No node found at cursor position.");
             return Ok(json!([]));
         }
     };
 
     let node_type = node.kind();
-    tracing::info!("Node at cursor: kind='{}', text='{}'", node_type, get_node_text(&node, content));
+    tracing::debug!("Node at cursor: kind='{}', text='{}'", node_type, get_node_text(&node, content));
     
     // Check if we are inside or near an ERROR node
     let mut target_node = None;
     if node_type == "ERROR" || node_type == "." || node_type == "->" || node_type == "::" {
         if let Some(prev) = get_prev_meaningful_sibling(node) {
-            tracing::info!("Found meaningful sibling before ERROR/Operator: kind='{}'", prev.kind());
+            tracing::debug!("Found meaningful sibling before ERROR/Operator: kind='{}'", prev.kind());
             target_node = Some(prev);
         } else if let Some(parent) = node.parent() {
             if parent.kind() == "ERROR" {
                 if let Some(prev) = get_prev_meaningful_sibling(parent) {
-                    tracing::info!("Found meaningful sibling before parent ERROR: kind='{}'", prev.kind());
+                    tracing::debug!("Found meaningful sibling before parent ERROR: kind='{}'", prev.kind());
                     target_node = Some(prev);
                 }
             }
@@ -206,10 +206,10 @@ pub fn process_completion(
         };
 
         if let Some(prev) = get_prev_meaningful_sibling(op_node) {
-            tracing::info!("Operator detected (Case 1), target node: kind='{}', text='{}'", prev.kind(), get_node_text(&prev, content));
+            tracing::debug!("Operator detected (Case 1), target node: kind='{}', text='{}'", prev.kind(), get_node_text(&prev, content));
             return resolve_node_and_fetch_members(&mut ctx, prev, &root, content, row, None, cache, persistent_cache);
         } else {
-            tracing::info!("Operator detected but no meaningful sibling found. Continuing to traverse up from parent.");
+            tracing::debug!("Operator detected but no meaningful sibling found. Continuing to traverse up from parent.");
             curr_opt = node.parent(); // Move to parent and let Case 2 handle it
         }
     }
@@ -224,14 +224,14 @@ pub fn process_completion(
                 let full_text = get_node_text(&parent, content);
                 let macro_name_key = full_text.split('(').next().unwrap_or("").trim();
                 if let Some(res) = resolve_macro_specifiers(macro_name_key) {
-                    tracing::info!("Resolved macro specifiers for '{}'", macro_name_key);
+                    tracing::debug!("Resolved macro specifiers for '{}'", macro_name_key);
                     return Ok(res);
                 }
                 if let Some(grand) = parent.parent() {
                    let g_text = get_node_text(&grand, content);
                    let g_key = g_text.split('(').next().unwrap_or("").trim();
                    if let Some(res) = resolve_macro_specifiers(g_key) {
-                       tracing::info!("Resolved macro specifiers for grand '{}'", g_key);
+                       tracing::debug!("Resolved macro specifiers for grand '{}'", g_key);
                        return Ok(res);
                    }
                 }
@@ -247,7 +247,7 @@ pub fn process_completion(
                             if let Some(key_node) = spec_node.child_by_field_name("key") {
                                 let key_text = get_node_text(&key_node, content).to_lowercase();
                                 if key_text == "meta" {
-                                    tracing::info!("Resolved meta specifiers (nested meta=(...))");
+                                    tracing::debug!("Resolved meta specifiers (nested meta=(...))");
                                     return Ok(json!(resolve_meta_specifiers()));
                                 }
                             }
@@ -264,24 +264,24 @@ pub fn process_completion(
             } else { None };
 
             if let Some(obj_node) = curr.child_by_field_name("argument") {
-                tracing::info!("Field expression detected (Case 2), resolving argument with prefix: {:?}", field_prefix);
+                tracing::debug!("Field expression detected (Case 2), resolving argument with prefix: {:?}", field_prefix);
                 return resolve_node_and_fetch_members(&mut ctx, obj_node, &root, content, row, field_prefix, cache, persistent_cache);
             } else if let Some(first_child) = curr.child(0) {
                 if first_child.kind() != "." && first_child.kind() != "->" {
-                    tracing::info!("Field expression detected (Fallback), resolving first child...");
+                    tracing::debug!("Field expression detected (Fallback), resolving first child...");
                     return resolve_node_and_fetch_members(&mut ctx, first_child, &root, content, row, field_prefix, cache, persistent_cache);
                 }
             }
         } else if p_kind == "call_expression" && (node_type == "." || node_type == "->") {
              if let Some(func_node) = curr.child_by_field_name("function") {
-                 tracing::info!("Call expression parent of operator detected, resolving function...");
+                 tracing::debug!("Call expression parent of operator detected, resolving function...");
                  return resolve_node_and_fetch_members(&mut ctx, func_node, &root, content, row, None, cache, persistent_cache);
              }
         } else if p_kind == "qualified_identifier" {
             let field_prefix = curr.child_by_field_name("name").map(|name_node| get_node_text(&name_node, content).to_string());
 
             if let Some(scope_node) = curr.child_by_field_name("scope") {
-                tracing::info!("Qualified identifier detected (Case 2), resolving scope with prefix: {:?}", field_prefix);
+                tracing::debug!("Qualified identifier detected (Case 2), resolving scope with prefix: {:?}", field_prefix);
                 return resolve_static_members(&mut ctx, get_node_text(&scope_node, content), field_prefix, cache, persistent_cache);
             }
         } else if p_kind == "ERROR" {
@@ -291,7 +291,7 @@ pub fn process_completion(
                     let ck = child.kind();
                     if ck == "." || ck == "->" || ck == "::" {
                         if let Some(prev) = get_prev_meaningful_sibling(child) {
-                             tracing::info!("Operator detected inside ERROR, resolving previous sibling...");
+                             tracing::debug!("Operator detected inside ERROR, resolving previous sibling...");
                              return resolve_node_and_fetch_members(&mut ctx, prev, &root, content, row, None, cache, persistent_cache.clone());
                         }
                     }
@@ -373,7 +373,7 @@ fn resolve_node_and_fetch_members(
     if let Some(t_name) = resolve_expression_type(ctx, node, root, content, cursor_row)? {
         let resolved = resolve_typedef(ctx, &t_name)?;
         let current_class = get_enclosing_class_name(&node, content);
-        tracing::info!("Final type for member lookup: '{}', current_class: {:?}, prefix: {:?}", resolved, current_class, prefix);
+        tracing::debug!("Final type for member lookup: '{}', current_class: {:?}, prefix: {:?}", resolved, current_class, prefix);
         
         let members = fetch_members_recursive(ctx, &resolved, prefix, cache, persistent_cache, current_class.as_deref())?;
         return Ok(json!(members));
@@ -389,7 +389,7 @@ fn resolve_expression_type(
     cursor_row: usize,
 ) -> anyhow::Result<Option<String>> {
     let kind = node.kind();
-    tracing::info!("resolve_expression_type(kind='{}', text='{}')", kind, get_node_text(&node, content));
+    tracing::debug!("resolve_expression_type(kind='{}', text='{}')", kind, get_node_text(&node, content));
 
     match kind {
         "this" => Ok(get_enclosing_class_name(&node, content)),
