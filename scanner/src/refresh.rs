@@ -12,6 +12,7 @@ use tree_sitter::Query;
 use crate::types::{RefreshRequest, ModuleDef, ComponentDef, ProgressReporter, PhaseInfo, InputFile, ParseResult};
 use crate::{scanner, db, vcs};
 use crate::db::path::get_or_create_directory;
+use crate::vcs::ChangedFiles;
 
 #[derive(serde::Deserialize, Debug)]
 #[allow(non_snake_case)]
@@ -46,15 +47,43 @@ pub fn run_refresh(req: RefreshRequest, reporter: Arc<dyn ProgressReporter>) -> 
         .and_then(|c| c.query_row("SELECT value FROM project_meta WHERE key = 'vcs_engine_revision'", [], |r| r.get::<_, String>(0)).ok());
     let stored_game_rev: Option<String> = Connection::open(Path::new(&db_path_native)).ok()
         .and_then(|c| c.query_row("SELECT value FROM project_meta WHERE key = 'vcs_game_revision'", [], |r| r.get::<_, String>(0)).ok());
-    // stored_game_rev is reserved for future game-side incremental optimization
-    // (git diff --name-status to skip parsing unchanged committed game files).
-    let _ = &stored_game_rev;
 
     // Detect VCS providers for game and engine roots.
     let game_vcs = vcs::detect(&project_root);
     let current_game_rev = game_vcs.current_revision(&project_root);
     // Engine may be a git submodule with its own .git ref, so detect independently.
     let current_engine_rev = engine_root.as_ref().and_then(|er| vcs::detect(er).current_revision(er));
+
+    // === Incremental game refresh path ===
+    // When the game VCS revision changed but only non-structural files were modified,
+    // skip the full walk and only re-parse the files reported by `changed_since`.
+    // Structural changes (.build.cs / .uplugin / .uproject) still trigger a full scan
+    // because they may add/remove modules or plugins.
+    let game_rev_changed = match (&stored_game_rev, &current_game_rev) {
+        (Some(stored), Some(current)) => stored != current,
+        _ => false,
+    };
+    if game_rev_changed {
+        if let Some(stored_rev) = &stored_game_rev {
+            if let Some(changed) = game_vcs.changed_since(&project_root, stored_rev) {
+                let is_structural = changed.modified.iter().chain(changed.deleted.iter()).any(|p| {
+                    let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("").to_lowercase();
+                    name.ends_with(".build.cs") || name.ends_with(".uplugin") || name.ends_with(".uproject")
+                });
+                // Also guard: if DB version doesn't match, a full rescan is required.
+                let db_version_ok = db_version_matches(&db_path_native);
+                if !is_structural && db_version_ok {
+                    tracing::info!(
+                        "Incremental game refresh: {} modified, {} deleted file(s). Skipping full walk.",
+                        changed.modified.len(), changed.deleted.len()
+                    );
+                    return run_incremental_game_refresh(
+                        &req, reporter, &project_root, changed, &db_path_native, current_game_rev
+                    );
+                }
+            }
+        }
+    }
 
     // Skip engine walk when its VCS revision is identical to the stored one.
     let engine_rev_same = match (&stored_engine_rev, &current_engine_rev) {
@@ -478,3 +507,157 @@ fn parse_build_cs(path: &Path) -> (Vec<String>, Vec<String>) {
     for cap in re_add.captures_iter(&content) { if &cap[1] == "Public" { public_deps.push(cap[2].to_string()); } else { private_deps.push(cap[2].to_string()); } }
     (public_deps, private_deps)
 }
+
+/// Check if the on-disk DB matches the current DB_VERSION without side effects.
+fn db_version_matches(db_path: &str) -> bool {
+    Connection::open(Path::new(db_path)).ok()
+        .and_then(|c| c.query_row(
+            "SELECT value FROM project_meta WHERE key = 'db_version'",
+            [], |r| r.get::<_, String>(0),
+        ).ok())
+        .and_then(|v| v.parse::<i32>().ok())
+        .map_or(false, |v| v == db::DB_VERSION)
+}
+
+/// Incremental game refresh: re-parse only files reported by VCS `changed_since`.
+/// Called when the game revision changed but no structural files (.build.cs / .uplugin /
+/// .uproject) were affected, so modules and components are unchanged.
+fn run_incremental_game_refresh(
+    req: &RefreshRequest,
+    reporter: Arc<dyn ProgressReporter>,
+    _project_root: &Path,
+    changed: ChangedFiles,
+    db_path_native: &str,
+    current_game_rev: Option<String>,
+) -> anyhow::Result<()> {
+    reporter.report_plan(&[
+        PhaseInfo { name: "analysis".into(), label: "Analysis".into(), weight: 1.0 },
+    ]);
+    reporter.report("analysis", 0, 100, &format!(
+        "Incremental: {} modified, {} deleted file(s).",
+        changed.modified.len(), changed.deleted.len()
+    ));
+
+    let mut conn = Connection::open(Path::new(db_path_native))?;
+    conn.busy_timeout(std::time::Duration::from_millis(10000))?;
+
+    // Rebuild the in-memory directory map so we can look up or create path IDs.
+    let mut dir_map: HashMap<i64, (Option<i64>, String)> = HashMap::new();
+    {
+        let mut stmt = conn.prepare(
+            "SELECT d.id, d.parent_id, s.text FROM directories d JOIN strings s ON d.name_id = s.id"
+        )?;
+        let rows = stmt.query_map([], |row| Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, Option<i64>>(1)?,
+            row.get::<_, String>(2)?,
+        )))?;
+        for r in rows.flatten() { dir_map.insert(r.0, (r.1, r.2)); }
+    }
+
+    // Load module-root → module_id mapping (longest-prefix match used below).
+    let mut mod_id_map: Vec<(String, i64)> = {
+        let mut stmt = conn.prepare(
+            "SELECT m.id, m.root_directory_id FROM modules m"
+        )?;
+        let rows = stmt.query_map([], |row| Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, i64>(1)?,
+        )))?;
+        rows.flatten().map(|(mod_id, root_dir_id)| {
+            let path = reconstruct_dir_path(&dir_map, root_dir_id);
+            (path, mod_id)
+        }).collect()
+    };
+    mod_id_map.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+
+    let global_mod_id: i64 = conn.query_row(
+        "SELECT m.id FROM modules m JOIN strings s ON m.name_id = s.id WHERE s.text = '_Global'",
+        [], |r| r.get(0),
+    ).unwrap_or(0);
+
+    let mut string_cache: HashMap<String, i64> = HashMap::new();
+    let mut dir_cache: HashMap<(Option<i64>, i64), i64> = HashMap::new();
+
+    // Delete removed files from the DB.
+    {
+        let tx = conn.transaction()?;
+        for path in &changed.deleted {
+            let path_unix = normalize_path(path);
+            let p = Path::new(&path_unix);
+            if let (Some(parent), Some(filename)) = (p.parent(), p.file_name().and_then(|n| n.to_str())) {
+                if let (Ok(dir_id), Ok(fn_id)) = (
+                    get_or_create_directory(&tx, &mut string_cache, &mut dir_cache, parent),
+                    db::get_or_create_string(&tx, &mut string_cache, filename),
+                ) {
+                    tx.execute(
+                        "DELETE FROM files WHERE directory_id = ? AND filename_id = ?",
+                        params![dir_id, fn_id],
+                    )?;
+                }
+            }
+        }
+        tx.commit()?;
+    }
+
+    let include_exts: HashSet<String> = req.config.include_extensions.iter()
+        .map(|e| e.to_lowercase()).collect();
+    let parseable = ["h", "hpp", "cpp", "cc", "c", "inl"];
+
+    let mut files_to_parse: Vec<InputFile> = Vec::new();
+    for path in &changed.modified {
+        if !path.exists() { continue; }
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+        if !include_exts.contains(&ext) { continue; }
+        if !parseable.contains(&ext.as_str()) { continue; }
+        let path_unix = normalize_path(path);
+        let mtime = std::fs::metadata(path)
+            .and_then(|m| m.modified()).ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs()).unwrap_or(0);
+        let mod_id = mod_id_map.iter()
+            .find(|(r, _)| path_unix.starts_with(r.as_str()))
+            .map(|(_, id)| *id)
+            .unwrap_or(global_mod_id);
+        files_to_parse.push(InputFile {
+            path: path_unix,
+            mtime,
+            old_hash: None,
+            module_id: Some(mod_id),
+            db_path: None,
+        });
+    }
+
+    let total = files_to_parse.len();
+    if total > 0 {
+        reporter.report("analysis", 0, total, &format!("Re-parsing {} changed file(s)...", total));
+        let language = tree_sitter_unreal_cpp::LANGUAGE.into();
+        let query = Arc::new(Query::new(&language, scanner::QUERY_STR).expect("query"));
+        let include_query = Arc::new(Query::new(&language, scanner::INCLUDE_QUERY_STR).expect("include_query"));
+        let processed_count = Arc::new(AtomicUsize::new(0));
+        let results: Vec<ParseResult> = files_to_parse.into_par_iter().map(|input| {
+            let res = scanner::process_file(&input, &language, &query, &include_query)
+                .unwrap_or_else(|_| ParseResult {
+                    path: input.path.clone(), status: "error".to_string(),
+                    mtime: input.mtime, data: None, module_id: input.module_id,
+                });
+            let current = processed_count.fetch_add(1, Ordering::Relaxed) + 1;
+            reporter.report("analysis", current, total, &format!("Re-parsing: {}/{}", current, total));
+            res
+        }).collect();
+        db::save_to_db(&mut conn, &results, Arc::clone(&reporter))?;
+    }
+
+    reporter.report("complete", 100, 100,
+        &format!("Incremental refresh complete ({} file(s) updated).", total));
+
+    if let Some(ref rev) = current_game_rev {
+        conn.execute(
+            "INSERT OR REPLACE INTO project_meta (key, value) VALUES (?, ?)",
+            params!["vcs_game_revision", rev],
+        )?;
+    }
+
+    Ok(())
+}
+
