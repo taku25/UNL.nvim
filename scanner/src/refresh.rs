@@ -264,6 +264,9 @@ pub fn run_refresh(req: RefreshRequest, reporter: Arc<dyn ProgressReporter>) -> 
     let mut conn = Connection::open(Path::new(&db_path_native))?;
     conn.busy_timeout(std::time::Duration::from_millis(10000))?;
     db::init_db(&conn)?;
+    // FK ON にすることで孤立レコードが残らないようにする。
+    // modules 削除前に files.module_id を NULL 化しているので FK 違反は起きない。
+    conn.execute("PRAGMA foreign_keys = ON", [])?;
 
     if let Some(v) = ue_version {
         for (k, val) in [("major", v.MajorVersion.to_string()), ("minor", v.MinorVersion.to_string()), ("patch", v.PatchVersion.to_string()), ("branch", v.BranchName)] {
@@ -331,12 +334,15 @@ pub fn run_refresh(req: RefreshRequest, reporter: Arc<dyn ProgressReporter>) -> 
     let tx = conn.transaction()?;
     // When the engine revision is unchanged, preserve engine components/modules
     // in the DB — they are expensive to rebuild and nothing has changed.
+    // FK ON 状態での module_id チェックを回避するため、削除前に files.module_id を NULL にしておく。
     match (engine_rev_same, engine_name.as_ref()) {
         (true, Some(en)) => {
+            tx.execute("UPDATE files SET module_id = NULL WHERE module_id IN (SELECT id FROM modules WHERE owner_name != ?)", params![en])?;
             tx.execute("DELETE FROM components WHERE owner_name != ?", params![en])?;
             tx.execute("DELETE FROM modules WHERE owner_name != ?", params![en])?;
         }
         _ => {
+            tx.execute("UPDATE files SET module_id = NULL", [])?;
             tx.execute("DELETE FROM components", [])?;
             tx.execute("DELETE FROM modules", [])?;
         }
@@ -540,6 +546,9 @@ fn run_incremental_game_refresh(
 
     let mut conn = Connection::open(Path::new(db_path_native))?;
     conn.busy_timeout(std::time::Duration::from_millis(10000))?;
+    // FK ON にすることで DELETE FROM files が子テーブル (file_includes/classes/members) をカスケード削除する。
+    // save_to_db が内部で FK OFF にして一括 INSERT し、終了後に再び FK ON に戻す。
+    conn.execute("PRAGMA foreign_keys = ON", [])?;
 
     // Rebuild the in-memory directory map so we can look up or create path IDs.
     let mut dir_map: HashMap<i64, (Option<i64>, String)> = HashMap::new();

@@ -542,6 +542,29 @@ fn get_template_argument(inner: &str, index: usize) -> &str {
 }
 
 fn find_member_return_type(ctx: &mut RequestContext, class_name: &str, member_name: &str) -> anyhow::Result<Option<String>> {
+    // Smart pointer passthrough: TWeakObjectPtr<T>::Get() → T  (before extract_clean_type strips the wrapper)
+    const SMART_PTRS: &[&str] = &[
+        "TWeakObjectPtr", "TObjectPtr", "TSharedPtr", "TSharedRef",
+        "TUniquePtr", "TWeakPtr", "TStrongObjectPtr", "TSoftObjectPtr",
+    ];
+    let raw = class_name.trim();
+    for sp in SMART_PTRS {
+        if raw.starts_with(sp) {
+            if let (Some(lt), Some(gt)) = (raw.find('<'), raw.rfind('>')) {
+                let inner = raw[lt + 1..gt].trim();
+                match member_name {
+                    "Get" | "GetChecked" | "operator*" | "operator->" => {
+                        return Ok(Some(extract_clean_type(inner)));
+                    }
+                    "IsValid" | "IsStale" | "IsExplicitlyNull" => {
+                        return Ok(Some("bool".to_string()));
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
     let clean_class = extract_clean_type(class_name);
     let resolved_class = resolve_typedef(ctx, &clean_class)?;
     
@@ -1165,36 +1188,94 @@ fn is_known_type(ctx: &mut RequestContext, name: &str) -> anyhow::Result<bool> {
 
 fn infer_variable_type(ctx: &mut RequestContext, target_name: &str, root: &Node, content: &str, cursor_row: usize) -> anyhow::Result<Option<String>> {
     let language: tree_sitter::Language = tree_sitter_unreal_cpp::LANGUAGE.into();
-    let query_str = "(declaration type: (_) @type declarator: (init_declarator declarator: (_) @decl)) (declaration type: (_) @type declarator: (_) @decl) (field_declaration type: (_) @type declarator: (init_declarator declarator: (_) @decl)) (field_declaration type: (_) @type declarator: (_) @decl) (parameter_declaration type: (_) @type declarator: (_) @decl) (for_range_loop type: (_) @type declarator: (_) @decl) (condition_clause value: (declaration type: (_) @type declarator: (init_declarator declarator: (_) @decl))) (condition_clause value: (declaration type: (_) @type declarator: (_) @decl)) (condition_clause (declaration type: (_) @type declarator: (init_declarator declarator: (_) @decl))) (field_declaration (_) @type (init_declarator declarator: (_) @decl)) (field_declaration (_) @type (_) @decl) (declaration (_) @type (init_declarator declarator: (_) @decl))";
+    // Note: for_range_loop の _declaration_specifiers は anonymous rule のため type: フィールドが
+    // grammar.js には直接書かれていないが、node-types.json では type: が存在する。
+    // for_range_loop パターンは `declarator:` のみキャプチャし、type_node = None の場合に
+    // infer_for_range_element_type へ分岐する。
+    let query_str = "(declaration type: (_) @type declarator: (init_declarator declarator: (_) @decl)) (declaration type: (_) @type declarator: (_) @decl) (field_declaration type: (_) @type declarator: (init_declarator declarator: (_) @decl)) (field_declaration type: (_) @type declarator: (_) @decl) (parameter_declaration type: (_) @type declarator: (_) @decl) (for_range_loop declarator: (_) @decl) (condition_clause value: (declaration type: (_) @type declarator: (init_declarator declarator: (_) @decl))) (condition_clause value: (declaration type: (_) @type declarator: (_) @decl)) (condition_clause (declaration type: (_) @type declarator: (init_declarator declarator: (_) @decl))) (field_declaration (_) @type (init_declarator declarator: (_) @decl)) (field_declaration (_) @type (_) @decl) (declaration (_) @type (init_declarator declarator: (_) @decl))";
     let query = Query::new(&language, query_str)?;
     let mut cursor = QueryCursor::new();
     let mut matches = cursor.matches(&query, *root, content.as_bytes());
     let mut best_type = None;
     let mut best_row = 0;
     while let Some(m) = matches.next() {
-        let mut type_node = None;
-        let mut decl_nodes = Vec::new();
+        let mut type_node: Option<Node> = None;
+        let mut decl_nodes: Vec<Node> = Vec::new();
         for cap in m.captures {
             let c_name = query.capture_names()[cap.index as usize];
             if c_name == "type" { type_node = Some(cap.node); }
             else if c_name == "decl" { decl_nodes.push(cap.node); }
         }
-        if let Some(t_node) = type_node {
-            for d_node in decl_nodes {
-                if find_identifier_in_decl(&d_node, target_name, content)? {
-                    let row = d_node.start_position().row;
-                    if row <= cursor_row && (best_type.is_none() || row >= best_row) {
+        for d_node in decl_nodes {
+            if find_identifier_in_decl(&d_node, target_name, content)? {
+                let row = d_node.start_position().row;
+                if row <= cursor_row && (best_type.is_none() || row >= best_row) {
+                    if let Some(t_node) = type_node {
                         let type_text = get_node_text(&t_node, content).trim();
-                        if type_text == "auto" { if let Some(inferred) = infer_from_assignment(ctx, target_name, root, content, cursor_row)? { best_type = Some(inferred); } }
-                        else { best_type = Some(extract_clean_type(type_text)); }
-                        best_row = row;
+                        if type_text == "auto" {
+                            if let Some(inferred) = infer_from_assignment(ctx, target_name, root, content, cursor_row)? {
+                                best_type = Some(inferred);
+                            } else if let Some(range_type) = infer_for_range_element_type(ctx, d_node, root, content, cursor_row)? {
+                                best_type = Some(range_type);
+                            }
+                        } else {
+                            best_type = Some(extract_clean_type(type_text));
+                        }
+                    } else {
+                        // type_node なし = for_range_loop パターン（declarator: のみキャプチャ）
+                        if let Some(range_type) = infer_for_range_element_type(ctx, d_node, root, content, cursor_row)? {
+                            best_type = Some(range_type);
+                        }
                     }
+                    best_row = row;
                 }
             }
         }
     }
     if best_type.is_none() { best_type = infer_from_assignment(ctx, target_name, root, content, cursor_row)?; }
     Ok(best_type)
+}
+
+/// for_range_loop の宣言ノードから上に辿り、イテラブルの要素型を推論する。
+/// `for (auto component : mMeshArray)` → mMeshArray の型を解決し、コンテナを unwrap して返す。
+/// grammar.js 上では `_for_range_loop_body` の `right:` フィールドがイテラブルに対応。
+fn infer_for_range_element_type(
+    ctx: &mut RequestContext,
+    decl_node: Node,
+    root: &Node,
+    content: &str,
+    cursor_row: usize,
+) -> anyhow::Result<Option<String>> {
+    let mut current = decl_node;
+    loop {
+        let parent = match current.parent() {
+            Some(p) => p,
+            None => return Ok(None),
+        };
+        if parent.kind() == "for_range_loop" {
+            // _for_range_loop_body の right: フィールドがイテラブル
+            if let Some(node) = parent.child_by_field_name("right") {
+                if let Ok(Some(iterable_type)) = resolve_expression_type(ctx, node, root, content, cursor_row) {
+                    return Ok(Some(unwrap_container_type(&iterable_type)));
+                }
+            }
+            // フォールバック: ':' の後ろの最初の named ノードを探す
+            let mut found_colon = false;
+            for i in 0..parent.child_count() {
+                if let Some(child) = parent.child(i as u32) {
+                    if found_colon && child.is_named() && child.kind() != "compound_statement" {
+                        if let Ok(Some(iterable_type)) = resolve_expression_type(ctx, child, root, content, cursor_row) {
+                            return Ok(Some(unwrap_container_type(&iterable_type)));
+                        }
+                        return Ok(None);
+                    }
+                    if child.kind() == ":" { found_colon = true; }
+                }
+            }
+            return Ok(None);
+        }
+        current = parent;
+    }
 }
 
 fn find_identifier_in_decl(node: &Node, target_name: &str, content: &str) -> anyhow::Result<bool> {
