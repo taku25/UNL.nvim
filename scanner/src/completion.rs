@@ -647,7 +647,40 @@ fn find_qualified_identifier(node: Node) -> Option<Node> {
 fn resolve_typedef(ctx: &mut RequestContext, type_name: &str) -> anyhow::Result<String> {
     let mut current = extract_clean_type(type_name);
     if current.is_empty() || current == "T" || current == "void" { return Ok(current); }
-    for _ in 0..3 {
+    for _ in 0..5 {
+        // Case 1: ClassName::TypeAlias → look up the alias as a type_alias member of the class
+        if current.contains("::") {
+            let parts: Vec<&str> = current.splitn(2, "::").collect();
+            if parts.len() == 2 {
+                let class_part = parts[0].trim();
+                let alias_part = parts[1].trim();
+                if let (Some(class_name_id), Some(alias_name_id)) = (
+                    ctx.get_string_id(class_part)?,
+                    ctx.get_string_id(alias_part)?,
+                ) {
+                    let mut stmt = ctx.conn.prepare("
+                        SELECT sr.text FROM members m
+                        LEFT JOIN strings sr ON m.return_type_id = sr.id
+                        WHERE m.class_id IN (SELECT id FROM classes WHERE name_id = ?)
+                          AND m.name_id = ?
+                          AND m.type_id = (SELECT id FROM strings WHERE text = 'type_alias')
+                        LIMIT 1
+                    ")?;
+                    let mut rows = stmt.query(params![class_name_id, alias_name_id])?;
+                    if let Some(row) = rows.next()? {
+                        if let Some(resolved) = row.get::<_, Option<String>>(0)? {
+                            let clean = extract_clean_type(&resolved);
+                            tracing::debug!("resolve_typedef: '{}' → '{}' (via class type_alias member)", current, clean);
+                            if clean.is_empty() || clean == current { break; }
+                            current = clean;
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Case 2: global typedef class entry
         let name_id = match ctx.get_string_id(&current)? {
             Some(id) => id,
             None => break,
