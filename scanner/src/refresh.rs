@@ -350,7 +350,7 @@ pub fn run_refresh(req: RefreshRequest, reporter: Arc<dyn ProgressReporter>) -> 
     
     let mut mod_id_map = HashMap::new();
     for comp in &component_defs {
-        tx.execute("INSERT INTO components (name, display_name, type, owner_name, root_path, uplugin_path, uproject_path) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        tx.execute("INSERT OR REPLACE INTO components (name, display_name, type, owner_name, root_path, uplugin_path, uproject_path) VALUES (?, ?, ?, ?, ?, ?, ?)",
             params![comp.name, comp.display_name, comp.comp_type, comp.owner_name, normalize_path(&comp.root_path), comp.uplugin_path.as_ref().map(|p| normalize_path(p)), comp.uproject_path.as_ref().map(|p| normalize_path(p))],
         )?;
     }

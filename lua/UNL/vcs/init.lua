@@ -14,29 +14,35 @@ local providers = {
 function M.get_current_hash(root)
     if not root then return nil end
     root = unl_path.normalize(root)
-    
-    -- 優先順位: P4 -> Git -> SVN
-    
-    -- P4 Check
-    local p4_hash = providers[1].module.get_hash(root)
-    if p4_hash then return p4_hash end
 
-    -- Git Check: .gitを上方向に探す
-    local git_dir = vim.fn.finddir(".git", root .. ";")
-    local git_file = vim.fn.findfile(".git", root .. ";")
-    if git_dir ~= "" or git_file ~= "" then
-        local git_hash = providers[2].module.get_hash(root)
-        if git_hash then return git_hash end
+    -- フェーズ1: ローカルマーカーで高速判定（ファイルシステム参照のみ、コマンドなし）
+    -- finddir/findfile は ";" 付きで親ディレクトリを遡って検索する
+    local has_git = vim.fn.finddir(".git",  root .. ";") ~= ""
+                 or vim.fn.findfile(".git", root .. ";") ~= ""
+    local has_svn = vim.fn.finddir(".svn", root .. ";") ~= ""
+
+    if has_git then
+        local h = providers[2].module.get_hash(root)
+        if h then return h end
+    end
+    if has_svn then
+        local h = providers[3].module.get_hash(root)
+        if h then return h end
     end
 
-    -- SVN Check: .svnを上方向に探す
-    local svn_dir = vim.fn.finddir(".svn", root .. ";")
-    if svn_dir ~= "" then
-        local svn_hash = providers[3].module.get_hash(root)
-        if svn_hash then return svn_hash end
+    -- フェーズ2: マーカーが見つからなかった場合のみコマンドで確認
+    -- (sparse checkout や .git がルートにないケースへの対応)
+    if not has_git then
+        local h = providers[2].module.get_hash(root)
+        if h then return h end
+    end
+    if not has_svn then
+        local h = providers[3].module.get_hash(root)
+        if h then return h end
     end
 
-    return nil
+    -- フェーズ3: P4（マーカーなしでも常にコマンド実行が必要なため最後）
+    return providers[1].module.get_hash(root)
 end
 
 --- VCSの状態を非同期で更新する
