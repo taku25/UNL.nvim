@@ -569,6 +569,7 @@ fn find_member_return_type(ctx: &mut RequestContext, class_name: &str, member_na
     let resolved_class = resolve_typedef(ctx, &clean_class)?;
     
     let start_class_ids = ctx.get_class_ids_by_name(&resolved_class)?;
+    tracing::info!("find_member_return_type: class='{}' -> resolved='{}', ids={:?}, member='{}'", class_name, resolved_class, start_class_ids, member_name);
     if start_class_ids.is_empty() { return Ok(None); }
 
     let mut queue = start_class_ids;
@@ -1288,8 +1289,17 @@ fn infer_for_range_element_type(
         if parent.kind() == "for_range_loop" {
             // _for_range_loop_body の right: フィールドがイテラブル
             if let Some(node) = parent.child_by_field_name("right") {
-                if let Ok(Some(iterable_type)) = resolve_expression_type(ctx, node, root, content, cursor_row) {
-                    return Ok(Some(unwrap_container_type(&iterable_type)));
+                let iterable_text = get_node_text(&node, content).trim().to_string();
+                let enclosing = get_enclosing_class_name(&node, content);
+                tracing::info!("infer_for_range_element_type: iterable='{}', enclosing_class={:?}", iterable_text, enclosing);
+                match resolve_expression_type(ctx, node, root, content, cursor_row) {
+                    Ok(Some(iterable_type)) => {
+                        let unwrapped = unwrap_container_type(&iterable_type);
+                        tracing::info!("infer_for_range_element_type: iterable_type='{}' -> unwrapped='{}'", iterable_type, unwrapped);
+                        return Ok(Some(unwrapped));
+                    }
+                    Ok(None) => { tracing::info!("infer_for_range_element_type: resolve_expression_type returned None for '{}'", iterable_text); }
+                    Err(e) => { tracing::info!("infer_for_range_element_type: resolve_expression_type error: {}", e); }
                 }
             }
             // フォールバック: ':' の後ろの最初の named ノードを探す

@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use rusqlite::{params, Connection};
 use crate::types::{ParseResult, ProgressReporter};
 
-pub const DB_VERSION: i32 = 18;
+pub const DB_VERSION: i32 = 19;
 /// 補完キャッシュのバージョン。補完ロジックを変更したらインクリメントすること。
 /// 起動時にDBのバージョンと一致しない場合はキャッシュを全削除する。
 pub const COMPLETION_CACHE_VERSION: i32 = 3;

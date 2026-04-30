@@ -335,9 +335,17 @@ fn has_child_type(node: Node, type_name: &str) -> bool {
 
 fn find_declarator_node<'a>(node: Node<'a>) -> Option<Node<'a>> {
     for i in 0..node.child_count() {
-        if node.field_name_for_child(i as u32) == Some("declarator") { return node.child(i as u32); }
-        if let Some(child) = node.child(i as u32) {
-            if let Some(found) = find_declarator_node(child) { return Some(found); }
+        let fname = node.field_name_for_child(i as u32);
+        if fname == Some("declarator") { return node.child(i as u32); }
+        // Only recurse into unnamed children.
+        // Named fields like "type", "body", "arguments" must NOT be recursed because
+        // they may contain their own "declarator" fields (e.g. type_descriptor inside
+        // TArray<class Foo*> has field:declarator: abstract_pointer_declarator)
+        // which would be mistakenly returned instead of the actual member declarator.
+        if fname.is_none() {
+            if let Some(child) = node.child(i as u32) {
+                if let Some(found) = find_declarator_node(child) { return Some(found); }
+            }
         }
     }
     None
