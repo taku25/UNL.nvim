@@ -6,10 +6,10 @@ use std::collections::HashMap;
 use rusqlite::{params, Connection};
 use crate::types::{ParseResult, ProgressReporter};
 
-pub const DB_VERSION: i32 = 17;
+pub const DB_VERSION: i32 = 18;
 /// 補完キャッシュのバージョン。補完ロジックを変更したらインクリメントすること。
 /// 起動時にDBのバージョンと一致しない場合はキャッシュを全削除する。
-pub const COMPLETION_CACHE_VERSION: i32 = 2;
+pub const COMPLETION_CACHE_VERSION: i32 = 3;
 
 pub fn ensure_correct_version(db_path: &str) -> anyhow::Result<bool> {
     let mut version_match = false;

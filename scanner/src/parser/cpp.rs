@@ -46,6 +46,7 @@ pub const QUERY_STR: &str = r#"
   (declaration) @decl_node
   (unreal_function_declaration) @ufunc_node
   (field_declaration) @field_node
+  (alias_declaration) @alias_node
   (enumerator name: (identifier) @enum_val_name) @enum_item
   (call_expression
     function: [
@@ -243,6 +244,43 @@ pub fn parse_content_mmap(content_bytes: &[u8], _path: &str, language: &tree_sit
                                 member.access = "impl".to_string();
                                 classes[idx].members.push(member);
                             } else { members.push((member, node.start_byte(), node.end_byte())); }
+                        }
+                    }
+                } else if *capture_name == "alias_node" {
+                    // using X = SomeType; をメンバーとして登録
+                    if let Some(name_node) = node.child_by_field_name("name") {
+                        let alias_name = get_node_text(&name_node, content_bytes).to_string();
+                        if !alias_name.is_empty() {
+                            let alias_type = node.child_by_field_name("type")
+                                .map(|t| get_node_text(&t, content_bytes).to_string())
+                                .unwrap_or_default();
+                            let mut access = "public".to_string();
+                            let mut curr = node;
+                            while let Some(parent) = curr.parent() {
+                                let pk = parent.kind();
+                                if pk == "field_declaration_list" || pk == "class_specifier" || pk == "struct_specifier" {
+                                    let mut walk = parent.walk();
+                                    for child in parent.children(&mut walk) {
+                                        if child.start_byte() >= curr.start_byte() { break; }
+                                        if child.kind() == "access_specifier" {
+                                            access = get_node_text(&child, content_bytes).trim().trim_end_matches(':').to_lowercase();
+                                        }
+                                    }
+                                    break;
+                                }
+                                curr = parent;
+                            }
+                            let member = MemberInfo {
+                                name: alias_name,
+                                mem_type: "type_alias".to_string(),
+                                flags: "".to_string(),
+                                access,
+                                line: node.start_position().row + 1,
+                                end_line: node.end_position().row + 1,
+                                detail: if alias_type.is_empty() { None } else { Some(alias_type.clone()) },
+                                return_type: if alias_type.is_empty() { None } else { Some(alias_type) },
+                            };
+                            members.push((member, node.start_byte(), node.end_byte()));
                         }
                     }
                 } else if *capture_name == "enum_val_name" {

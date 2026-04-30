@@ -1128,7 +1128,7 @@ fn resolve_macro_specifiers(macro_name: &str) -> Option<Value> {
 }
 
 fn map_kind(k: &str) -> i64 {
-    match k { "function" => 2, "variable" | "property" => 5, "enum_item" => 20, _ => 1 }
+    match k { "function" => 2, "variable" | "property" => 5, "enum_item" => 20, "type_alias" => 7, _ => 1 }
 }
 
 fn extract_comment_from_file(file_path: &str, line_number: usize, file_cache: &mut HashMap<String, Vec<String>>) -> String {
