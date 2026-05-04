@@ -5,6 +5,7 @@ pub mod refresh;
 pub mod query;
 pub mod completion;
 pub mod uasset;
+pub mod uba;
 pub mod server;
 pub mod modify;
 pub mod vcs;

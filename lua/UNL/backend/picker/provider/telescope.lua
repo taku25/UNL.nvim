@@ -267,6 +267,7 @@ local prepare_source = function(spec)
       prompt_title = spec.title or "Select",
       finder = finder,
       sorter = sorters.get_generic_fuzzy_sorter({}),
+      file_ignore_patterns = {},
       handle_item = function(item)
         return item and item.value or nil
       end,

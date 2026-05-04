@@ -15,6 +15,14 @@ fn main() -> anyhow::Result<()> {
     if args.len() > 1 {
         let cmd = &args[1];
         match cmd.as_str() {
+            "uba-parse" => {
+                let file_path = args.get(2).ok_or_else(|| anyhow::anyhow!("Usage: uba-parse <path>"))?;
+                let result = unl_core::uba::parse_uba_file(file_path)?;
+                for line in &result.lines {
+                    println!("{}", line);
+                }
+                return Ok(());
+            },
             "refresh" | "watch" | "query" | "setup" => {
                 let arg = args.get(2).ok_or_else(|| anyhow::anyhow!("Missing config"))?;
                 let input_str = if arg.starts_with('{') { arg.clone() } else if std::path::Path::new(arg).exists() { std::fs::read_to_string(arg)? } else { arg.clone() };
