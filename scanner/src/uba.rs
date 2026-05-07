@@ -142,12 +142,10 @@ fn probe_at(data: &[u8], from: usize) -> usize {
 
     for _ in 0..8 {
         if r.remaining() == 0 { break; }
-        let save = r.pos;
-
         let type_byte = match r.read_u8() { Some(b) => b, None => break };
-        if type_byte > T_MAX_VALID { r.pos = save; break; }
+        if type_byte > T_MAX_VALID { break; }
 
-        let _ts = match r.read_7bit() { Some(v) => v, None => { r.pos = save; break; } };
+        let _ts = match r.read_7bit() { Some(v) => v, None => { break; } };
 
         let ok = match type_byte {
             T_SESSION_INFO | T_SESSION_NOTIFICATION => {
@@ -187,7 +185,7 @@ fn probe_at(data: &[u8], from: usize) -> usize {
             _ => { break; }
         };
 
-        if !ok { r.pos = save; break; }
+        if !ok { break; }
         count += 1;
     }
     count
