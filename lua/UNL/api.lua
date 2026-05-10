@@ -71,4 +71,27 @@ function M.register_client()
   require("UNL.scanner.server").register_self()
 end
 
+--- Simple server state query (nearly zero CPU overhead — reads in-memory state only).
+--- callback(success, { state, project_count, active_project }) is called asynchronously.
+--- state: "idle" | "refreshing" | "scanning" | "busy" | "offline"
+function M.get_simple_status(callback)
+  local ok_server, server_manager = pcall(require, "UNL.scanner.server")
+  if not ok_server or not server_manager.is_running() then
+    if callback then callback(true, { state = "offline", project_count = 0 }) end
+    return
+  end
+  local ok_rpc, rpc = pcall(require, "UNL.rpc")
+  if not ok_rpc then
+    if callback then callback(false, "rpc unavailable") end
+    return
+  end
+  rpc.request("simple_status", {}, nil, function(success, result)
+    if not success then
+      if callback then callback(false, result) end
+      return
+    end
+    if callback then callback(true, result) end
+  end, 5000)
+end
+
 return M

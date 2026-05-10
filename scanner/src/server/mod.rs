@@ -56,6 +56,7 @@ async fn process_msg(msgid: u64, method: String, params: Value, state: Arc<AppSt
         "query" => handlers::handle_query(state.clone(), &params, tx.clone(), msgid).await,
         "scan" => handlers::handle_scan(&state, &params).await,
         "status" => handlers::get_status(&state).await,
+        "simple_status" => handlers::get_simple_status(&state).await,
         "list_projects" => handlers::list_projects(&state).await,
         "delete_project" => handlers::handle_delete_project(&state, &params).await,
         "rescan_assets" => handlers::handle_rescan_assets(state.clone(), &params).await,

@@ -364,6 +364,30 @@ pub async fn get_status(state: &AppState) -> anyhow::Result<Value> {
     Ok(serde_json::json!({ "status": "running", "active_projects": project_list, "active_clients": client_list }))
 }
 
+/// Lightweight status check — reads only from in-memory state (no DB / file I/O).
+/// Designed for frequent polling (e.g. lualine statusbar component).
+pub async fn get_simple_status(state: &AppState) -> anyhow::Result<Value> {
+    let is_refreshing = !state.active_refreshes.lock().is_empty();
+    let is_scanning   = !state.active_asset_scans.lock().is_empty();
+    let projects      = state.projects.lock();
+    let project_count = projects.len();
+    let active_project = projects.keys().next().cloned();
+    drop(projects);
+
+    let state_str = match (is_refreshing, is_scanning) {
+        (true,  true)  => "busy",
+        (true,  false) => "refreshing",
+        (false, true)  => "scanning",
+        (false, false) => "idle",
+    };
+
+    Ok(serde_json::json!({
+        "state": state_str,
+        "project_count": project_count,
+        "active_project": active_project,
+    }))
+}
+
 pub async fn list_projects(state: &AppState) -> anyhow::Result<Value> {
     let projects = state.projects.lock();
     let list: Vec<Value> = projects.iter().map(|(root, ctx)| {
