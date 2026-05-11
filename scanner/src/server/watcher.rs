@@ -1,5 +1,6 @@
 use std::sync::Arc;
 use std::path::{PathBuf};
+use std::sync::atomic::Ordering;
 use rusqlite::params;
 use crate::server::state::{AppState};
 use crate::server::utils::{normalize_to_native};
@@ -58,6 +59,8 @@ pub async fn handle_file_change(state: Arc<AppState>, path: PathBuf) {
             let native = normalize_to_native(p);
             state.get_persistent_cache_connection(&native).ok()
         });
+        state.active_file_updates.fetch_add(1, Ordering::Relaxed);
+        let state_for_update = state.clone();
         tokio::task::spawn_blocking(move || {
             let mut conn = conn_arc.lock();
             if let Ok(Some(mod_id)) = db::get_module_id_for_path(&conn, &path_str_for_scan) {
@@ -71,7 +74,7 @@ pub async fn handle_file_change(state: Arc<AppState>, path: PathBuf) {
                     match db::update_single_file(&mut conn, &res) {
                         Ok(class_names) => {
                             // Invalidate in-memory LRU completion cache
-                            let cache_arc = state.get_completion_cache(&root_clone);
+                            let cache_arc = state_for_update.get_completion_cache(&root_clone);
                             let mut cache = cache_arc.lock();
                             for cls in &class_names { cache.invalidate_class(cls); }
 
@@ -92,6 +95,7 @@ pub async fn handle_file_change(state: Arc<AppState>, path: PathBuf) {
                     }
                 }
             }
+            state_for_update.active_file_updates.fetch_sub(1, Ordering::Relaxed);
         });
     }
 }

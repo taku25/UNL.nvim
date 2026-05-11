@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::AtomicU32;
 use parking_lot::Mutex;
 use std::path::{PathBuf};
 use std::time::{Duration, Instant};
@@ -44,14 +45,15 @@ async fn main() -> anyhow::Result<()> {
         }
     })?;
 
-    let initial_projects_raw = registry_path.as_ref().map(|p| AppState::load_registry(p)).unwrap_or_default();
-    let mut initial_projects = HashMap::new();
-    for (path, ctx) in initial_projects_raw {
-        initial_projects.insert(unl_core::server::utils::normalize_path_key(&path), ctx);
-    }
+    // Do NOT restore projects from registry at startup.
+    // Each Neovim client registers its own project via the "setup" RPC call on connect.
+    // Restoring all past projects would activate projects from previous sessions
+    // that are no longer open (e.g. watcher, asset scans, DB connections for stale projects).
+    // The registry file is kept only as a write-target so db_path associations persist
+    // across server restarts for informational purposes.
 
     let state = Arc::new(AppState {
-        projects: Mutex::new(initial_projects),
+        projects: Mutex::new(HashMap::new()),
         connections: Mutex::new(HashMap::new()),
         read_only_connections: Mutex::new(HashMap::new()),
         persistent_cache_connections: Mutex::new(HashMap::new()),
@@ -64,6 +66,7 @@ async fn main() -> anyhow::Result<()> {
         asset_graphs: Mutex::new(HashMap::new()),
         config_caches: Mutex::new(HashMap::new()),
         completion_caches: Mutex::new(HashMap::new()),
+        active_file_updates: AtomicU32::new(0),
     });
 
     let state_for_watcher = Arc::clone(&state);

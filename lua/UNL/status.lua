@@ -19,7 +19,7 @@
 --
 -- Raw state (for fully custom rendering):
 --   local st = require("UNL.status").get_state()
---   -- st.server_state   : "offline"|"idle"|"refreshing"|"scanning"|"busy"
+--   -- st.server_state   : "offline"|"idle"|"refreshing"|"scanning"|"updating"|"busy"
 --   -- st.project_count  : number
 --   -- st.active_project : string|nil
 
@@ -44,6 +44,7 @@ local STATE_CONF = {
   idle       = { icon = "󱘰", label = ""        },
   refreshing = { icon = "󰑓", label = "Refresh" },
   scanning   = { icon = "󰄉", label = "Scan"    },
+  updating   = { icon = "󰝩", label = "Update"  },
   busy       = { icon = "󰄉", label = "Busy"    },
 }
 

@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::AtomicU32;
 use parking_lot::Mutex;
 use std::path::{Path, PathBuf};
 use std::time::{Instant};
@@ -141,6 +142,8 @@ pub struct AppState {
     pub config_caches: Mutex<HashMap<String, ConfigCache>>,
     /// project_root -> CompletionCache
     pub completion_caches: Mutex<HashMap<String, Arc<Mutex<CompletionCache>>>>,
+    /// Number of in-progress watcher-triggered single-file updates
+    pub active_file_updates: AtomicU32,
 }
 
 impl AppState {

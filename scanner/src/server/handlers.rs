@@ -369,16 +369,18 @@ pub async fn get_status(state: &AppState) -> anyhow::Result<Value> {
 pub async fn get_simple_status(state: &AppState) -> anyhow::Result<Value> {
     let is_refreshing = !state.active_refreshes.lock().is_empty();
     let is_scanning   = !state.active_asset_scans.lock().is_empty();
+    let is_updating   = state.active_file_updates.load(std::sync::atomic::Ordering::Relaxed) > 0;
     let projects      = state.projects.lock();
     let project_count = projects.len();
     let active_project = projects.keys().next().cloned();
     drop(projects);
 
-    let state_str = match (is_refreshing, is_scanning) {
-        (true,  true)  => "busy",
-        (true,  false) => "refreshing",
-        (false, true)  => "scanning",
-        (false, false) => "idle",
+    let state_str = match (is_refreshing, is_scanning, is_updating) {
+        (true,  true,  _    ) => "busy",
+        (true,  false, _    ) => "refreshing",
+        (false, true,  _    ) => "scanning",
+        (false, false, true ) => "updating",
+        (false, false, false) => "idle",
     };
 
     Ok(serde_json::json!({
