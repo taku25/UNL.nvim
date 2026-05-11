@@ -1,5 +1,6 @@
 use std::sync::Arc;
 use std::path::{PathBuf};
+use rusqlite::params;
 use crate::server::state::{AppState};
 use crate::server::utils::{normalize_to_native};
 use crate::{scanner, db};
@@ -48,7 +49,15 @@ pub async fn handle_file_change(state: Arc<AppState>, path: PathBuf) {
         
         let db_path_native = normalize_to_native(&db_path_unix);
         let conn_arc = match state.get_connection(&db_path_native) { Ok(c) => c, Err(_) => return };
+        let cache_db_path = {
+            let projects = state.projects.lock();
+            projects.get(&root_clone).and_then(|ctx| ctx.cache_db_path.clone())
+        };
         let path_str_for_scan = path_str_unix.clone();
+        let persistent_cache_arc = cache_db_path.as_deref().and_then(|p| {
+            let native = normalize_to_native(p);
+            state.get_persistent_cache_connection(&native).ok()
+        });
         tokio::task::spawn_blocking(move || {
             let mut conn = conn_arc.lock();
             if let Ok(Some(mod_id)) = db::get_module_id_for_path(&conn, &path_str_for_scan) {
@@ -58,14 +67,28 @@ pub async fn handle_file_change(state: Arc<AppState>, path: PathBuf) {
                 let include_query = tree_sitter::Query::new(&language, scanner::INCLUDE_QUERY_STR).unwrap();
                 let mtime = std::fs::metadata(&path_str_for_scan).and_then(|m| m.modified()).ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs()).unwrap_or(0);
                 let input = crate::types::InputFile { path: path_str_for_scan, mtime, old_hash: None, module_id: Some(mod_id), db_path: Some(db_path_native.clone()) };
-                if let Ok(res) = scanner::process_file(&input, &language, &query, &include_query) { 
-                    let classes_to_invalidate = if let Some(data) = &res.data { data.classes.iter().map(|c| c.class_name.clone()).collect::<Vec<String>>() } else { Vec::new() };
-                    if let Err(e) = db::save_to_db(&mut conn, &[res], Arc::new(crate::types::StdoutReporter)) {
-                        tracing::error!("Watcher: Failed to save scan results: {}", e);
-                    } else {
-                        let cache_arc = state.get_completion_cache(&root_clone);
-                        let mut cache = cache_arc.lock();
-                        for cls in classes_to_invalidate { cache.invalidate_class(&cls); }
+                if let Ok(res) = scanner::process_file(&input, &language, &query, &include_query) {
+                    match db::update_single_file(&mut conn, &res) {
+                        Ok(class_names) => {
+                            // Invalidate in-memory LRU completion cache
+                            let cache_arc = state.get_completion_cache(&root_clone);
+                            let mut cache = cache_arc.lock();
+                            for cls in &class_names { cache.invalidate_class(cls); }
+
+                            // Also invalidate persistent (.cache.db) entries so stale
+                            // completions are not served after the in-memory eviction.
+                            if let Some(pc_arc) = &persistent_cache_arc {
+                                let pc = pc_arc.lock();
+                                for cls in &class_names {
+                                    // cache keys are "{class_name}:{prefix}:{accessor}"
+                                    let _ = pc.execute(
+                                        "DELETE FROM persistent_cache WHERE key LIKE ?",
+                                        params![format!("{}:%", cls)],
+                                    );
+                                }
+                            }
+                        }
+                        Err(e) => tracing::error!("Watcher: Failed to save scan results: {}", e),
                     }
                 }
             }

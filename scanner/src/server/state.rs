@@ -68,14 +68,13 @@ pub struct AssetGraph {
     pub functions: HashMap<Arc<str>, HashSet<Arc<str>>>,
 }
 
-/// (class_name, prefix) -> (completion_results, hit_count)
+/// cache_key -> (completion_results, hit_count)
+/// cache_key format: "{class_name}:{prefix}:{accessor_class}"
 pub struct CompletionCache {
-    /// LRU Cache for (class_name, prefix) -> (JSON Value, hit_count)
-    /// Limit to 50,000 entries (approx. 2GB max if each is 40KB)
-    pub lru: LruCache<(String, String), (serde_json::Value, u64)>,
-    /// Map of class_name -> set of (class_name, prefix) keys in LRU
-    /// used for invalidation when a class is updated.
-    pub class_to_keys: HashMap<String, HashSet<(String, String)>>,
+    /// LRU Cache: cache_key -> (JSON Value, hit_count). Limit to 50,000 entries.
+    pub lru: LruCache<String, (serde_json::Value, u64)>,
+    /// Map of class_name -> set of cache_keys in LRU, for O(1) class-level invalidation.
+    pub class_to_keys: HashMap<String, HashSet<String>>,
 }
 
 impl Default for CompletionCache {
@@ -92,24 +91,24 @@ impl CompletionCache {
         }
     }
 
-    pub fn get(&mut self, class_name: &str, prefix: &str) -> Option<serde_json::Value> {
-        let key = (class_name.to_string(), prefix.to_string());
-        if let Some((val, hit)) = self.lru.get_mut(&key) {
+    pub fn get(&mut self, cache_key: &str) -> Option<serde_json::Value> {
+        if let Some((val, hit)) = self.lru.get_mut(cache_key) {
             *hit += 1;
             return Some(val.clone());
         }
         None
     }
 
-    pub fn put(&mut self, class_name: &str, prefix: &str, results: serde_json::Value) {
-        let key = (class_name.to_string(), prefix.to_string());
-        
-        // Track which keys belong to which class for invalidation
+    /// Store a result in the cache.
+    /// `class_name` is the actual class name (for invalidation grouping).
+    /// `cache_key` is the full compound lookup key `"{class_name}:{prefix}:{accessor}"`.
+    pub fn put(&mut self, class_name: &str, cache_key: &str, results: serde_json::Value) {
+        // Register this cache_key under the class_name for O(1) invalidation
         self.class_to_keys.entry(class_name.to_string())
             .or_default()
-            .insert(key.clone());
+            .insert(cache_key.to_string());
             
-        self.lru.put(key, (results, 1));
+        self.lru.put(cache_key.to_string(), (results, 1));
     }
 
     pub fn invalidate_class(&mut self, class_name: &str) {

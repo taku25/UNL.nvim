@@ -770,7 +770,7 @@ fn fetch_members_recursive(
     // 1. Try Memory Cache
     if let Some(c_mutex) = &cache {
         let mut c = c_mutex.lock();
-        if let Some(cached) = c.get(&cache_key, "") {
+        if let Some(cached) = c.get(&cache_key) {
             if let Some(arr) = cached.as_array() {
                 return Ok(arr.clone());
             }
@@ -952,7 +952,7 @@ fn fetch_members_recursive(
     // 3. Store in Memory Cache
     if let Some(c_mutex) = &cache {
         let mut c = c_mutex.lock();
-        c.put(&cache_key, "", result_json.clone());
+        c.put(class_name, &cache_key, result_json.clone());
     }
 
     // 4. Store in Persistent Cache

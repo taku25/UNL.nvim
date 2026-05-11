@@ -3,13 +3,13 @@ pub mod path;
 use std::path::Path;
 use std::sync::Arc;
 use std::collections::HashMap;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use crate::types::{ParseResult, ProgressReporter};
 
 pub const DB_VERSION: i32 = 19;
 /// 補完キャッシュのバージョン。補完ロジックを変更したらインクリメントすること。
 /// 起動時にDBのバージョンと一致しない場合はキャッシュを全削除する。
-pub const COMPLETION_CACHE_VERSION: i32 = 3;
+pub const COMPLETION_CACHE_VERSION: i32 = 4;
 
 pub fn ensure_correct_version(db_path: &str) -> anyhow::Result<bool> {
     let mut version_match = false;
@@ -376,6 +376,166 @@ fn resolve_file_includes_by_path(conn: &mut Connection) -> anyhow::Result<()> {
         [],
     )?;
     Ok(())
+}
+
+/// Single-file incremental DB update for the file watcher.
+///
+/// Unlike `save_to_db` (which is designed for batch operations and drops/rebuilds all 11
+/// B-tree indices), this function performs a lightweight, index-preserving update:
+///
+/// 1. Explicitly cleans up FTS5 entries for the file's existing classes/members
+///    (FTS5 virtual tables have no CASCADE FK support, so stale entries would accumulate)
+/// 2. Deletes the old file row (CASCADE removes classes, members, etc.)
+/// 3. Inserts the new file/class/member data with fresh FTS entries
+///
+/// Returns the list of class names found in the new version of the file,
+/// to be used for completion-cache invalidation by the caller.
+pub fn update_single_file(conn: &mut Connection, result: &ParseResult) -> anyhow::Result<Vec<String>> {
+    conn.busy_timeout(std::time::Duration::from_millis(10_000))?;
+    conn.execute("PRAGMA foreign_keys = ON", [])?;
+
+    let path_obj = Path::new(&result.path);
+    let parent_dir = path_obj.parent().unwrap_or(Path::new(""));
+    let filename = path_obj.file_name().and_then(|s| s.to_str()).unwrap_or("unknown");
+    let extension = path_obj.extension().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
+
+    let tx = conn.transaction()?;
+    let mut string_cache: HashMap<String, i64> = HashMap::new();
+    let mut dir_cache: HashMap<(Option<i64>, i64), i64> = HashMap::new();
+
+    let dir_id  = path::get_or_create_directory(&tx, &mut string_cache, &mut dir_cache, parent_dir)?;
+    let fname_id = get_or_create_string(&tx, &mut string_cache, filename)?;
+
+    // Step 1: collect IDs that are about to be deleted so we can clean up FTS5.
+    // (FTS5 virtual tables don't support CASCADE DELETE via FK constraints.)
+    let existing_file_id: Option<i64> = tx.query_row(
+        "SELECT id FROM files WHERE directory_id = ? AND filename_id = ?",
+        params![dir_id, fname_id],
+        |row| row.get(0),
+    ).optional()?;
+
+    if let Some(fid) = existing_file_id {
+        // Collect old class IDs (before CASCADE deletes them)
+        let class_ids: Vec<i64> = {
+            let mut stmt = tx.prepare("SELECT id FROM classes WHERE file_id = ?")?;
+            let ids: Vec<i64> = stmt.query_map(params![fid], |row| row.get(0))?
+                .filter_map(|r| r.ok())
+                .collect();
+            ids
+        };
+        // Collect old member IDs
+        let member_ids: Vec<i64> = {
+            let mut stmt = tx.prepare("SELECT id FROM members WHERE file_id = ?")?;
+            let ids: Vec<i64> = stmt.query_map(params![fid], |row| row.get(0))?
+                .filter_map(|r| r.ok())
+                .collect();
+            ids
+        };
+        // Remove stale FTS5 entries. `rowid_ref` is UNINDEXED in FTS5 so this
+        // is a table-scan per ID, but files typically have <200 classes+members.
+        for id in class_ids { let _ = tx.execute("DELETE FROM symbols_fts WHERE rowid_ref = ?", params![id]); }
+        for id in member_ids { let _ = tx.execute("DELETE FROM symbols_fts WHERE rowid_ref = ?", params![id]); }
+    }
+
+    // Step 2: delete old file row (CASCADE removes classes, members, enum_values, inheritance, file_includes)
+    let _ = tx.execute("DELETE FROM files WHERE directory_id = ? AND filename_id = ?", params![dir_id, fname_id]);
+
+    // Step 3: insert new data
+    let mut class_names = Vec::new();
+
+    if result.status == "parsed" {
+        if let Some(data) = &result.data {
+            let mut stmt_file = tx.prepare(
+                "INSERT INTO files (directory_id, filename_id, extension, mtime, file_hash, module_id, is_header) VALUES (?, ?, ?, ?, ?, ?, ?)"
+            )?;
+            let mut stmt_class = tx.prepare(
+                "INSERT INTO classes (name_id, namespace_id, base_class_id, file_id, line_number, symbol_type, end_line_number) VALUES (?, ?, ?, ?, ?, ?, ?)"
+            )?;
+            let mut stmt_inh = tx.prepare("INSERT INTO inheritance (child_id, parent_name_id) VALUES (?, ?)")?;
+            let mut stmt_enum = tx.prepare("INSERT INTO enum_values (enum_id, name_id, line_number, file_id) VALUES (?, ?, ?, ?)")?;
+            let mut stmt_mem = tx.prepare(
+                "INSERT INTO members (class_id, name_id, type_id, flags, access, detail, return_type_id, is_static, line_number, file_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            )?;
+            let mut stmt_fts = tx.prepare("INSERT INTO symbols_fts (name, type, class_name, rowid_ref) VALUES (?, ?, ?, ?)")?;
+            let mut stmt_inc = tx.prepare("INSERT INTO file_includes (file_id, include_path_id, base_filename_id) VALUES (?, ?, ?)")?;
+
+            stmt_file.execute(params![
+                dir_id, fname_id, extension,
+                result.mtime as i64, data.new_hash, result.module_id,
+                if extension == "h" || extension == "hpp" { 1i64 } else { 0i64 },
+            ])?;
+            let file_id: i64 = tx.last_insert_rowid();
+
+            for cls in &data.classes {
+                class_names.push(cls.class_name.clone());
+                let cls_name_id = get_or_create_string(&tx, &mut string_cache, &cls.class_name)?;
+                let ns_id = match &cls.namespace {
+                    Some(ns) => Some(get_or_create_string(&tx, &mut string_cache, ns)?),
+                    None => None,
+                };
+                let base_id = match cls.base_classes.first() {
+                    Some(b) => Some(get_or_create_string(&tx, &mut string_cache, b)?),
+                    None => None,
+                };
+                let _ = stmt_class.execute(params![
+                    cls_name_id, ns_id, base_id, file_id,
+                    cls.line as i64, cls.symbol_type, cls.end_line as i64,
+                ]);
+                let class_id: i64 = tx.last_insert_rowid();
+                let _ = stmt_fts.execute(params![cls.class_name, cls.symbol_type, cls.class_name, class_id]);
+
+                for parent in &cls.base_classes {
+                    let p_id = get_or_create_string(&tx, &mut string_cache, parent)?;
+                    let _ = stmt_inh.execute(params![class_id, p_id]);
+                }
+                for mem in &cls.members {
+                    let mem_name_id = get_or_create_string(&tx, &mut string_cache, &mem.name)?;
+                    if mem.mem_type == "enum_item" {
+                        let _ = stmt_enum.execute(params![class_id, mem_name_id, mem.line as i64, file_id]);
+                    } else {
+                        let rt_id = match &mem.return_type {
+                            Some(rt) => Some(get_or_create_string(&tx, &mut string_cache, rt)?),
+                            None => None,
+                        };
+                        let type_id = get_or_create_string(&tx, &mut string_cache, &mem.mem_type)?;
+                        let _ = stmt_mem.execute(params![
+                            class_id, mem_name_id, type_id, mem.flags, mem.access, mem.detail,
+                            rt_id, if mem.flags.contains("static") { 1i64 } else { 0i64 },
+                            mem.line as i64, file_id,
+                        ]);
+                        let _ = stmt_fts.execute(params![mem.name, mem.mem_type, cls.class_name, tx.last_insert_rowid()]);
+                    }
+                }
+            }
+            for inc in &data.includes {
+                let inc_path_id = get_or_create_string(&tx, &mut string_cache, inc)?;
+                let inc_fn = Path::new(inc).file_name().and_then(|s| s.to_str()).unwrap_or(inc);
+                let inc_fn_id = get_or_create_string(&tx, &mut string_cache, inc_fn)?;
+                let _ = stmt_inc.execute(params![file_id, inc_path_id, inc_fn_id]);
+            }
+        }
+    }
+
+    tx.commit()?;
+
+    // Resolve inheritance parent IDs and include links for the newly inserted data only.
+    let _ = conn.execute(
+        "UPDATE inheritance SET parent_class_id = (
+             SELECT c.id FROM classes c WHERE c.name_id = inheritance.parent_name_id LIMIT 1
+         ) WHERE parent_class_id IS NULL",
+        [],
+    );
+    let _ = conn.execute(
+        "UPDATE file_includes
+         SET resolved_file_id = (
+             SELECT f.id FROM files f WHERE f.filename_id = file_includes.base_filename_id LIMIT 1
+         )
+         WHERE resolved_file_id IS NULL
+           AND (SELECT COUNT(*) FROM files f WHERE f.filename_id = file_includes.base_filename_id) = 1",
+        [],
+    );
+
+    Ok(class_names)
 }
 
 pub fn register_module(conn: &Connection, name: &str, root_path: &str, m_type: &str, scope: &str) -> anyhow::Result<i64> {
