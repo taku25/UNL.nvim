@@ -8,6 +8,7 @@ use tokio::sync::mpsc;
 use tracing::info;
 use serde::{Serialize, Deserialize};
 use crate::types::{Progress, ProgressPlan, PhaseInfo, ProgressReporter, ConfigCache};
+use crate::server::watch_filter::WatcherFilter;
 use crate::db;
 use lru::LruCache;
 use std::num::NonZeroUsize;
@@ -144,6 +145,12 @@ pub struct AppState {
     pub completion_caches: Mutex<HashMap<String, Arc<Mutex<CompletionCache>>>>,
     /// Number of in-progress watcher-triggered single-file updates
     pub active_file_updates: AtomicU32,
+    /// Number of in-flight GetCompletions queries (Tree-sitter parse + DB lookup)
+    pub active_completions: AtomicU32,
+    /// Number of in-flight non-completion DB queries
+    pub active_queries: AtomicU32,
+    /// per-project watch filters
+    pub watch_filters: Mutex<HashMap<String, Arc<WatcherFilter>>>,
 }
 
 impl AppState {

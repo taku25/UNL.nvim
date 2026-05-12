@@ -19,9 +19,10 @@
 --
 -- Raw state (for fully custom rendering):
 --   local st = require("UNL.status").get_state()
---   -- st.server_state   : "offline"|"idle"|"refreshing"|"scanning"|"updating"|"busy"
+--   -- st.server_state   : "offline"|"idle"|"refreshing"|"scanning"|"updating"|"completing"|"querying"|"busy"
 --   -- st.project_count  : number
 --   -- st.active_project : string|nil
+--   -- st.detail         : { refreshes, asset_scans, file_updates, completions, queries }
 
 local M = {}
 
@@ -33,6 +34,7 @@ local _state = {
   server_state   = "offline",
   project_count  = 0,
   active_project = nil,
+  detail         = { refreshes = 0, asset_scans = 0, file_updates = 0, completions = 0, queries = 0 },
   timer          = nil,   -- uv_timer_t (excluded from get_state())
   initialized    = false,
 }
@@ -45,6 +47,8 @@ local STATE_CONF = {
   refreshing = { icon = "󰑓", label = "Refresh" },
   scanning   = { icon = "󰄉", label = "Scan"    },
   updating   = { icon = "󰝩", label = "Update"  },
+  completing = { icon = "⚡",  label = "Compl"  },
+  querying   = { icon = "󰆧",  label = "Query"  },
   busy       = { icon = "󰄉", label = "Busy"    },
 }
 
@@ -72,6 +76,15 @@ local function poll()
     _state.server_state   = result.state         or "idle"
     _state.project_count  = result.project_count or 0
     _state.active_project = result.active_project
+    if type(result.detail) == "table" then
+      _state.detail = {
+        refreshes    = result.detail.refreshes    or 0,
+        asset_scans  = result.detail.asset_scans  or 0,
+        file_updates = result.detail.file_updates or 0,
+        completions  = result.detail.completions  or 0,
+        queries      = result.detail.queries      or 0,
+      }
+    end
   end, 5000)
 end
 
@@ -158,6 +171,18 @@ function M.get_text(opts)
     parts[#parts + 1] = conf.label
   end
 
+  -- Append non-zero detail counts for debugging visibility.
+  local d = _state.detail
+  local counts = {}
+  if (d.completions  or 0) > 0 then counts[#counts+1] = "Compl×" .. d.completions  end
+  if (d.file_updates or 0) > 0 then counts[#counts+1] = "Upd×"   .. d.file_updates end
+  if (d.queries      or 0) > 0 then counts[#counts+1] = "Qry×"   .. d.queries      end
+  if (d.refreshes    or 0) > 0 then counts[#counts+1] = "Ref×"   .. d.refreshes    end
+  if (d.asset_scans  or 0) > 0 then counts[#counts+1] = "Scan×"  .. d.asset_scans  end
+  if #counts > 0 then
+    parts[#parts+1] = "[" .. table.concat(counts, " ") .. "]"
+  end
+
   if opts and opts.show_project and _state.active_project then
     local short = vim.fn.fnamemodify(_state.active_project, ":t")
     if short ~= "" then
@@ -169,12 +194,13 @@ function M.get_text(opts)
 end
 
 --- Returns a plain snapshot of the current state (no userdata; safe for deepcopy).
----@return { server_state: string, project_count: integer, active_project: string|nil, initialized: boolean }
+---@return { server_state: string, project_count: integer, active_project: string|nil, detail: table, initialized: boolean }
 function M.get_state()
   return {
     server_state   = _state.server_state,
     project_count  = _state.project_count,
     active_project = _state.active_project,
+    detail         = vim.deepcopy(_state.detail),
     initialized    = _state.initialized,
   }
 end

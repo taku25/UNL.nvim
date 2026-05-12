@@ -1,4 +1,5 @@
 use std::sync::{Arc};
+use std::sync::atomic::Ordering;
 use std::path::{PathBuf};
 use std::time::{Instant};
 use std::collections::{HashSet};
@@ -12,6 +13,22 @@ use crate::server::utils::{convert_params, normalize_to_unix, normalize_to_nativ
 use crate::server::asset::handle_asset_scan;
 use crate::types::{RefreshRequest, ScanRequest, QueryRequest, SetupRequest, ModifyUprojectAddModuleRequest, ModifyTargetAddModuleRequest, ModifyResult};
 use crate::{scanner, db, refresh};
+
+/// RAII guard that decrements the appropriate in-flight query counter when dropped.
+/// Works correctly even if the spawn_blocking closure panics.
+struct QueryCounterGuard {
+    state: Arc<AppState>,
+    is_completion: bool,
+}
+impl Drop for QueryCounterGuard {
+    fn drop(&mut self) {
+        if self.is_completion {
+            self.state.active_completions.fetch_sub(1, Ordering::Relaxed);
+        } else {
+            self.state.active_queries.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+}
 
 #[derive(Deserialize)]
 pub struct DeleteProjectRequest { pub project_root: String }
@@ -181,6 +198,15 @@ pub async fn handle_watch(state: &AppState, params: &Value) -> anyhow::Result<Va
     let root_native = normalize_to_native(&req.project_root);
     let root_path_native = PathBuf::from(&root_native);
     if !root_path_native.exists() { return Err(anyhow::anyhow!("Path does not exist: {}", root_native)); }
+
+    // Build (or replace) the per-project watcher filter.
+    // This reads .unlignore / .gitignore / .p4ignore from the project root.
+    let filter = Arc::new(crate::server::watch_filter::WatcherFilter::build(&root_path_native));
+    {
+        let mut filters = state.watch_filters.lock();
+        filters.insert(root_native.clone(), Arc::clone(&filter));
+    }
+
     let mut watcher = state.watcher.lock();
     match watcher.watch(&root_path_native, notify::RecursiveMode::Recursive) {
         Ok(_) => { info!("Watcher: Started watching: {}", root_native); Ok(Value::String("Watch started".to_string())) }
@@ -221,7 +247,19 @@ pub async fn handle_query(state: Arc<AppState>, params: &Value, tx: mpsc::Sender
     let conn = state.get_read_only_connection(&db_path_native)?;
     let persistent_cache_conn = if let Some(path) = cache_db_path_native { state.get_persistent_cache_connection(&path).ok() } else { None };
     let is_async = matches!(req.query, QueryRequest::GetFilesInModulesAsync { .. } | QueryRequest::SearchFilesInModulesAsync { .. } | QueryRequest::GetClassesInModulesAsync { .. } | QueryRequest::FindSymbolUsagesAsync { .. } | QueryRequest::FindIncludersAsync { .. });
+    let is_completion = matches!(req.query, QueryRequest::GetCompletions { .. });
+
+    // Track in-flight query counts so simple_status can show what's actually running.
+    if is_completion {
+        state.active_completions.fetch_add(1, Ordering::Relaxed);
+    } else {
+        state.active_queries.fetch_add(1, Ordering::Relaxed);
+    }
+    let state_for_counter = Arc::clone(&state);
+
     tokio::task::spawn_blocking(move || {
+        // Decrement the counter on scope exit (panic-safe via Drop).
+        let _counter_guard = QueryCounterGuard { state: Arc::clone(&state_for_counter), is_completion };
         match req.query {
             QueryRequest::GetAssetUsages { asset_path } => {
                 { let active_scans = state.active_asset_scans.lock(); if active_scans.contains(&root_key) { return Ok(json!({ "status": "scanning", "references": [], "derived": [] })); } }
@@ -367,26 +405,38 @@ pub async fn get_status(state: &AppState) -> anyhow::Result<Value> {
 /// Lightweight status check — reads only from in-memory state (no DB / file I/O).
 /// Designed for frequent polling (e.g. lualine statusbar component).
 pub async fn get_simple_status(state: &AppState) -> anyhow::Result<Value> {
-    let is_refreshing = !state.active_refreshes.lock().is_empty();
-    let is_scanning   = !state.active_asset_scans.lock().is_empty();
-    let is_updating   = state.active_file_updates.load(std::sync::atomic::Ordering::Relaxed) > 0;
+    let n_refreshes   = state.active_refreshes.lock().len() as u32;
+    let n_asset_scans = state.active_asset_scans.lock().len() as u32;
+    let n_file_upd    = state.active_file_updates.load(Ordering::Relaxed);
+    let n_completions = state.active_completions.load(Ordering::Relaxed);
+    let n_queries     = state.active_queries.load(Ordering::Relaxed);
     let projects      = state.projects.lock();
     let project_count = projects.len();
     let active_project = projects.keys().next().cloned();
     drop(projects);
 
-    let state_str = match (is_refreshing, is_scanning, is_updating) {
-        (true,  true,  _    ) => "busy",
-        (true,  false, _    ) => "refreshing",
-        (false, true,  _    ) => "scanning",
-        (false, false, true ) => "updating",
-        (false, false, false) => "idle",
+    // Priority: refreshing+scanning > refreshing > scanning > updating > completing > querying > idle
+    let state_str = match (n_refreshes > 0, n_asset_scans > 0, n_file_upd > 0, n_completions > 0, n_queries > 0) {
+        (true,  true,  _, _, _) => "busy",
+        (true,  false, _, _, _) => "refreshing",
+        (false, true,  _, _, _) => "scanning",
+        (false, false, true,  _, _) => "updating",
+        (false, false, false, true,  _) => "completing",
+        (false, false, false, false, true) => "querying",
+        _ => "idle",
     };
 
     Ok(serde_json::json!({
         "state": state_str,
         "project_count": project_count,
         "active_project": active_project,
+        "detail": {
+            "refreshes":    n_refreshes,
+            "asset_scans":  n_asset_scans,
+            "file_updates": n_file_upd,
+            "completions":  n_completions,
+            "queries":      n_queries,
+        }
     }))
 }
 

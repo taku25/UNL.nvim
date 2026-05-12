@@ -4,9 +4,15 @@ use std::sync::atomic::Ordering;
 use rusqlite::params;
 use crate::server::state::{AppState};
 use crate::server::utils::{normalize_to_native};
+use crate::server::watch_filter;
 use crate::{scanner, db};
 
 pub async fn handle_file_change(state: Arc<AppState>, path: PathBuf) {
+    // Layer 1: fast stateless check — avoids any lock acquisition for obvious build dirs.
+    if watch_filter::should_ignore_fast(&path) {
+        return;
+    }
+
     let path_str_native = path.to_string_lossy().to_string();
     let path_str_clean = path_str_native
         .strip_prefix(r"\\?\")
@@ -33,6 +39,16 @@ pub async fn handle_file_change(state: Arc<AppState>, path: PathBuf) {
     };
 
     if let Some((root_clone, db_path_unix)) = target {
+        // Layer 2: per-project gitignore/p4ignore/.unlignore check.
+        {
+            let filters = state.watch_filters.lock();
+            if let Some(filter) = filters.get(&root_clone) {
+                if filter.should_ignore(&path) {
+                    return;
+                }
+            }
+        }
+
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
         if ext == "ini" {
             let mut caches = state.config_caches.lock();

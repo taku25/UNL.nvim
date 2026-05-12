@@ -3,6 +3,7 @@ pub mod handlers;
 pub mod asset;
 pub mod utils;
 pub mod watcher;
+pub mod watch_filter;
 
 use std::sync::{Arc};
 use tokio::net::{TcpStream};

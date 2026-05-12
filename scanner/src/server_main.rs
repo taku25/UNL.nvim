@@ -9,6 +9,7 @@ use tokio::sync::mpsc;
 use tracing::info;
 use unl_core::server::state::{AppState};
 use unl_core::server::watcher::{handle_file_change};
+use unl_core::server::watch_filter::{should_ignore_fast};
 use unl_core::server::{handle_connection};
 use sysinfo::{Pid, System};
 
@@ -67,15 +68,32 @@ async fn main() -> anyhow::Result<()> {
         config_caches: Mutex::new(HashMap::new()),
         completion_caches: Mutex::new(HashMap::new()),
         active_file_updates: AtomicU32::new(0),
+        active_completions: AtomicU32::new(0),
+        active_queries: AtomicU32::new(0),
+        watch_filters: Mutex::new(HashMap::new()),
     });
 
     let state_for_watcher = Arc::clone(&state);
     tokio::spawn(async move {
         let mut last_event: HashMap<PathBuf, Instant> = HashMap::new();
+        let mut event_count: u32 = 0;
         while let Some(path) = rx.recv().await {
+            // Stateless fast-path: drop events for build/generated directories immediately,
+            // before any HashMap lookup or lock acquisition.
+            if should_ignore_fast(&path) { continue; }
+
             if let Some(last) = last_event.get(&path) { if last.elapsed() < Duration::from_millis(500) { continue; } }
             last_event.insert(path.clone(), Instant::now());
             handle_file_change(state_for_watcher.clone(), path).await;
+
+            // Periodically evict stale entries from `last_event` so it does not grow
+            // unboundedly when Unreal generates thousands of unique paths during a build.
+            event_count += 1;
+            if event_count >= 500 {
+                event_count = 0;
+                let cutoff = Instant::now() - Duration::from_secs(60);
+                last_event.retain(|_, t| *t > cutoff);
+            }
         }
     });
 

@@ -3,8 +3,46 @@ use serde_json::{json, Value};
 use tree_sitter::{Parser, Point, Node, Query, QueryCursor, StreamingIterator};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::cell::RefCell;
 use parking_lot::Mutex;
 use crate::server::state::CompletionCache;
+
+/// Query pattern compiled once per thread and reused across all completion calls.
+/// Compiling this pattern is expensive (~1-2ms) — putting it in thread-local eliminates that
+/// cost from every `infer_variable_type` invocation.
+const INFER_QUERY_STR: &str =
+    "(declaration type: (_) @type declarator: (init_declarator declarator: (_) @decl)) \
+     (declaration type: (_) @type declarator: (_) @decl) \
+     (field_declaration type: (_) @type declarator: (init_declarator declarator: (_) @decl)) \
+     (field_declaration type: (_) @type declarator: (_) @decl) \
+     (parameter_declaration type: (_) @type declarator: (_) @decl) \
+     (for_range_loop declarator: (_) @decl) \
+     (condition_clause value: (declaration type: (_) @type declarator: (init_declarator declarator: (_) @decl))) \
+     (condition_clause value: (declaration type: (_) @type declarator: (_) @decl)) \
+     (condition_clause (declaration type: (_) @type declarator: (init_declarator declarator: (_) @decl))) \
+     (field_declaration (_) @type (init_declarator declarator: (_) @decl)) \
+     (field_declaration (_) @type (_) @decl) \
+     (declaration (_) @type (init_declarator declarator: (_) @decl))";
+
+thread_local! {
+    /// Tree-sitter Parser with the Unreal C++ grammar pre-loaded.
+    /// Reused across all completion requests on the same `spawn_blocking` thread.
+    static PARSER: RefCell<Parser> = RefCell::new({
+        let mut p = Parser::new();
+        let lang: tree_sitter::Language = tree_sitter_unreal_cpp::LANGUAGE.into();
+        p.set_language(&lang).expect("thread-local Parser: failed to set Unreal C++ language");
+        p
+    });
+
+    /// Compiled query for variable-type inference. Reused per thread — `Query::new()` is
+    /// expensive (compiles a pattern), doing it once per thread eliminates the per-call cost.
+    static INFER_QUERY: RefCell<Query> = RefCell::new(
+        Query::new(
+            &tree_sitter_unreal_cpp::LANGUAGE.into(),
+            INFER_QUERY_STR,
+        ).expect("thread-local INFER_QUERY: failed to compile query pattern")
+    );
+}
 
 struct RequestContext<'a> {
     conn: &'a Connection,
@@ -149,14 +187,12 @@ pub fn process_completion(
         ctx.current_file_id = get_file_id_by_full_path(conn, fp);
         tracing::debug!("Current file '{}' resolved to file_id: {:?}", fp, ctx.current_file_id);
     }
-    
-    let mut parser = Parser::new();
-    let language: tree_sitter::Language = tree_sitter_unreal_cpp::LANGUAGE.into();
-    parser.set_language(&language)?;
 
-    let tree = parser.parse(content, None).ok_or_else(|| anyhow::anyhow!("Failed to parse content"))?;
+    // Reuse the thread-local Parser — avoids Parser::new() + set_language() on every call.
+    let tree = PARSER.with(|p| p.borrow_mut().parse(content, None))
+        .ok_or_else(|| anyhow::anyhow!("Failed to parse content"))?;
     let root = tree.root_node();
-    
+
     let row = line as usize;
     let col = character as usize;
     
@@ -1221,51 +1257,93 @@ fn is_known_type(ctx: &mut RequestContext, name: &str) -> anyhow::Result<bool> {
 }
 
 fn infer_variable_type(ctx: &mut RequestContext, target_name: &str, root: &Node, content: &str, cursor_row: usize) -> anyhow::Result<Option<String>> {
-    let language: tree_sitter::Language = tree_sitter_unreal_cpp::LANGUAGE.into();
     // Note: for_range_loop の _declaration_specifiers は anonymous rule のため type: フィールドが
     // grammar.js には直接書かれていないが、node-types.json では type: が存在する。
     // for_range_loop パターンは `declarator:` のみキャプチャし、type_node = None の場合に
     // infer_for_range_element_type へ分岐する。
-    let query_str = "(declaration type: (_) @type declarator: (init_declarator declarator: (_) @decl)) (declaration type: (_) @type declarator: (_) @decl) (field_declaration type: (_) @type declarator: (init_declarator declarator: (_) @decl)) (field_declaration type: (_) @type declarator: (_) @decl) (parameter_declaration type: (_) @type declarator: (_) @decl) (for_range_loop declarator: (_) @decl) (condition_clause value: (declaration type: (_) @type declarator: (init_declarator declarator: (_) @decl))) (condition_clause value: (declaration type: (_) @type declarator: (_) @decl)) (condition_clause (declaration type: (_) @type declarator: (init_declarator declarator: (_) @decl))) (field_declaration (_) @type (init_declarator declarator: (_) @decl)) (field_declaration (_) @type (_) @decl) (declaration (_) @type (init_declarator declarator: (_) @decl))";
-    let query = Query::new(&language, query_str)?;
-    let mut cursor = QueryCursor::new();
-    let mut matches = cursor.matches(&query, *root, content.as_bytes());
-    let mut best_type = None;
-    let mut best_row = 0;
-    while let Some(m) = matches.next() {
-        let mut type_node: Option<Node> = None;
-        let mut decl_nodes: Vec<Node> = Vec::new();
-        for cap in m.captures {
-            let c_name = query.capture_names()[cap.index as usize];
-            if c_name == "type" { type_node = Some(cap.node); }
-            else if c_name == "decl" { decl_nodes.push(cap.node); }
+    // Use the thread-local compiled query to avoid re-compiling on every completion call.
+    let mut best_type: Option<String> = None;
+    let mut best_row: usize = 0;
+
+    // Phase 1: collect (type_text, decl_node, match_row) inside the with() closure so that
+    // we don't need to hold the INFER_QUERY borrow while calling ctx methods below.
+    #[derive(Clone)]
+    struct RawMatch {
+        type_text: Option<String>,
+        decl_node_byte_range: std::ops::Range<usize>,
+        decl_node_start_row: usize,
+        is_for_range: bool,
+    }
+    let raw_matches: Vec<RawMatch> = INFER_QUERY.with(|q| {
+        let query = q.borrow();
+        let mut qcursor = QueryCursor::new();
+        let mut iter = qcursor.matches(&*query, *root, content.as_bytes());
+        let mut collected = Vec::new();
+        while let Some(m) = iter.next() {
+            let mut type_node: Option<Node> = None;
+            let mut decl_nodes: Vec<Node> = Vec::new();
+            let mut is_for_range = false;
+            for cap in m.captures {
+                let c_name = query.capture_names()[cap.index as usize];
+                if c_name == "type" { type_node = Some(cap.node); }
+                else if c_name == "decl" {
+                    decl_nodes.push(cap.node);
+                }
+            }
+            // for_range_loop pattern has no @type capture
+            if type_node.is_none() && !decl_nodes.is_empty() { is_for_range = true; }
+            for d in &decl_nodes {
+                collected.push(RawMatch {
+                    type_text: type_node.map(|t| get_node_text(&t, content).trim().to_string()),
+                    decl_node_byte_range: d.byte_range(),
+                    decl_node_start_row: d.start_position().row,
+                    is_for_range,
+                });
+            }
         }
-        for d_node in decl_nodes {
-            if find_identifier_in_decl(&d_node, target_name, content)? {
-                let row = d_node.start_position().row;
-                if row <= cursor_row && (best_type.is_none() || row >= best_row) {
-                    if let Some(t_node) = type_node {
-                        let type_text = get_node_text(&t_node, content).trim();
-                        if type_text == "auto" {
-                            if let Some(inferred) = infer_from_assignment(ctx, target_name, root, content, cursor_row)? {
-                                best_type = Some(inferred);
-                            } else if let Some(range_type) = infer_for_range_element_type(ctx, d_node, root, content, cursor_row)? {
-                                best_type = Some(range_type);
-                            }
-                        } else {
-                            best_type = Some(extract_clean_type(type_text));
-                        }
-                    } else {
-                        // type_node なし = for_range_loop パターン（declarator: のみキャプチャ）
-                        if let Some(range_type) = infer_for_range_element_type(ctx, d_node, root, content, cursor_row)? {
-                            best_type = Some(range_type);
-                        }
-                    }
+        collected
+    });
+
+    // Phase 2: process matches — ctx access happens outside the with() borrow.
+    for rm in &raw_matches {
+        // Fast identifier check without re-creating a node: just scan the byte range.
+        let range = &rm.decl_node_byte_range;
+        if range.end > content.len() { continue; }
+        let slice = &content[range.start..range.end];
+        // Quick check before expensive find_identifier_in_decl tree walk
+        if !slice.contains(target_name) { continue; }
+
+        // Re-create the node by descending the tree to the same byte range
+        let d_node = match root.descendant_for_byte_range(range.start, range.end) {
+            Some(n) => n,
+            None => continue,
+        };
+        if !find_identifier_in_decl(&d_node, target_name, content)? { continue; }
+        let row = rm.decl_node_start_row;
+        if row > cursor_row { continue; }
+        if !best_type.is_none() && row < best_row { continue; }
+
+        if rm.is_for_range {
+            if let Some(range_type) = infer_for_range_element_type(ctx, d_node, root, content, cursor_row)? {
+                best_type = Some(range_type);
+                best_row = row;
+            }
+        } else if let Some(ref type_text) = rm.type_text {
+            if type_text == "auto" {
+                if let Some(inferred) = infer_from_assignment(ctx, target_name, root, content, cursor_row)? {
+                    best_type = Some(inferred);
+                    best_row = row;
+                } else if let Some(range_type) = infer_for_range_element_type(ctx, d_node, root, content, cursor_row)? {
+                    best_type = Some(range_type);
                     best_row = row;
                 }
+            } else {
+                best_type = Some(extract_clean_type(type_text));
+                best_row = row;
             }
         }
     }
+
     if best_type.is_none() { best_type = infer_from_assignment(ctx, target_name, root, content, cursor_row)?; }
     Ok(best_type)
 }
