@@ -3,6 +3,7 @@ use serde_json::{json, Value};
 use crate::types::QueryRequest;
 
 pub mod asset;
+pub mod check_includes;
 pub mod class;
 pub mod include;
 pub mod module;
@@ -89,6 +90,9 @@ pub fn process_query(conn: &Connection, request: QueryRequest) -> anyhow::Result
 
         QueryRequest::GetIncludeCompletions { file_path, prefix } =>
             include::get_include_completions(conn, &file_path, &prefix),
+
+        QueryRequest::CheckIncludes { file_path, content } =>
+            check_includes::check_includes(conn, &file_path, &content),
 
         _ => Err(anyhow::anyhow!("Query type not yet implemented in new structure: {:?}", request)),
     }

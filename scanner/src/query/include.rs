@@ -152,7 +152,7 @@ pub fn get_include_completions(
 
 /// ファイルのフルパスからモジュールルートを除いたインクルードパスを計算する。
 /// `Public/`, `Classes/`, `Private/` などの中間ディレクトリを除く。
-fn compute_include_path(full_path: &str, module_root: &str) -> String {
+pub fn compute_include_path(full_path: &str, module_root: &str) -> String {
     // パスを正規化（バックスラッシュ → スラッシュ）
     let full = full_path.replace('\\', "/");
     let root = module_root.replace('\\', "/");
@@ -172,7 +172,7 @@ fn compute_include_path(full_path: &str, module_root: &str) -> String {
 
 /// `Public/GameFramework/Actor.h` → `GameFramework/Actor.h`
 /// `Private/Foo.h` → skip (privateヘッダーは公開しない)
-fn strip_visibility_prefix(relative: &str) -> &str {
+pub fn strip_visibility_prefix(relative: &str) -> &str {
     // 先頭のセグメントを確認
     let public_prefixes = ["Public/", "Classes/", "Interfaces/"];
     let private_prefixes = ["Private/", "Internal/"];

@@ -287,6 +287,12 @@ function M.get_include_completions(file_path, prefix, callback)
     remote.get_include_completions(file_path, prefix, callback)
 end
 
+--- バッファ内の #include 不足を検出する
+--- callback(result): result = { missing = [{symbol, header, line}], insert_line = N }
+function M.check_includes(file_path, content, callback)
+    remote.check_includes(file_path, content, callback)
+end
+
 --- 汎用的な RPC クエリ
 function M.query(kind, args, callback)
     remote.request(kind, args, callback)

@@ -308,6 +308,10 @@ pub enum QueryRequest {
         file_path: String,
         prefix: String,
     },
+    CheckIncludes {
+        file_path: String,
+        content: String,
+    },
     GetAssetUsages {
         asset_path: String,
     },

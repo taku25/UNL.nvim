@@ -398,4 +398,11 @@ function M.get_include_completions(file_path, prefix, cb)
     }, cb)
 end
 
+function M.check_includes(file_path, content, cb)
+    M.request("CheckIncludes", {
+        file_path = file_path,
+        content = content,
+    }, cb)
+end
+
 return M
