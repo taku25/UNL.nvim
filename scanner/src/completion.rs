@@ -24,6 +24,14 @@ const INFER_QUERY_STR: &str =
      (field_declaration (_) @type (_) @decl) \
      (declaration (_) @type (init_declarator declarator: (_) @decl))";
 
+const ASSIGN_QUERY_STR: &str =
+    "(declaration type: (_) declarator: (init_declarator declarator: (_) @decl value: (_) @value)) \
+     (declaration declarator: (_) @decl value: (_) @value) \
+     (condition_clause value: (declaration type: (_) declarator: (init_declarator declarator: (_) @decl value: (_) @value))) \
+     (condition_clause value: (declaration type: (_) declarator: (_) @decl value: (_) @value)) \
+     (condition_clause value: (declaration declarator: (_) @decl value: (_) @value)) \
+     (assignment_expression left: (_) @decl right: (_) @value)";
+
 thread_local! {
     /// Tree-sitter Parser with the Unreal C++ grammar pre-loaded.
     /// Reused across all completion requests on the same `spawn_blocking` thread.
@@ -41,6 +49,14 @@ thread_local! {
             &tree_sitter_unreal_cpp::LANGUAGE.into(),
             INFER_QUERY_STR,
         ).expect("thread-local INFER_QUERY: failed to compile query pattern")
+    );
+
+    /// Compiled query for assignment-based type inference (`auto x = expr`).
+    static ASSIGN_QUERY: RefCell<Query> = RefCell::new(
+        Query::new(
+            &tree_sitter_unreal_cpp::LANGUAGE.into(),
+            ASSIGN_QUERY_STR,
+        ).expect("thread-local ASSIGN_QUERY: failed to compile query pattern")
     );
 }
 
@@ -609,13 +625,46 @@ fn unwrap_container_type(t: &str) -> String {
             let wrapper = t[..start].trim();
             let inner = &t[start + 1..end];
             if wrapper == "TMap" {
-                return get_template_argument(inner, 1).to_string();
-            } else if wrapper == "TArray" || wrapper == "TSet" {
-                return inner.trim().to_string();
+                return unwrap_element_type(get_template_argument(inner, 1));
+            } else if wrapper == "TArray" || wrapper == "TSet" || wrapper == "TQueue" || wrapper == "TSortedMap" {
+                return unwrap_element_type(inner.trim());
+            } else if is_smart_ptr_wrapper(wrapper) {
+                // TObjectPtr<T>, TWeakObjectPtr<T> etc. used directly as subscript result
+                return extract_clean_type(inner.trim());
             }
         }
     }
+    // T* → T
+    let t = t.trim_end_matches('*').trim_end_matches('&').trim();
     t.to_string()
+}
+
+/// コンテナ要素型のスマートポインタ・ポインタをアンラップする。
+/// TArray<TObjectPtr<T>> → T,  TArray<T*> → T
+fn unwrap_element_type(element: &str) -> String {
+    let element = element.trim();
+    // pointer: T* or T&
+    let stripped = element.trim_end_matches('*').trim_end_matches('&').trim();
+    if stripped != element {
+        return stripped.to_string();
+    }
+    // smart pointer wrapper: TObjectPtr<T> etc.
+    if let Some(lt) = element.find('<') {
+        if let Some(gt) = element.rfind('>') {
+            let wrapper = element[..lt].trim();
+            if is_smart_ptr_wrapper(wrapper) {
+                return extract_clean_type(element[lt + 1..gt].trim());
+            }
+        }
+    }
+    element.to_string()
+}
+
+fn is_smart_ptr_wrapper(name: &str) -> bool {
+    matches!(name,
+        "TObjectPtr" | "TWeakObjectPtr" | "TSharedPtr" | "TSharedRef" |
+        "TUniquePtr" | "TWeakPtr" | "TStrongObjectPtr" | "TSoftObjectPtr"
+    )
 }
 
 fn get_template_argument(inner: &str, index: usize) -> &str {
@@ -1530,30 +1579,60 @@ fn find_identifier_in_decl(node: &Node, target_name: &str, content: &str) -> any
 }
 
 fn infer_from_assignment(ctx: &mut RequestContext, target_name: &str, root: &Node, content: &str, cursor_row: usize) -> anyhow::Result<Option<String>> {
-    let language: tree_sitter::Language = tree_sitter_unreal_cpp::LANGUAGE.into();
-    let query_str = "(declaration type: (_) declarator: (init_declarator declarator: (_) @decl value: (_) @value)) (declaration declarator: (_) @decl value: (_) @value) (condition_clause value: (declaration type: (_) declarator: (init_declarator declarator: (_) @decl value: (_) @value))) (condition_clause value: (declaration type: (_) declarator: (_) @decl value: (_) @value)) (condition_clause value: (declaration declarator: (_) @decl value: (_) @value)) (assignment_expression left: (_) @decl right: (_) @value)";
-    let query = Query::new(&language, query_str)?;
-    let mut cursor = QueryCursor::new();
-    let mut matches = cursor.matches(&query, *root, content.as_bytes());
-    while let Some(m) = matches.next() {
-        let (mut decl_node, mut value_node) = (None, None);
-        for cap in m.captures {
-            let c_name = query.capture_names()[cap.index as usize];
-            if c_name == "decl" { decl_node = Some(cap.node); } else if c_name == "value" { value_node = Some(cap.node); }
+    #[derive(Clone)]
+    struct AssignMatch {
+        decl_byte_range: std::ops::Range<usize>,
+        decl_kind: String,
+        decl_start_row: usize,
+        value_byte_range: std::ops::Range<usize>,
+    }
+    let raw: Vec<AssignMatch> = ASSIGN_QUERY.with(|q| {
+        let query = q.borrow();
+        let mut qcursor = QueryCursor::new();
+        let mut iter = qcursor.matches(&*query, *root, content.as_bytes());
+        let mut collected = Vec::new();
+        while let Some(m) = iter.next() {
+            let (mut decl_node, mut value_node) = (None, None);
+            for cap in m.captures {
+                let c_name = query.capture_names()[cap.index as usize];
+                if c_name == "decl" { decl_node = Some(cap.node); }
+                else if c_name == "value" { value_node = Some(cap.node); }
+            }
+            if let (Some(d), Some(v)) = (decl_node, value_node) {
+                collected.push(AssignMatch {
+                    decl_byte_range: d.byte_range(),
+                    decl_kind: d.kind().to_string(),
+                    decl_start_row: d.start_position().row,
+                    value_byte_range: v.byte_range(),
+                });
+            }
         }
-        if let (Some(d_node), Some(v_node)) = (decl_node, value_node) {
-            let dk = d_node.kind();
-            if dk == "subscript_expression" || dk == "field_expression" { continue; }
-            let found_name = if dk == "identifier" { get_node_text(&d_node, content).trim() } else { "" };
-            if !found_name.is_empty() && found_name == target_name {
-                let row = d_node.start_position().row;
-                if row <= cursor_row { 
-                    if let Ok(Some(t)) = resolve_expression_type(ctx, v_node, root, content, cursor_row, None) { return Ok(Some(t)); }
-                    return infer_from_value_text(get_node_text(&v_node, content));
-                }
-            } else if find_identifier_in_decl(&d_node, target_name, content)? {
-                let row = d_node.start_position().row;
-                if row <= cursor_row { if let Ok(Some(t)) = resolve_expression_type(ctx, v_node, root, content, cursor_row, None) { return Ok(Some(t)); } }
+        collected
+    });
+
+    for am in &raw {
+        let dk = am.decl_kind.as_str();
+        if dk == "subscript_expression" || dk == "field_expression" { continue; }
+        if am.decl_byte_range.end > content.len() || am.value_byte_range.end > content.len() { continue; }
+        let decl_slice = &content[am.decl_byte_range.clone()];
+        if !decl_slice.contains(target_name) { continue; }
+
+        let d_node = match root.descendant_for_byte_range(am.decl_byte_range.start, am.decl_byte_range.end) {
+            Some(n) => n, None => continue,
+        };
+        let v_node = match root.descendant_for_byte_range(am.value_byte_range.start, am.value_byte_range.end) {
+            Some(n) => n, None => continue,
+        };
+
+        let found_name = if dk == "identifier" { get_node_text(&d_node, content).trim() } else { "" };
+        if !found_name.is_empty() && found_name == target_name {
+            if am.decl_start_row <= cursor_row {
+                if let Ok(Some(t)) = resolve_expression_type(ctx, v_node, root, content, cursor_row, None) { return Ok(Some(t)); }
+                return infer_from_value_text(get_node_text(&v_node, content));
+            }
+        } else if find_identifier_in_decl(&d_node, target_name, content)? {
+            if am.decl_start_row <= cursor_row {
+                if let Ok(Some(t)) = resolve_expression_type(ctx, v_node, root, content, cursor_row, None) { return Ok(Some(t)); }
             }
         }
     }
