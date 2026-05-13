@@ -304,6 +304,10 @@ pub enum QueryRequest {
         file_path: Option<String>,
         absolute_line: Option<u32>,
     },
+    GetIncludeCompletions {
+        file_path: String,
+        prefix: String,
+    },
     GetAssetUsages {
         asset_path: String,
     },

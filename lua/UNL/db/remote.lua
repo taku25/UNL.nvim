@@ -391,4 +391,11 @@ function M.get_completions(content, line, character, file_path, absolute_line, c
     }, cb)
 end
 
+function M.get_include_completions(file_path, prefix, cb)
+    M.request("GetIncludeCompletions", {
+        file_path = file_path,
+        prefix = prefix,
+    }, cb)
+end
+
 return M

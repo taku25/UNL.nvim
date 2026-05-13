@@ -280,6 +280,13 @@ function M.get_completions(opts, callback)
     remote.get_completions(content, line, character, file_path, absolute_line, callback)
 end
 
+--- #include パス補完候補取得
+--- file_path: 現在編集中のファイルパス
+--- prefix: " の後のテキスト (例: "GameFramework/")
+function M.get_include_completions(file_path, prefix, callback)
+    remote.get_include_completions(file_path, prefix, callback)
+end
+
 --- 汎用的な RPC クエリ
 function M.query(kind, args, callback)
     remote.request(kind, args, callback)

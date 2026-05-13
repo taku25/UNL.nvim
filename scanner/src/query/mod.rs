@@ -4,6 +4,7 @@ use crate::types::QueryRequest;
 
 pub mod asset;
 pub mod class;
+pub mod include;
 pub mod module;
 pub mod buffer;
 pub mod config;
@@ -85,6 +86,9 @@ pub fn process_query(conn: &Connection, request: QueryRequest) -> anyhow::Result
 
         QueryRequest::GetFilesInFavoritePaths { dirs, exact_files } =>
             file::get_files_in_favorite_paths(conn, &dirs, &exact_files),
+
+        QueryRequest::GetIncludeCompletions { file_path, prefix } =>
+            include::get_include_completions(conn, &file_path, &prefix),
 
         _ => Err(anyhow::anyhow!("Query type not yet implemented in new structure: {:?}", request)),
     }
