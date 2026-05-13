@@ -5,10 +5,13 @@ local function _normalize(p)
   local ok, np = pcall(vim.fs.normalize, p)
   p = ok and np or p
   
-  -- UNC の先頭はそのまま (//server/share) を許容
   -- バックスラッシュ統一
   p = p:gsub("\\", "/")
-  
+
+  -- 連続スラッシュを正規化: C:///foo → C:/foo, foo//bar → foo/bar
+  -- ただし先頭の // (UNC: //server/share) は保持する
+  p = p:gsub("(.)//+", "%1/")
+
   -- Windowsのドライブレターを大文字に統一 (c:/ -> C:/)
   local is_win = vim.loop.os_uname().version:find("Windows") or vim.fn.has("win32") == 1
   if is_win then
