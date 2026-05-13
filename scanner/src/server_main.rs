@@ -29,8 +29,13 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let log_file = std::fs::OpenOptions::new().create(true).append(true).open(&log_path)?;
+    // UNL_LOG=debug などの環境変数でレベルを上書き可能 (デフォルト INFO)
+    let log_level = std::env::var("UNL_LOG")
+        .ok()
+        .and_then(|s| s.parse::<tracing::Level>().ok())
+        .unwrap_or(tracing::Level::INFO);
     tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::INFO)
+        .with_max_level(log_level)
         .with_writer(Arc::new(log_file))
         .init();
     info!("--- UNL Server Starting (MsgPack) ---");

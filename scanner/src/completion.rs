@@ -209,18 +209,19 @@ pub fn process_completion(
     };
 
     let node_type = node.kind();
-    tracing::debug!("Node at cursor: kind='{}', text='{}'", node_type, get_node_text(&node, content));
+    tracing::info!("[Completion] Node at cursor: kind='{}', text='{}'", node_type, get_node_text(&node, content).chars().take(40).collect::<String>());
     
     // Check if we are inside or near an ERROR node
     let mut target_node = None;
     if node_type == "ERROR" || node_type == "." || node_type == "->" || node_type == "::" {
         if let Some(prev) = get_prev_meaningful_sibling(node) {
-            tracing::debug!("Found meaningful sibling before ERROR/Operator: kind='{}'", prev.kind());
+            tracing::info!("[Completion] Found meaningful sibling before ERROR/Operator: kind='{}', text='{}'", prev.kind(), get_node_text(&prev, content).chars().take(20).collect::<String>());
             target_node = Some(prev);
         } else if let Some(parent) = node.parent() {
+            tracing::info!("[Completion] No prev sibling; parent kind='{}'", parent.kind());
             if parent.kind() == "ERROR" {
                 if let Some(prev) = get_prev_meaningful_sibling(parent) {
-                    tracing::debug!("Found meaningful sibling before parent ERROR: kind='{}'", prev.kind());
+                    tracing::info!("[Completion] Found meaningful sibling before parent ERROR: kind='{}'", prev.kind());
                     target_node = Some(prev);
                 }
             }
@@ -228,7 +229,7 @@ pub fn process_completion(
     }
 
     if let Some(t) = target_node {
-        return resolve_node_and_fetch_members(&mut ctx, t, &root, content, row, None, cache);
+        return resolve_node_and_fetch_members(&mut ctx, t, &root, content, row, absolute_line, None, cache);
     }
 
     let mut curr_opt = Some(node);
@@ -243,7 +244,7 @@ pub fn process_completion(
 
         if let Some(prev) = get_prev_meaningful_sibling(op_node) {
             tracing::debug!("Operator detected (Case 1), target node: kind='{}', text='{}'", prev.kind(), get_node_text(&prev, content));
-            return resolve_node_and_fetch_members(&mut ctx, prev, &root, content, row, None, cache);
+            return resolve_node_and_fetch_members(&mut ctx, prev, &root, content, row, absolute_line, None, cache);
         } else {
             tracing::debug!("Operator detected but no meaningful sibling found. Continuing to traverse up from parent.");
             curr_opt = node.parent(); // Move to parent and let Case 2 handle it
@@ -301,17 +302,17 @@ pub fn process_completion(
 
             if let Some(obj_node) = curr.child_by_field_name("argument") {
                 tracing::debug!("Field expression detected (Case 2), resolving argument with prefix: {:?}", field_prefix);
-                return resolve_node_and_fetch_members(&mut ctx, obj_node, &root, content, row, field_prefix, cache);
+                return resolve_node_and_fetch_members(&mut ctx, obj_node, &root, content, row, absolute_line, field_prefix, cache);
             } else if let Some(first_child) = curr.child(0) {
                 if first_child.kind() != "." && first_child.kind() != "->" {
                     tracing::debug!("Field expression detected (Fallback), resolving first child...");
-                    return resolve_node_and_fetch_members(&mut ctx, first_child, &root, content, row, field_prefix, cache);
+                    return resolve_node_and_fetch_members(&mut ctx, first_child, &root, content, row, absolute_line, field_prefix, cache);
                 }
             }
         } else if p_kind == "call_expression" && (node_type == "." || node_type == "->") {
              if let Some(func_node) = curr.child_by_field_name("function") {
                  tracing::debug!("Call expression parent of operator detected, resolving function...");
-                 return resolve_node_and_fetch_members(&mut ctx, func_node, &root, content, row, None, cache);
+                 return resolve_node_and_fetch_members(&mut ctx, func_node, &root, content, row, absolute_line, None, cache);
              }
         } else if p_kind == "qualified_identifier" {
             let field_prefix = curr.child_by_field_name("name").map(|name_node| get_node_text(&name_node, content).to_string());
@@ -326,13 +327,16 @@ pub fn process_completion(
                 // 2. 親クラス自身のメンバは accessor==class_name となり is_subclass_of 不要で高速
                 if scope_text == "Super" {
                     let current_class = get_enclosing_class_name(&curr, content)
-                        .or_else(|| get_enclosing_class_from_db(&ctx, absolute_line));
+                        .or_else(|| get_enclosing_class_from_db(&ctx, absolute_line))
+                        .or_else(|| get_enclosing_class_from_content_scan(content));
+                    tracing::info!("[Completion] Super:: path2. enclosing_class={:?}", current_class);
                     if let Some(current_class) = current_class {
                         if let Some(parent_class) = get_parent_class_name(&mut ctx, &current_class)? {
-                            tracing::debug!("Super:: → current: {}, parent: {}", current_class, parent_class);
+                            tracing::info!("[Completion] Super:: current={}, parent={}", current_class, parent_class);
                             let members = fetch_members_recursive(&mut ctx, &parent_class, field_prefix, cache, Some(&parent_class))?;
                             return Ok(json!(members));
                         }
+                        tracing::info!("[Completion] Super:: no parent found for '{}'", current_class);
                     }
                     return Ok(json!([]));
                 }
@@ -347,7 +351,7 @@ pub fn process_completion(
                     if ck == "." || ck == "->" || ck == "::" {
                         if let Some(prev) = get_prev_meaningful_sibling(child) {
                              tracing::debug!("Operator detected inside ERROR, resolving previous sibling...");
-                             return resolve_node_and_fetch_members(&mut ctx, prev, &root, content, row, None, cache);
+                             return resolve_node_and_fetch_members(&mut ctx, prev, &root, content, row, absolute_line, None, cache);
                         }
                     }
                 }
@@ -426,10 +430,11 @@ fn resolve_node_and_fetch_members(
     root: &Node,
     content: &str,
     cursor_row: usize,
+    absolute_line: Option<u32>,
     prefix: Option<String>,
     cache: Option<Arc<Mutex<CompletionCache>>>,
 ) -> anyhow::Result<Value> {
-    if let Some(t_name) = resolve_expression_type(ctx, node, root, content, cursor_row)? {
+    if let Some(t_name) = resolve_expression_type(ctx, node, root, content, cursor_row, absolute_line)? {
         let resolved = resolve_typedef(ctx, &t_name)?;
         // Super:: 経由の場合はキャッシュ共有のため accessor_class = resolved (親クラス自身)
         let is_super = get_node_text(&node, content).trim() == "Super";
@@ -452,23 +457,37 @@ fn resolve_expression_type(
     root: &Node,
     content: &str,
     cursor_row: usize,
+    absolute_line: Option<u32>,
 ) -> anyhow::Result<Option<String>> {
     let kind = node.kind();
     tracing::debug!("resolve_expression_type(kind='{}', text='{}')", kind, get_node_text(&node, content));
 
     match kind {
-        "this" => Ok(get_enclosing_class_name(&node, content)),
+        "this" => Ok(get_enclosing_class_name(&node, content)
+            .or_else(|| get_enclosing_class_from_db(ctx, absolute_line))
+            .or_else(|| get_enclosing_class_from_content_scan(content))),
         "identifier" | "type_identifier" | "field_identifier" | "namespace_identifier" | "scoped_type_identifier" => {
             let name = get_node_text(&node, content).trim();
             if name.is_empty() { return Ok(None); }
-            if name == "this" { return Ok(get_enclosing_class_name(&node, content)); }
+            if name == "this" {
+                return Ok(get_enclosing_class_name(&node, content)
+                    .or_else(|| get_enclosing_class_from_db(ctx, absolute_line))
+                    .or_else(|| get_enclosing_class_from_content_scan(content)));
+            }
             // Super はキーワードとして親クラスに解決する
             if name == "Super" {
-                if let Some(current_class) = get_enclosing_class_name(&node, content) {
+                let current_class = get_enclosing_class_name(&node, content)
+                    .or_else(|| get_enclosing_class_from_db(ctx, absolute_line))
+                    .or_else(|| get_enclosing_class_from_content_scan(content));
+                tracing::info!("[Completion] Super identifier: enclosing_class={:?} (content len={})", current_class, content.len());
+                if let Some(current_class) = current_class {
                     if let Some(parent) = get_parent_class_name(ctx, &current_class)? {
-                        tracing::debug!("Super resolved via identifier: {} → {}", current_class, parent);
+                        tracing::info!("[Completion] Super resolved: {} → {}", current_class, parent);
                         return Ok(Some(parent));
                     }
+                    tracing::info!("[Completion] Super: enclosing='{}' but no parent found", current_class);
+                } else {
+                    tracing::info!("[Completion] Super: no enclosing class found (content len={})", content.len());
                 }
                 return Ok(None);
             }
@@ -513,7 +532,7 @@ fn resolve_expression_type(
         }
         "init_declarator" => {
             if let Some(val_node) = node.child_by_field_name("value") {
-                return resolve_expression_type(ctx, val_node, root, content, cursor_row);
+                return resolve_expression_type(ctx, val_node, root, content, cursor_row, absolute_line);
             }
             Ok(None)
         }
@@ -522,14 +541,14 @@ fn resolve_expression_type(
                 let func_kind = func_node.kind();
                 if func_kind == "field_expression" {
                     if let Some(obj_node) = func_node.child_by_field_name("argument") {
-                        if let Some(obj_type) = resolve_expression_type(ctx, obj_node, root, content, cursor_row)? {
+                        if let Some(obj_type) = resolve_expression_type(ctx, obj_node, root, content, cursor_row, absolute_line)? {
                             if let Some(field_node) = func_node.child_by_field_name("field") {
                                 return find_member_return_type(ctx, &obj_type, get_node_text(&field_node, content).trim());
                             }
                         }
                     }
                 } else if func_kind == "template_call" || func_kind == "template_function" {
-                    return resolve_expression_type(ctx, func_node, root, content, cursor_row);
+                    return resolve_expression_type(ctx, func_node, root, content, cursor_row, absolute_line);
                 } else {
                     let func_name = get_node_text(&func_node, content).trim();
                     if func_name.contains("::") {
@@ -549,7 +568,7 @@ fn resolve_expression_type(
         }
         "field_expression" => {
             if let Some(obj_node) = node.child_by_field_name("argument") {
-                if let Some(obj_type) = resolve_expression_type(ctx, obj_node, root, content, cursor_row)? {
+                if let Some(obj_type) = resolve_expression_type(ctx, obj_node, root, content, cursor_row, absolute_line)? {
                     if let Some(field_node) = node.child_by_field_name("field") {
                         return find_member_return_type(ctx, &obj_type, get_node_text(&field_node, content).trim());
                     }
@@ -559,7 +578,7 @@ fn resolve_expression_type(
         }
         "subscript_expression" => {
             if let Some(obj_node) = node.child_by_field_name("argument") {
-                if let Some(obj_type) = resolve_expression_type(ctx, obj_node, root, content, cursor_row)? {
+                if let Some(obj_type) = resolve_expression_type(ctx, obj_node, root, content, cursor_row, absolute_line)? {
                     return Ok(Some(unwrap_container_type(&obj_type)));
                 }
             }
@@ -570,7 +589,7 @@ fn resolve_expression_type(
                 if let Some(child) = node.child(i as u32) {
                     let ck = child.kind();
                     if ck != "(" && ck != ")" && ck != "*" && ck != "&" {
-                        return resolve_expression_type(ctx, child, root, content, cursor_row);
+                        return resolve_expression_type(ctx, child, root, content, cursor_row, absolute_line);
                     }
                 }
             }
@@ -689,6 +708,8 @@ fn find_member_return_type(ctx: &mut RequestContext, class_name: &str, member_na
 
 /// Tree-sitter でウィンドウ外にあるクラス宣言を DB の行番号情報から特定するフォールバック。
 /// `absolute_line` はファイル先頭から0始まりの行番号。
+/// .cpp ファイルの場合は DB にクラスエントリが存在しないため、
+/// コンテンツ中の `ClassName::MethodName(` パターンも検索する。
 fn get_enclosing_class_from_db(ctx: &RequestContext, absolute_line: Option<u32>) -> Option<String> {
     let file_id = ctx.current_file_id?;
     let abs_line = absolute_line? as i64;
@@ -707,6 +728,29 @@ fn get_enclosing_class_from_db(ctx: &RequestContext, absolute_line: Option<u32>)
     ).ok()
 }
 
+/// .cpp ファイルでウィンドウ外にある関数定義のクラス名を
+/// コンテンツ先頭付近の `ReturnType ClassName::MethodName(` パターンから推定するフォールバック。
+fn get_enclosing_class_from_content_scan(content: &str) -> Option<String> {
+    // コンテンツ先頭（ウィンドウの最初）にある関数定義パターンを探す
+    // 例: `void UMyClass::BeginPlay(` や `bool UMyClass::SomeFunc(`
+    let re = regex::Regex::new(r"(?m)^\s*(?:[\w:*&<>\s]+\s+)?(\w+)::\w+\s*\(").ok()?;
+    // コンテンツの最初のマッチを取得（ウィンドウ先頭に最も近い関数定義）
+    for cap in re.captures_iter(content) {
+        if let Some(class_match) = cap.get(1) {
+            let class_name = class_match.as_str();
+            // C++キーワードやプリミティブ型を除外
+            match class_name {
+                "if" | "for" | "while" | "return" | "switch" | "case" | "void" |
+                "int" | "bool" | "float" | "double" | "char" | "auto" | "const" |
+                "static" | "virtual" | "inline" | "explicit" | "override" => continue,
+                _ => {}
+            }
+            return Some(class_name.to_string());
+        }
+    }
+    None
+}
+
 fn get_enclosing_class_name(start_node: &Node, content: &str) -> Option<String> {
     let mut curr_opt = Some(*start_node);
     while let Some(curr) = curr_opt {
@@ -721,10 +765,12 @@ fn get_enclosing_class_name(start_node: &Node, content: &str) -> Option<String> 
                 if let Some(qualified) = find_qualified_identifier(decl) {
                     if let Some(scope) = qualified.child_by_field_name("scope") {
                         let text = get_node_text(&scope, content).trim().trim_end_matches("::");
+                        tracing::info!("[Completion] get_enclosing_class_name: function_definition → '{}'", text);
                         return Some(extract_clean_type(text));
                     }
                 }
             }
+            tracing::info!("[Completion] get_enclosing_class_name: function_definition found but no qualified scope");
         }
         curr_opt = curr.parent();
     }
@@ -1439,7 +1485,7 @@ fn infer_for_range_element_type(
                 let iterable_text = get_node_text(&node, content).trim().to_string();
                 let enclosing = get_enclosing_class_name(&node, content);
                 tracing::info!("infer_for_range_element_type: iterable='{}', enclosing_class={:?}", iterable_text, enclosing);
-                match resolve_expression_type(ctx, node, root, content, cursor_row) {
+                match resolve_expression_type(ctx, node, root, content, cursor_row, None) {
                     Ok(Some(iterable_type)) => {
                         let unwrapped = unwrap_container_type(&iterable_type);
                         tracing::info!("infer_for_range_element_type: iterable_type='{}' -> unwrapped='{}'", iterable_type, unwrapped);
@@ -1454,7 +1500,7 @@ fn infer_for_range_element_type(
             for i in 0..parent.child_count() {
                 if let Some(child) = parent.child(i as u32) {
                     if found_colon && child.is_named() && child.kind() != "compound_statement" {
-                        if let Ok(Some(iterable_type)) = resolve_expression_type(ctx, child, root, content, cursor_row) {
+                        if let Ok(Some(iterable_type)) = resolve_expression_type(ctx, child, root, content, cursor_row, None) {
                             return Ok(Some(unwrap_container_type(&iterable_type)));
                         }
                         return Ok(None);
@@ -1499,12 +1545,12 @@ fn infer_from_assignment(ctx: &mut RequestContext, target_name: &str, root: &Nod
             if !found_name.is_empty() && found_name == target_name {
                 let row = d_node.start_position().row;
                 if row <= cursor_row { 
-                    if let Ok(Some(t)) = resolve_expression_type(ctx, v_node, root, content, cursor_row) { return Ok(Some(t)); }
+                    if let Ok(Some(t)) = resolve_expression_type(ctx, v_node, root, content, cursor_row, None) { return Ok(Some(t)); }
                     return infer_from_value_text(get_node_text(&v_node, content));
                 }
             } else if find_identifier_in_decl(&d_node, target_name, content)? {
                 let row = d_node.start_position().row;
-                if row <= cursor_row { if let Ok(Some(t)) = resolve_expression_type(ctx, v_node, root, content, cursor_row) { return Ok(Some(t)); } }
+                if row <= cursor_row { if let Ok(Some(t)) = resolve_expression_type(ctx, v_node, root, content, cursor_row, None) { return Ok(Some(t)); } }
             }
         }
     }
