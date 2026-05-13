@@ -494,7 +494,10 @@ fn resolve_expression_type(
             if let Some(t) = infer_variable_type(ctx, name, root, content, cursor_row)? {
                 return Ok(Some(t));
             }
-            if let Some(current_class) = get_enclosing_class_name(&node, content) {
+            let enclosing_class = get_enclosing_class_name(&node, content)
+                .or_else(|| get_enclosing_class_from_db(ctx, absolute_line))
+                .or_else(|| get_enclosing_class_from_content_scan(content));
+            if let Some(current_class) = enclosing_class {
                 if let Some(rt) = find_member_return_type(ctx, &current_class, name)? {
                     return Ok(Some(rt));
                 }
