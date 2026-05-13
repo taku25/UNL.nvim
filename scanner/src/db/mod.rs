@@ -7,9 +7,6 @@ use rusqlite::{params, Connection, OptionalExtension};
 use crate::types::{ParseResult, ProgressReporter};
 
 pub const DB_VERSION: i32 = 20;
-/// 補完キャッシュのバージョン。補完ロジックを変更したらインクリメントすること。
-/// 起動時にDBのバージョンと一致しない場合はキャッシュを全削除する。
-pub const COMPLETION_CACHE_VERSION: i32 = 4;
 
 pub fn ensure_correct_version(db_path: &str) -> anyhow::Result<bool> {
     let mut version_match = false;
@@ -593,33 +590,4 @@ pub fn get_components(conn: &Connection) -> anyhow::Result<serde_json::Value> {
     Ok(serde_json::json!(results))
 }
 
-pub fn init_cache_db(conn: &Connection) -> rusqlite::Result<()> {
-    conn.execute("CREATE TABLE IF NOT EXISTS persistent_cache (key TEXT PRIMARY KEY, value BLOB NOT NULL, hit_count INTEGER DEFAULT 1, last_used INTEGER NOT NULL)", [])?;
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_cache_last_used ON persistent_cache(last_used)", [])?;
-    conn.execute("CREATE TABLE IF NOT EXISTS cache_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)", [])?;
 
-    // バージョンチェック: 古いキャッシュを全削除
-    let stored_version: Option<i32> = conn
-        .query_row(
-            "SELECT value FROM cache_meta WHERE key = 'completion_cache_version'",
-            [],
-            |row| row.get::<_, String>(0),
-        )
-        .ok()
-        .and_then(|v| v.parse().ok());
-
-    if stored_version != Some(COMPLETION_CACHE_VERSION) {
-        conn.execute("DELETE FROM persistent_cache", [])?;
-        conn.execute(
-            "INSERT OR REPLACE INTO cache_meta (key, value) VALUES ('completion_cache_version', ?)",
-            [COMPLETION_CACHE_VERSION.to_string()],
-        )?;
-        tracing::info!(
-            "Completion cache version changed ({:?} -> {}), cache cleared.",
-            stored_version,
-            COMPLETION_CACHE_VERSION
-        );
-    }
-
-    Ok(())
-}

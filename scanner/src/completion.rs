@@ -1,4 +1,4 @@
-use rusqlite::{Connection, params, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
 use tree_sitter::{Parser, Point, Node, Query, QueryCursor, StreamingIterator};
 use std::collections::HashMap;
@@ -177,7 +177,6 @@ pub fn process_completion(
     _file_path: Option<String>,
     absolute_line: Option<u32>,
     cache: Option<Arc<Mutex<CompletionCache>>>,
-    persistent_cache: Option<Arc<Mutex<Connection>>>,
 ) -> anyhow::Result<Value> {
     tracing::debug!("--- Completion Request at {}:{} ---", line, character);
     let mut ctx = RequestContext::new(conn);
@@ -229,7 +228,7 @@ pub fn process_completion(
     }
 
     if let Some(t) = target_node {
-        return resolve_node_and_fetch_members(&mut ctx, t, &root, content, row, None, cache, persistent_cache);
+        return resolve_node_and_fetch_members(&mut ctx, t, &root, content, row, None, cache);
     }
 
     let mut curr_opt = Some(node);
@@ -244,7 +243,7 @@ pub fn process_completion(
 
         if let Some(prev) = get_prev_meaningful_sibling(op_node) {
             tracing::debug!("Operator detected (Case 1), target node: kind='{}', text='{}'", prev.kind(), get_node_text(&prev, content));
-            return resolve_node_and_fetch_members(&mut ctx, prev, &root, content, row, None, cache, persistent_cache);
+            return resolve_node_and_fetch_members(&mut ctx, prev, &root, content, row, None, cache);
         } else {
             tracing::debug!("Operator detected but no meaningful sibling found. Continuing to traverse up from parent.");
             curr_opt = node.parent(); // Move to parent and let Case 2 handle it
@@ -302,17 +301,17 @@ pub fn process_completion(
 
             if let Some(obj_node) = curr.child_by_field_name("argument") {
                 tracing::debug!("Field expression detected (Case 2), resolving argument with prefix: {:?}", field_prefix);
-                return resolve_node_and_fetch_members(&mut ctx, obj_node, &root, content, row, field_prefix, cache, persistent_cache);
+                return resolve_node_and_fetch_members(&mut ctx, obj_node, &root, content, row, field_prefix, cache);
             } else if let Some(first_child) = curr.child(0) {
                 if first_child.kind() != "." && first_child.kind() != "->" {
                     tracing::debug!("Field expression detected (Fallback), resolving first child...");
-                    return resolve_node_and_fetch_members(&mut ctx, first_child, &root, content, row, field_prefix, cache, persistent_cache);
+                    return resolve_node_and_fetch_members(&mut ctx, first_child, &root, content, row, field_prefix, cache);
                 }
             }
         } else if p_kind == "call_expression" && (node_type == "." || node_type == "->") {
              if let Some(func_node) = curr.child_by_field_name("function") {
                  tracing::debug!("Call expression parent of operator detected, resolving function...");
-                 return resolve_node_and_fetch_members(&mut ctx, func_node, &root, content, row, None, cache, persistent_cache);
+                 return resolve_node_and_fetch_members(&mut ctx, func_node, &root, content, row, None, cache);
              }
         } else if p_kind == "qualified_identifier" {
             let field_prefix = curr.child_by_field_name("name").map(|name_node| get_node_text(&name_node, content).to_string());
@@ -331,14 +330,14 @@ pub fn process_completion(
                     if let Some(current_class) = current_class {
                         if let Some(parent_class) = get_parent_class_name(&mut ctx, &current_class)? {
                             tracing::debug!("Super:: → current: {}, parent: {}", current_class, parent_class);
-                            let members = fetch_members_recursive(&mut ctx, &parent_class, field_prefix, cache, persistent_cache, Some(&parent_class))?;
+                            let members = fetch_members_recursive(&mut ctx, &parent_class, field_prefix, cache, Some(&parent_class))?;
                             return Ok(json!(members));
                         }
                     }
                     return Ok(json!([]));
                 }
 
-                return resolve_static_members(&mut ctx, scope_text, field_prefix, cache, persistent_cache);
+                return resolve_static_members(&mut ctx, scope_text, field_prefix, cache);
             }
         } else if p_kind == "ERROR" {
             let count = curr.child_count();
@@ -348,7 +347,7 @@ pub fn process_completion(
                     if ck == "." || ck == "->" || ck == "::" {
                         if let Some(prev) = get_prev_meaningful_sibling(child) {
                              tracing::debug!("Operator detected inside ERROR, resolving previous sibling...");
-                             return resolve_node_and_fetch_members(&mut ctx, prev, &root, content, row, None, cache, persistent_cache.clone());
+                             return resolve_node_and_fetch_members(&mut ctx, prev, &root, content, row, None, cache);
                         }
                     }
                 }
@@ -368,7 +367,7 @@ pub fn process_completion(
             .or_else(|| get_enclosing_class_from_db(&ctx, absolute_line));
 
         if let Some(current_class) = current_class {
-            if let Ok(members) = fetch_members_recursive(&mut ctx, &current_class, Some(prefix.to_string()), cache.as_ref().map(Arc::clone), persistent_cache.clone(), Some(&current_class)) {
+            if let Ok(members) = fetch_members_recursive(&mut ctx, &current_class, Some(prefix.to_string()), cache.as_ref().map(Arc::clone), Some(&current_class)) {
                 results.extend(members);
             }
         }
@@ -429,7 +428,6 @@ fn resolve_node_and_fetch_members(
     cursor_row: usize,
     prefix: Option<String>,
     cache: Option<Arc<Mutex<CompletionCache>>>,
-    persistent_cache: Option<Arc<Mutex<Connection>>>,
 ) -> anyhow::Result<Value> {
     if let Some(t_name) = resolve_expression_type(ctx, node, root, content, cursor_row)? {
         let resolved = resolve_typedef(ctx, &t_name)?;
@@ -442,7 +440,7 @@ fn resolve_node_and_fetch_members(
         };
         tracing::debug!("Final type for member lookup: '{}', accessor_class: {:?}, prefix: {:?}", resolved, accessor_class_str, prefix);
         
-        let members = fetch_members_recursive(ctx, &resolved, prefix, cache, persistent_cache, accessor_class_str.as_deref())?;
+        let members = fetch_members_recursive(ctx, &resolved, prefix, cache, accessor_class_str.as_deref())?;
         return Ok(json!(members));
     }
     Ok(json!([]))
@@ -687,7 +685,8 @@ fn find_member_return_type(ctx: &mut RequestContext, class_name: &str, member_na
     }
     Ok(None)
 }
-
+
+
 /// Tree-sitter でウィンドウ外にあるクラス宣言を DB の行番号情報から特定するフォールバック。
 /// `absolute_line` はファイル先頭から0始まりの行番号。
 fn get_enclosing_class_from_db(ctx: &RequestContext, absolute_line: Option<u32>) -> Option<String> {
@@ -828,11 +827,10 @@ fn resolve_static_members(
     scope_name: &str,
     prefix: Option<String>,
     cache: Option<Arc<Mutex<CompletionCache>>>,
-    persistent_cache: Option<Arc<Mutex<Connection>>>,
 ) -> anyhow::Result<Value> {
     let clean_scope = extract_clean_type(scope_name);
     let t_name = resolve_typedef(ctx, &clean_scope)?;
-    let members = fetch_members_recursive(ctx, &t_name, prefix, cache, persistent_cache, None)?;
+    let members = fetch_members_recursive(ctx, &t_name, prefix, cache, None)?;
     Ok(json!(members))
 }
 
@@ -881,7 +879,6 @@ fn fetch_members_recursive(
     class_name: &str, 
     prefix: Option<String>, 
     cache: Option<Arc<Mutex<CompletionCache>>>,
-    persistent_cache: Option<Arc<Mutex<Connection>>>,
     accessor_class: Option<&str>,
 ) -> anyhow::Result<Vec<Value>> {
     let prefix_val = prefix.as_deref().unwrap_or("");
@@ -898,19 +895,6 @@ fn fetch_members_recursive(
         }
     }
 
-    // 2. Try Persistent Cache
-    if let Some(pc_mutex) = &persistent_cache {
-        let pc = pc_mutex.lock();
-        let mut stmt = pc.prepare("SELECT value FROM persistent_cache WHERE key = ?")?;
-        let res: rusqlite::Result<Vec<u8>> = stmt.query_row([&cache_key], |row| row.get(0));
-        if let Ok(blob) = res {
-            if let Ok(arr_val) = serde_json::from_slice::<Value>(&blob) {
-                if let Some(arr) = arr_val.as_array() {
-                    return Ok(arr.clone());
-                }
-            }
-        }
-    }
 
     // テンプレート引数付きの型名（例: TArray<FGameplayTag>）はDBにそのまま登録されていないことが多い。
     // まずフル名で検索し、見つからなければ '<' 以前のベース名（例: TArray）で再試行する。
@@ -1084,14 +1068,6 @@ fn fetch_members_recursive(
         c.put(class_name, &cache_key, result_json.clone());
     }
 
-    // 4. Store in Persistent Cache
-    if let Some(pc_mutex) = &persistent_cache {
-        let pc = pc_mutex.lock();
-        if let Ok(blob) = serde_json::to_vec(&result_json) {
-            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
-            let _ = pc.execute("INSERT OR REPLACE INTO persistent_cache (key, value, last_used) VALUES (?, ?, ?)", params![cache_key, blob, now]);
-        }
-    }
 
     Ok(result)
 }

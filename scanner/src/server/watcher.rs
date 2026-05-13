@@ -1,7 +1,6 @@
 use std::sync::Arc;
 use std::path::{PathBuf};
 use std::sync::atomic::Ordering;
-use rusqlite::params;
 use crate::server::state::{AppState};
 use crate::server::utils::{normalize_to_native};
 use crate::server::watch_filter;
@@ -66,15 +65,7 @@ pub async fn handle_file_change(state: Arc<AppState>, path: PathBuf) {
         
         let db_path_native = normalize_to_native(&db_path_unix);
         let conn_arc = match state.get_connection(&db_path_native) { Ok(c) => c, Err(_) => return };
-        let cache_db_path = {
-            let projects = state.projects.lock();
-            projects.get(&root_clone).and_then(|ctx| ctx.cache_db_path.clone())
-        };
         let path_str_for_scan = path_str_unix.clone();
-        let persistent_cache_arc = cache_db_path.as_deref().and_then(|p| {
-            let native = normalize_to_native(p);
-            state.get_persistent_cache_connection(&native).ok()
-        });
         state.active_file_updates.fetch_add(1, Ordering::Relaxed);
         let state_for_update = state.clone();
         tokio::task::spawn_blocking(move || {
@@ -93,19 +84,6 @@ pub async fn handle_file_change(state: Arc<AppState>, path: PathBuf) {
                             let cache_arc = state_for_update.get_completion_cache(&root_clone);
                             let mut cache = cache_arc.lock();
                             for cls in &class_names { cache.invalidate_class(cls); }
-
-                            // Also invalidate persistent (.cache.db) entries so stale
-                            // completions are not served after the in-memory eviction.
-                            if let Some(pc_arc) = &persistent_cache_arc {
-                                let pc = pc_arc.lock();
-                                for cls in &class_names {
-                                    // cache keys are "{class_name}:{prefix}:{accessor}"
-                                    let _ = pc.execute(
-                                        "DELETE FROM persistent_cache WHERE key LIKE ?",
-                                        params![format!("{}:%", cls)],
-                                    );
-                                }
-                            }
                         }
                         Err(e) => tracing::error!("Watcher: Failed to save scan results: {}", e),
                     }

@@ -56,8 +56,6 @@ impl ProgressReporter for RpcProgressReporter {
 pub struct ProjectContext {
     pub db_path: String,
     #[serde(default)]
-    pub cache_db_path: Option<String>,
-    #[serde(default)]
     pub vcs_hash: Option<String>,
     #[serde(skip, default = "Instant::now")]
     pub _last_refresh: Instant,
@@ -132,7 +130,6 @@ pub struct AppState {
     pub projects: Mutex<HashMap<String, ProjectContext>>,
     pub connections: Mutex<HashMap<String, Arc<Mutex<rusqlite::Connection>>>>,
     pub read_only_connections: Mutex<HashMap<String, Arc<Mutex<rusqlite::Connection>>>>,
-    pub persistent_cache_connections: Mutex<HashMap<String, Arc<Mutex<rusqlite::Connection>>>>,
     pub active_refreshes: Mutex<HashSet<String>>,
     pub active_asset_scans: Mutex<HashSet<String>>,
     pub watcher: Mutex<notify::RecommendedWatcher>,
@@ -231,25 +228,4 @@ impl AppState {
         cache
     }
 
-    pub fn get_persistent_cache_connection(&self, cache_db_path: &str) -> anyhow::Result<Arc<Mutex<rusqlite::Connection>>> {
-        let mut conns = self.persistent_cache_connections.lock();
-        if let Some(conn) = conns.get(cache_db_path) {
-            return Ok(Arc::clone(conn));
-        }
-
-        info!("Opening persistent cache database: {}", cache_db_path);
-        let conn = rusqlite::Connection::open(cache_db_path)?;
-        conn.busy_timeout(std::time::Duration::from_secs(2))?;
-
-        // キャッシュ用なのでパフォーマンス優先（多少の破損は許容）
-        let _ = conn.pragma_update(None, "journal_mode", "WAL");
-        let _ = conn.pragma_update(None, "synchronous", "OFF");
-        let _ = conn.pragma_update(None, "temp_store", "MEMORY");
-        
-        db::init_cache_db(&conn)?;
-
-        let conn_arc = Arc::new(Mutex::new(conn));
-        conns.insert(cache_db_path.to_string(), Arc::clone(&conn_arc));
-        Ok(conn_arc)
-    }
 }
