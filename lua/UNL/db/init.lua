@@ -276,7 +276,8 @@ function M.get_completions(opts, callback)
     local line = opts.line
     local character = opts.character
     local file_path = opts.file_path
-    remote.get_completions(content, line, character, file_path, callback)
+    local absolute_line = opts.absolute_line
+    remote.get_completions(content, line, character, file_path, absolute_line, callback)
 end
 
 --- 汎用的な RPC クエリ

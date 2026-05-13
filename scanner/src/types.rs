@@ -302,6 +302,7 @@ pub enum QueryRequest {
         line: u32,
         character: u32,
         file_path: Option<String>,
+        absolute_line: Option<u32>,
     },
     GetAssetUsages {
         asset_path: String,

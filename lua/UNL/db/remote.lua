@@ -381,12 +381,13 @@ function M.get_files_in_favorite_paths(dirs, exact_files, cb)
     M.request("GetFilesInFavoritePaths", { dirs = dirs, exact_files = exact_files }, cb)
 end
 
-function M.get_completions(content, line, character, file_path, cb)
+function M.get_completions(content, line, character, file_path, absolute_line, cb)
     M.request("GetCompletions", {
         content = content,
         line = line,
         character = character,
-        file_path = file_path
+        file_path = file_path,
+        absolute_line = absolute_line,
     }, cb)
 end
 

@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use rusqlite::{params, Connection, OptionalExtension};
 use crate::types::{ParseResult, ProgressReporter};
 
-pub const DB_VERSION: i32 = 19;
+pub const DB_VERSION: i32 = 20;
 /// 補完キャッシュのバージョン。補完ロジックを変更したらインクリメントすること。
 /// 起動時にDBのバージョンと一致しない場合はキャッシュを全削除する。
 pub const COMPLETION_CACHE_VERSION: i32 = 4;
@@ -223,6 +223,10 @@ fn create_indices(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute("CREATE INDEX IF NOT EXISTS idx_classes_file_id ON classes(file_id)", [])?;
     conn.execute("CREATE INDEX IF NOT EXISTS idx_members_name_id ON members(name_id)", [])?;
     conn.execute("CREATE INDEX IF NOT EXISTS idx_members_file_id ON members(file_id)", [])?;
+    // 補完のclass_id検索に必須（なければ全件スキャン）
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_members_class_id ON members(class_id)", [])?;
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_inheritance_child_id ON inheritance(child_id)", [])?;
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_enum_values_enum_id ON enum_values(enum_id)", [])?;
     conn.execute("CREATE INDEX IF NOT EXISTS idx_file_includes_file_id ON file_includes(file_id)", [])?;
     conn.execute("CREATE INDEX IF NOT EXISTS idx_file_includes_resolved_id ON file_includes(resolved_file_id)", [])?;
     conn.execute("CREATE INDEX IF NOT EXISTS idx_file_includes_base_name ON file_includes(base_filename_id)", [])?;
@@ -235,6 +239,7 @@ fn drop_indices(conn: &Connection) -> rusqlite::Result<()> {
         "idx_files_filename_id", "idx_files_dir_id", 
         "idx_classes_covering", "idx_classes_file_id",
         "idx_members_name_id", "idx_members_file_id",
+        "idx_members_class_id", "idx_inheritance_child_id", "idx_enum_values_enum_id",
         "idx_file_includes_file_id", "idx_file_includes_resolved_id", "idx_file_includes_base_name"
     ];
     for idx in indices {

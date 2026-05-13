@@ -355,9 +355,9 @@ pub async fn handle_query(state: Arc<AppState>, params: &Value, tx: mpsc::Sender
                 let data = crate::query::config::get_config_data_with_cache(&state, &req.project_root, engine_root.as_deref())?;
                 Ok(json!(data))
             }
-            QueryRequest::GetCompletions { content, line, character, file_path } => {
+            QueryRequest::GetCompletions { content, line, character, file_path, absolute_line } => {
                 let cache = state.get_completion_cache(&root_key);
-                crate::completion::process_completion(&conn, &content, line, character, file_path, Some(cache), persistent_cache_conn)
+                crate::completion::process_completion(&conn, &content, line, character, file_path, absolute_line, Some(cache), persistent_cache_conn)
             }
             _ => {
                 if is_async {

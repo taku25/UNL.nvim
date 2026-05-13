@@ -91,10 +91,10 @@ impl<'a> RequestContext<'a> {
 
         // 1. まずは完全一致（UE::Math::TVector などが一個の文字列で登録されている可能性）
         if let Some(name_id) = self.get_string_id(class_name)? {
-            let mut stmt = self.conn.prepare("SELECT id FROM classes WHERE name_id = ?")?;
-            let ids: Vec<i64> = stmt.query_map([name_id], |row| row.get(0))?
-                .filter_map(|r| r.ok())
-                .collect();
+            let ids: Vec<i64> = {
+                let mut stmt = self.conn.prepare_cached("SELECT id FROM classes WHERE name_id = ?")?;
+                let x: Vec<i64> = stmt.query_map([name_id], |row| row.get(0))?.filter_map(|r| r.ok()).collect(); x
+            };
             if !ids.is_empty() { return Ok(ids); }
         }
 
@@ -106,10 +106,10 @@ impl<'a> RequestContext<'a> {
                 let cls_name = parts[parts.len()-1];
                 
                 if let (Some(ns_id), Some(cls_id)) = (self.get_string_id(&ns_name)?, self.get_string_id(cls_name)?) {
-                    let mut stmt = self.conn.prepare("SELECT id FROM classes WHERE name_id = ? AND namespace_id = ?")?;
-                    let ids: Vec<i64> = stmt.query_map([cls_id, ns_id], |row| row.get(0))?
-                        .filter_map(|r| r.ok())
-                        .collect();
+                    let ids: Vec<i64> = {
+                        let mut stmt = self.conn.prepare_cached("SELECT id FROM classes WHERE name_id = ? AND namespace_id = ?")?;
+                        let x: Vec<i64> = stmt.query_map([cls_id, ns_id], |row| row.get(0))?.filter_map(|r| r.ok()).collect(); x
+                    };
                     if !ids.is_empty() { return Ok(ids); }
                 }
                 
@@ -175,6 +175,7 @@ pub fn process_completion(
     line: u32,
     character: u32,
     _file_path: Option<String>,
+    absolute_line: Option<u32>,
     cache: Option<Arc<Mutex<CompletionCache>>>,
     persistent_cache: Option<Arc<Mutex<Connection>>>,
 ) -> anyhow::Result<Value> {
@@ -317,8 +318,27 @@ pub fn process_completion(
             let field_prefix = curr.child_by_field_name("name").map(|name_node| get_node_text(&name_node, content).to_string());
 
             if let Some(scope_node) = curr.child_by_field_name("scope") {
-                tracing::debug!("Qualified identifier detected (Case 2), resolving scope with prefix: {:?}", field_prefix);
-                return resolve_static_members(&mut ctx, get_node_text(&scope_node, content), field_prefix, cache, persistent_cache);
+                let scope_text = get_node_text(&scope_node, content);
+                tracing::debug!("Qualified identifier detected (Case 2), resolving scope '{}' with prefix: {:?}", scope_text, field_prefix);
+
+                // Super:: → 囲むクラスの親クラスのメンバを補完
+                // accessor_class = Some(&parent_class) とすることで:
+                // 1. キャッシュキーが "ParentClass:::ParentClass" になり同じ親を持つ全サブクラスで共有される
+                // 2. 親クラス自身のメンバは accessor==class_name となり is_subclass_of 不要で高速
+                if scope_text == "Super" {
+                    let current_class = get_enclosing_class_name(&curr, content)
+                        .or_else(|| get_enclosing_class_from_db(&ctx, absolute_line));
+                    if let Some(current_class) = current_class {
+                        if let Some(parent_class) = get_parent_class_name(&mut ctx, &current_class)? {
+                            tracing::debug!("Super:: → current: {}, parent: {}", current_class, parent_class);
+                            let members = fetch_members_recursive(&mut ctx, &parent_class, field_prefix, cache, persistent_cache, Some(&parent_class))?;
+                            return Ok(json!(members));
+                        }
+                    }
+                    return Ok(json!([]));
+                }
+
+                return resolve_static_members(&mut ctx, scope_text, field_prefix, cache, persistent_cache);
             }
         } else if p_kind == "ERROR" {
             let count = curr.child_count();
@@ -342,7 +362,12 @@ pub fn process_completion(
         let prefix = get_node_text(&node, content).trim();
         let mut results = Vec::new();
 
-        if let Some(current_class) = get_enclosing_class_name(&node, content) {
+        // Tree-sitterでウィンドウ内に宣言が見えればそれを使う。
+        // 見えない場合（大きなクラスで宣言がウィンドウ外）はDBの行番号で特定する。
+        let current_class = get_enclosing_class_name(&node, content)
+            .or_else(|| get_enclosing_class_from_db(&ctx, absolute_line));
+
+        if let Some(current_class) = current_class {
             if let Ok(members) = fetch_members_recursive(&mut ctx, &current_class, Some(prefix.to_string()), cache.as_ref().map(Arc::clone), persistent_cache.clone(), Some(&current_class)) {
                 results.extend(members);
             }
@@ -408,10 +433,16 @@ fn resolve_node_and_fetch_members(
 ) -> anyhow::Result<Value> {
     if let Some(t_name) = resolve_expression_type(ctx, node, root, content, cursor_row)? {
         let resolved = resolve_typedef(ctx, &t_name)?;
-        let current_class = get_enclosing_class_name(&node, content);
-        tracing::debug!("Final type for member lookup: '{}', current_class: {:?}, prefix: {:?}", resolved, current_class, prefix);
+        // Super:: 経由の場合はキャッシュ共有のため accessor_class = resolved (親クラス自身)
+        let is_super = get_node_text(&node, content).trim() == "Super";
+        let accessor_class_str: Option<String> = if is_super {
+            Some(resolved.clone())
+        } else {
+            get_enclosing_class_name(&node, content)
+        };
+        tracing::debug!("Final type for member lookup: '{}', accessor_class: {:?}, prefix: {:?}", resolved, accessor_class_str, prefix);
         
-        let members = fetch_members_recursive(ctx, &resolved, prefix, cache, persistent_cache, current_class.as_deref())?;
+        let members = fetch_members_recursive(ctx, &resolved, prefix, cache, persistent_cache, accessor_class_str.as_deref())?;
         return Ok(json!(members));
     }
     Ok(json!([]))
@@ -433,6 +464,16 @@ fn resolve_expression_type(
             let name = get_node_text(&node, content).trim();
             if name.is_empty() { return Ok(None); }
             if name == "this" { return Ok(get_enclosing_class_name(&node, content)); }
+            // Super はキーワードとして親クラスに解決する
+            if name == "Super" {
+                if let Some(current_class) = get_enclosing_class_name(&node, content) {
+                    if let Some(parent) = get_parent_class_name(ctx, &current_class)? {
+                        tracing::debug!("Super resolved via identifier: {} → {}", current_class, parent);
+                        return Ok(Some(parent));
+                    }
+                }
+                return Ok(None);
+            }
             if let Some(t) = infer_variable_type(ctx, name, root, content, cursor_row)? {
                 return Ok(Some(t));
             }
@@ -646,6 +687,26 @@ fn find_member_return_type(ctx: &mut RequestContext, class_name: &str, member_na
     }
     Ok(None)
 }
+
+/// Tree-sitter でウィンドウ外にあるクラス宣言を DB の行番号情報から特定するフォールバック。
+/// `absolute_line` はファイル先頭から0始まりの行番号。
+fn get_enclosing_class_from_db(ctx: &RequestContext, absolute_line: Option<u32>) -> Option<String> {
+    let file_id = ctx.current_file_id?;
+    let abs_line = absolute_line? as i64;
+    // 行番号はDBに1始まりで格納されているため +1 する
+    let abs_line_1based = abs_line + 1;
+    ctx.conn.query_row(
+        "SELECT s.text FROM classes c
+         JOIN strings s ON c.name_id = s.id
+         WHERE c.file_id = ?
+           AND c.line_number <= ?
+           AND (c.end_line_number IS NULL OR c.end_line_number >= ?)
+         ORDER BY c.line_number DESC
+         LIMIT 1",
+        [file_id, abs_line_1based, abs_line_1based],
+        |row| row.get::<_, String>(0),
+    ).ok()
+}
 
 fn get_enclosing_class_name(start_node: &Node, content: &str) -> Option<String> {
     let mut curr_opt = Some(*start_node);
@@ -669,6 +730,28 @@ fn get_enclosing_class_name(start_node: &Node, content: &str) -> Option<String> 
         curr_opt = curr.parent();
     }
     None
+}
+
+/// 指定クラスの直接の親クラス名を DB の inheritance テーブルから取得する。
+/// `Super::` 補完に使用。
+fn get_parent_class_name(ctx: &mut RequestContext, class_name: &str) -> anyhow::Result<Option<String>> {
+    let class_ids = ctx.get_class_ids_by_name(class_name)?;
+    for class_id in &class_ids {
+        let mut stmt = ctx.conn.prepare(
+            "SELECT si.text FROM inheritance i
+             JOIN strings si ON i.parent_name_id = si.id
+             WHERE i.child_id = ?
+             LIMIT 1",
+        )?;
+        let mut rows = stmt.query([class_id])?;
+        if let Some(row) = rows.next()? {
+            let parent_name: String = row.get(0)?;
+            if !parent_name.is_empty() {
+                return Ok(Some(parent_name));
+            }
+        }
+    }
+    Ok(None)
 }
 
 fn find_qualified_identifier(node: Node) -> Option<Node> {
@@ -770,13 +853,15 @@ fn is_subclass_of(ctx: &mut RequestContext, child: &str, parent: &str) -> anyhow
         if visited.contains_key(&current_id) { continue; }
         visited.insert(current_id, true);
 
-        let mut stmt = ctx.conn.prepare("
-            SELECT parent_class_id, si.text FROM inheritance i 
-            JOIN strings si ON i.parent_name_id = si.id
-            WHERE child_id = ?")?;
-        let p_rows = stmt.query_map([current_id], |r| Ok((r.get::<_, Option<i64>>(0)?, r.get::<_, String>(1)?)))?;
-        for p in p_rows {
-            let (p_id, p_name) = p?;
+        let parents: Vec<(Option<i64>, String)> = {
+            let mut stmt = ctx.conn.prepare_cached("
+                SELECT parent_class_id, si.text FROM inheritance i 
+                JOIN strings si ON i.parent_name_id = si.id
+                WHERE child_id = ?")?;
+            let x: Vec<(Option<i64>, String)> = stmt.query_map([current_id], |r| Ok((r.get::<_, Option<i64>>(0)?, r.get::<_, String>(1)?)))?
+                .filter_map(|r| r.ok()).collect(); x
+        };
+        for (p_id, p_name) in parents {
             if p_name == parent { found = true; break; }
             if let Some(id) = p_id {
                 queue.push(id);
@@ -843,144 +928,152 @@ fn fetch_members_recursive(
     start_class_ids = ctx.filter_class_ids_by_includes(start_class_ids);
     if start_class_ids.is_empty() { return Ok(Vec::new()); }
 
-    let mut result = Vec::new();
-    let mut seen_members: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
-    let mut queue = start_class_ids;
-    let mut visited = HashMap::new();
-    // 同名クラスが複数IDある場合（.hと複数.cpp実装）に親クラスが重複キューされないよう
-    // クラス名単位でも訪問済みを追跡する
-    let mut visited_class_names: std::collections::HashSet<String> = std::collections::HashSet::new();
-    visited_class_names.insert(class_name.to_string());
     let prefix_search = prefix.as_ref().map(|p| format!("{}%", p));
 
-    while let Some(current_class_id) = queue.pop() {
+    // Phase 1: BFS で全祖先クラスIDを収集（メンバ取得は後でまとめて行う）
+    // prepare_cached を使い、ループ内の prepare() コストを排除
+    let mut all_class_ids: Vec<i64> = Vec::new();
+    let mut bfs_queue = start_class_ids;
+    let mut visited: HashMap<i64, bool> = HashMap::new();
+    let mut visited_class_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+    visited_class_names.insert(class_name.to_string());
+
+    while let Some(current_class_id) = bfs_queue.pop() {
         if visited.contains_key(&current_class_id) { continue; }
         visited.insert(current_class_id, true);
-        
-        let mut sql = format!("
-            {}
-            SELECT smn.text, smt.text, srt.text, access, detail, m.line_number, dp.full_path || '/' || sn.text
-            FROM members m 
-            JOIN strings smn ON m.name_id = smn.id
-            JOIN strings smt ON m.type_id = smt.id
-            LEFT JOIN strings srt ON m.return_type_id = srt.id
-            LEFT JOIN files f ON m.file_id = f.id
-            LEFT JOIN dir_paths dp ON f.directory_id = dp.id
-            LEFT JOIN strings sn ON f.filename_id = sn.id
-            WHERE m.class_id = ?", crate::db::path::PATH_CTE);
-        
-        if prefix_search.is_some() {
-            sql.push_str(" AND smn.text LIKE ?");
-        }
-        sql.push_str(" AND (m.access IS NULL OR m.access != 'impl') ORDER BY smn.text ASC LIMIT 200");
+        all_class_ids.push(current_class_id);
 
-        let mut mem_stmt = ctx.conn.prepare(&sql)?;
-        
-        type MemberRow = (String, String, Option<String>, Option<String>, Option<String>, usize, Option<String>);
-        let member_data: Vec<MemberRow> = if let Some(p) = &prefix_search {
-            let m_rows = mem_stmt.query_map(params![current_class_id, p], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, Option<String>>(2)?,
-                    row.get::<_, Option<String>>(3)?,
-                    row.get::<_, Option<String>>(4)?,
-                    row.get::<_, Option<usize>>(5)?.unwrap_or(0),
-                    row.get::<_, Option<String>>(6).ok().flatten(),
-                ))
-            })?;
-            m_rows.filter_map(|r| r.ok()).collect()
-        } else {
-            let m_rows = mem_stmt.query_map([current_class_id], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, Option<String>>(2)?,
-                    row.get::<_, Option<String>>(3)?,
-                    row.get::<_, Option<String>>(4)?,
-                    row.get::<_, Option<usize>>(5)?.unwrap_or(0),
-                    row.get::<_, Option<String>>(6).ok().flatten(),
-                ))
-            })?;
-            m_rows.filter_map(|r| r.ok()).collect()
+        // 親クラスを取得（スコープを抜けると stmt の借用が解放される）
+        let parents: Vec<(Option<i64>, String)> = {
+            let mut stmt = ctx.conn.prepare_cached(
+                "SELECT parent_class_id, si.text FROM inheritance i 
+                 JOIN strings si ON i.parent_name_id = si.id WHERE child_id = ?"
+            )?;
+            let x: Vec<(Option<i64>, String)> = stmt.query_map([current_class_id], |r| Ok((r.get::<_, Option<i64>>(0)?, r.get::<_, String>(1)?)))?
+                .filter_map(|r| r.ok()).collect(); x
         };
 
-        for (m_name, m_type, r_type, access, detail, line, f_path) in member_data {
-            let access_str = access.as_deref().unwrap_or("");
-
-            // 判定を大幅に緩和
-            let is_accessible = if accessor_val.is_empty() {
-                // クラス外からのアクセス
-                access_str == "public" || access_str.is_empty()
-            } else if accessor_val == class_name {
-                true
-            } else if access_str == "private" {
-                false
-            } else if access_str == "protected" {
-                is_subclass_of(ctx, accessor_val, class_name).unwrap_or(false)
-            } else {
-                true // public or empty
-            };
-
-            if !is_accessible { continue; }
-
-            let ret = r_type.unwrap_or_default();
-            let dedup_key = (m_name.clone(), ret.clone());
-            if seen_members.contains(&dedup_key) { continue; }
-            seen_members.insert(dedup_key);
-
-            let doc = if let Some(path) = f_path {
-                let mut comment = extract_comment_from_file(&path, line, &mut ctx.file_cache);
-                if let Some(d) = &detail {
-                    if !comment.is_empty() { comment.push_str("\n\n"); }
-                    comment.push_str(d);
-                }
-                comment
-            } else {
-                detail.clone().unwrap_or_default()
-            };
-
-            result.push(json!({ 
-                "label": m_name, 
-                "kind": map_kind(&m_type), 
-                "detail": ret, 
-                "documentation": doc, 
-                "insertText": m_name 
-            }));
+        for (p_id, p_name) in parents {
+            if visited_class_names.contains(&p_name) { continue; }
+            visited_class_names.insert(p_name.clone());
+            if let Some(id) = p_id {
+                if !visited.contains_key(&id) { bfs_queue.push(id); }
+            }
+            // 名前で再検索して前方宣言など他のIDも網羅する
+            let ids = ctx.get_class_ids_by_name(&p_name)?;
+            for id in ids {
+                if !visited.contains_key(&id) { bfs_queue.push(id); }
+            }
         }
+        if all_class_ids.len() >= 100 { break; }
+    }
 
-        let mut enum_stmt = ctx.conn.prepare("SELECT sen.text FROM enum_values ev JOIN strings sen ON ev.name_id = sen.id WHERE enum_id = ?")?;
-        let enum_rows = enum_stmt.query_map([current_class_id], |row| {
+    if all_class_ids.is_empty() { return Ok(Vec::new()); }
+
+    // Phase 2: 全クラスIDのメンバを一括クエリ（N クエリ → 1 クエリに削減）
+    let ids_sql = all_class_ids.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(",");
+    let member_sql = format!(
+        "{} SELECT smn.text, smt.text, srt.text, access, detail, m.line_number, dp.full_path || '/' || sn.text
+         FROM members m
+         JOIN strings smn ON m.name_id = smn.id
+         JOIN strings smt ON m.type_id = smt.id
+         LEFT JOIN strings srt ON m.return_type_id = srt.id
+         LEFT JOIN files f ON m.file_id = f.id
+         LEFT JOIN dir_paths dp ON f.directory_id = dp.id
+         LEFT JOIN strings sn ON f.filename_id = sn.id
+         WHERE m.class_id IN ({}) {}
+         AND (m.access IS NULL OR m.access != 'impl')
+         ORDER BY smn.text ASC LIMIT 2000",
+        crate::db::path::PATH_CTE,
+        ids_sql,
+        if prefix_search.is_some() { "AND smn.text LIKE ?" } else { "" }
+    );
+
+    type MemberRow = (String, String, Option<String>, Option<String>, Option<String>, usize, Option<String>);
+    let member_data: Vec<MemberRow> = {
+        let mut mem_stmt = ctx.conn.prepare(&member_sql)?;
+        if let Some(p) = &prefix_search {
+            mem_stmt.query_map([p.as_str()], |row| Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, Option<usize>>(5)?.unwrap_or(0),
+                row.get::<_, Option<String>>(6).ok().flatten(),
+            )))?.filter_map(|r| r.ok()).collect()
+        } else {
+            mem_stmt.query_map([], |row| Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, Option<usize>>(5)?.unwrap_or(0),
+                row.get::<_, Option<String>>(6).ok().flatten(),
+            )))?.filter_map(|r| r.ok()).collect()
+        }
+    };
+
+    let mut result = Vec::new();
+    let mut seen_members: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
+
+    for (m_name, m_type, r_type, access, detail, line, f_path) in member_data {
+        let access_str = access.as_deref().unwrap_or("");
+
+        let is_accessible = if accessor_val.is_empty() {
+            access_str == "public" || access_str.is_empty()
+        } else if accessor_val == class_name {
+            true
+        } else if access_str == "private" {
+            false
+        } else if access_str == "protected" {
+            is_subclass_of(ctx, accessor_val, class_name).unwrap_or(false)
+        } else {
+            true // public or empty
+        };
+
+        if !is_accessible { continue; }
+
+        let ret = r_type.unwrap_or_default();
+        let dedup_key = (m_name.clone(), ret.clone());
+        if seen_members.contains(&dedup_key) { continue; }
+        seen_members.insert(dedup_key);
+
+        let doc = if let Some(path) = f_path {
+            let mut comment = extract_comment_from_file(&path, line, &mut ctx.file_cache);
+            if let Some(d) = &detail {
+                if !comment.is_empty() { comment.push_str("\n\n"); }
+                comment.push_str(d);
+            }
+            comment
+        } else {
+            detail.clone().unwrap_or_default()
+        };
+
+        result.push(json!({ 
+            "label": m_name, 
+            "kind": map_kind(&m_type), 
+            "detail": ret, 
+            "documentation": doc, 
+            "insertText": m_name 
+        }));
+    }
+
+    // Phase 3: enum 値も一括クエリ
+    let enum_sql = format!(
+        "SELECT sen.text FROM enum_values ev
+         JOIN strings sen ON ev.name_id = sen.id
+         WHERE ev.enum_id IN ({})",
+        ids_sql
+    );
+    {
+        let mut enum_stmt = ctx.conn.prepare(&enum_sql)?;
+        let enum_rows = enum_stmt.query_map([], |row| {
             let e_name: String = row.get(0)?;
             Ok(json!({ "label": e_name, "kind": 20, "detail": "enum item", "insertText": e_name }))
         })?;
         for e in enum_rows { result.push(e?); }
-        
-        let mut parent_stmt = ctx.conn.prepare("SELECT parent_class_id, si.text FROM inheritance i JOIN strings si ON i.parent_name_id = si.id WHERE child_id = ?")?;
-        let p_rows = parent_stmt.query_map([current_class_id], |row| {
-            let p_id: Option<i64> = row.get(0)?;
-            let p_name: String = row.get(1)?;
-            Ok((p_id, p_name))
-        })?;
-        for p in p_rows {
-            let (p_id, p_name) = p?;
-            // 同名クラスを複数エントリ経由で重複キューしない（BFSの指数的膨張を防ぐ）
-            if visited_class_names.contains(&p_name) { continue; }
-            visited_class_names.insert(p_name.clone());
-            if let Some(id) = p_id {
-                if !visited.contains_key(&id) {
-                    queue.push(id);
-                }
-            }
-            // IDがある場合でも、名前で再検索して他のID（前方宣言など）も網羅する
-            let ids = ctx.get_class_ids_by_name(&p_name)?;
-            for id in ids {
-                if !visited.contains_key(&id) {
-                    queue.push(id);
-                }
-            }
-        }
-        if result.len() >= 2000 { break; }
     }
 
     let result_json = json!(result);
