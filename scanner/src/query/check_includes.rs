@@ -198,18 +198,17 @@ pub fn check_includes(
         .map(|b| b.as_ref())
         .collect();
 
-    // 型名 → (インクルードパス, file_id)
-    let mut required: HashMap<String, (String, i64)> = HashMap::new();
+    // 型名 → 候補リスト (インクルードパス, file_id)
+    // 同名クラスが複数のヘッダーに存在する場合（例: TArray は Core/Array.h と
+    // TraceLog/standalone_prologue.h の両方に定義）、全候補を保持してから
+    // ステップ7でまとめて判定する。一つでもカバー済みなら "missing" から除外する。
+    let mut required: HashMap<String, Vec<(String, i64)>> = HashMap::new();
     let mut rows = stmt.query(params_ref.as_slice())?;
     while let Some(row) = rows.next()? {
         let class_name: String = row.get(0)?;
         let full_path: String = row.get(1)?;
         let mid: i64 = row.get(2)?;
         let fid: i64 = row.get(3)?;
-
-        if required.contains_key(&class_name) {
-            continue;
-        }
 
         let include_path = if let Some(root) = root_map.get(&mid) {
             compute_include_path(&full_path, root)
@@ -218,18 +217,34 @@ pub fn check_includes(
         };
 
         if !include_path.is_empty() {
-            required.insert(class_name, (include_path, fid));
+            required.entry(class_name).or_default().push((include_path, fid));
         }
     }
 
     // 7. 不足インクルードを計算
-    //    - 直接インクルード済み (existing_paths に一致) → スキップ
-    //    - 推移的にカバー済み (reachable_file_ids に file_id が含まれる) → スキップ
+    //    - いずれかの候補が直接インクルード済み (existing_paths に一致) → スキップ
+    //    - いずれかの候補が推移的にカバー済み (reachable_file_ids に file_id が含まれる) → スキップ
+    //    - 上記どちらでもない場合は "最良候補" を missing として報告する
+    //      (Public/ を含むパスを優先し、次に短いインクルードパスを優先)
     let mut missing: Vec<Value> = Vec::new();
-    for (type_name, (header, file_id)) in &required {
-        let direct_covered = existing_paths.contains(&normalize_include_path(header));
-        let transitive_covered = reachable_file_ids.contains(file_id);
-        if !direct_covered && !transitive_covered {
+    for (type_name, candidates) in &required {
+        // いずれかの候補が既にカバーされているか
+        let any_covered = candidates.iter().any(|(header, fid)| {
+            existing_paths.contains(&normalize_include_path(header))
+                || reachable_file_ids.contains(fid)
+        });
+        if any_covered {
+            continue;
+        }
+
+        // カバーされていない場合は最良候補を選ぶ
+        // 優先度: Public/ を含む > include_path が短い
+        let best = candidates.iter().min_by(|(a, _), (b, _)| {
+            let a_pub = a.contains("Public/") as u8;
+            let b_pub = b.contains("Public/") as u8;
+            b_pub.cmp(&a_pub).then_with(|| a.len().cmp(&b.len()))
+        });
+        if let Some((header, _)) = best {
             let line = type_usages.get(type_name).copied().unwrap_or(0);
             missing.push(json!({
                 "symbol": type_name,
