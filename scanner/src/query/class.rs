@@ -330,6 +330,173 @@ pub fn get_enum_values(conn: &Connection, enum_name: &str) -> anyhow::Result<Val
     Ok(json!(results))
 }
 
+/// 指定クラスの直接の派生クラス（子クラス）を返す
+pub fn find_derived_classes(conn: &Connection, base_class: &str) -> anyhow::Result<Value> {
+    let sql = format!("
+        {}
+        SELECT sc.text, dp.full_path || '/' || sf.text, c.line_number, c.symbol_type,
+               COALESCE(sm.text, '')
+        FROM classes c
+        JOIN strings sc ON c.name_id = sc.id
+        JOIN inheritance i ON i.child_id = c.id
+        JOIN strings sp ON i.parent_name_id = sp.id
+        JOIN files f ON c.file_id = f.id
+        JOIN dir_paths dp ON f.directory_id = dp.id
+        JOIN strings sf ON f.filename_id = sf.id
+        LEFT JOIN modules m ON f.module_id = m.id
+        LEFT JOIN strings sm ON m.name_id = sm.id
+        WHERE sp.text = ?
+        ORDER BY sc.text
+    ", PATH_CTE);
+    let mut stmt = conn.prepare(&sql)?;
+    let mut rows = stmt.query([base_class])?;
+    let mut results = Vec::new();
+    while let Some(row) = rows.next()? {
+        let name: String = row.get(0)?;
+        let path: String = row.get(1)?;
+        let line: i64 = row.get(2)?;
+        let sym_type: String = row.get(3)?;
+        let module_name: String = row.get(4)?;
+        results.push(json!({
+            "name": name,
+            "class_name": name,
+            "path": path,
+            "file_path": path,
+            "line": line,
+            "line_number": line,
+            "symbol_type": sym_type,
+            "module_name": if module_name.is_empty() { serde_json::Value::Null } else { json!(module_name) },
+        }));
+    }
+    Ok(json!(results))
+}
+
+/// 指定クラスの全派生クラスを再帰的に返す
+pub fn get_recursive_derived_classes(conn: &Connection, base_class: &str) -> anyhow::Result<Value> {
+    let sql = "
+        WITH RECURSIVE
+        dir_paths(id, full_path) AS (
+            SELECT d.id, s.text FROM directories d JOIN strings s ON d.name_id = s.id WHERE d.parent_id IS NULL
+            UNION ALL
+            SELECT d.id, CASE WHEN dp.full_path = '/' THEN '/' || s.text ELSE dp.full_path || '/' || s.text END
+            FROM directories d JOIN dir_paths dp ON d.parent_id = dp.id JOIN strings s ON d.name_id = s.id
+        ),
+        derived(class_id) AS (
+            SELECT c.id
+            FROM classes c
+            JOIN inheritance i ON i.child_id = c.id
+            JOIN strings sp ON i.parent_name_id = sp.id
+            WHERE sp.text = ?1
+            UNION
+            SELECT c.id
+            FROM classes c
+            JOIN inheritance i ON i.child_id = c.id
+            JOIN derived d ON i.parent_class_id = d.class_id
+        )
+        SELECT sc.text, dp.full_path || '/' || sf.text, c.line_number, c.symbol_type,
+               COALESCE(sm.text, '')
+        FROM derived d
+        JOIN classes c ON d.class_id = c.id
+        JOIN strings sc ON c.name_id = sc.id
+        JOIN files f ON c.file_id = f.id
+        JOIN dir_paths dp ON f.directory_id = dp.id
+        JOIN strings sf ON f.filename_id = sf.id
+        LEFT JOIN modules m ON f.module_id = m.id
+        LEFT JOIN strings sm ON m.name_id = sm.id
+        ORDER BY sc.text
+    ";
+    let mut stmt = conn.prepare(sql)?;
+    let mut rows = stmt.query([base_class])?;
+    let mut results = Vec::new();
+    while let Some(row) = rows.next()? {
+        let name: String = row.get(0)?;
+        let path: String = row.get(1)?;
+        let line: i64 = row.get(2)?;
+        let sym_type: String = row.get(3)?;
+        let module_name: String = row.get(4)?;
+        results.push(json!({
+            "name": name,
+            "class_name": name,
+            "path": path,
+            "file_path": path,
+            "line": line,
+            "line_number": line,
+            "symbol_type": sym_type,
+            "module_name": if module_name.is_empty() { serde_json::Value::Null } else { json!(module_name) },
+        }));
+    }
+    Ok(json!(results))
+}
+
+/// 指定クラスの全親クラスを再帰的に返す（継承チェーン）
+pub fn get_recursive_parent_classes(conn: &Connection, child_class: &str) -> anyhow::Result<Value> {
+    let sql = "
+        WITH RECURSIVE
+        dir_paths(id, full_path) AS (
+            SELECT d.id, s.text FROM directories d JOIN strings s ON d.name_id = s.id WHERE d.parent_id IS NULL
+            UNION ALL
+            SELECT d.id, CASE WHEN dp.full_path = '/' THEN '/' || s.text ELSE dp.full_path || '/' || s.text END
+            FROM directories d JOIN dir_paths dp ON d.parent_id = dp.id JOIN strings s ON d.name_id = s.id
+        ),
+        parent_chain(name_id, depth) AS (
+            SELECT i.parent_name_id, 1
+            FROM classes c
+            JOIN strings sc ON c.name_id = sc.id
+            JOIN inheritance i ON i.child_id = c.id
+            WHERE sc.text = ?1
+            UNION ALL
+            SELECT i.parent_name_id, p.depth + 1
+            FROM parent_chain p
+            JOIN classes c ON c.name_id = p.name_id
+            JOIN inheritance i ON i.child_id = c.id
+            WHERE p.depth < 50
+        )
+        SELECT sp.text,
+               COALESCE(dp.full_path || '/' || sf.text, ''),
+               COALESCE(c.line_number, 0),
+               COALESCE(c.symbol_type, ''),
+               COALESCE(sm.text, ''),
+               MIN(p.depth) as min_depth
+        FROM parent_chain p
+        JOIN strings sp ON sp.id = p.name_id
+        LEFT JOIN classes c ON c.id = (
+            SELECT c2.id FROM classes c2
+            JOIN files f2 ON c2.file_id = f2.id
+            WHERE c2.name_id = sp.id
+            ORDER BY f2.is_header DESC, c2.id ASC
+            LIMIT 1
+        )
+        LEFT JOIN files f ON c.file_id = f.id
+        LEFT JOIN dir_paths dp ON f.directory_id = dp.id
+        LEFT JOIN strings sf ON f.filename_id = sf.id
+        LEFT JOIN modules m ON f.module_id = m.id
+        LEFT JOIN strings sm ON m.name_id = sm.id
+        GROUP BY p.name_id
+        ORDER BY min_depth DESC
+    ";
+    let mut stmt = conn.prepare(sql)?;
+    let mut rows = stmt.query([child_class])?;
+    let mut results = Vec::new();
+    while let Some(row) = rows.next()? {
+        let name: String = row.get(0)?;
+        let path: String = row.get(1)?;
+        let line: i64 = row.get(2)?;
+        let sym_type: String = row.get(3)?;
+        let module_name: String = row.get(4)?;
+        results.push(json!({
+            "name": name,
+            "class_name": name,
+            "path": if path.is_empty() { serde_json::Value::Null } else { json!(path.clone()) },
+            "file_path": if path.is_empty() { serde_json::Value::Null } else { json!(path) },
+            "line": line,
+            "line_number": line,
+            "symbol_type": sym_type,
+            "module_name": if module_name.is_empty() { serde_json::Value::Null } else { json!(module_name) },
+        }));
+    }
+    Ok(json!(results))
+}
+
 pub fn find_symbol_usages(conn: &Connection, symbol_name: &str, limit: usize) -> anyhow::Result<Value> {
     let sql = format!("
         {}

@@ -64,6 +64,15 @@ pub fn process_query(conn: &Connection, request: QueryRequest) -> anyhow::Result
         // Goto definition / symbol search
         QueryRequest::GotoDefinition { content, line, character, file_path } =>
             goto::goto_definition(conn, content, line, character, file_path),
+        QueryRequest::FindDerivedClasses { base_class } =>
+            class::find_derived_classes(conn, &base_class),
+
+        QueryRequest::GetRecursiveDerivedClasses { base_class } =>
+            class::get_recursive_derived_classes(conn, &base_class),
+
+        QueryRequest::GetRecursiveParentClasses { child_class } =>
+            class::get_recursive_parent_classes(conn, &child_class),
+
         QueryRequest::FindSymbolInInheritanceChain { class_name, symbol_name, .. } =>
             Ok(goto::find_symbol_in_inheritance_chain(conn, &class_name, &symbol_name)?
                 .unwrap_or(Value::Null)),
