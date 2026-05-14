@@ -226,7 +226,27 @@ pub fn process_completion(
 
     let node_type = node.kind();
     tracing::info!("[Completion] Node at cursor: kind='{}', text='{}'", node_type, get_node_text(&node, content).chars().take(40).collect::<String>());
-    
+
+    // ─── Earliest fast path: cursor is right after `(` ────────────────────────────
+    // This must run BEFORE the ERROR-node check because tree-sitter may mark the `(`
+    // in `UFUNCTION(` as an ERROR, which would otherwise trigger incorrect member
+    // completion logic and never reach the macro-specifier path below.
+    {
+        let cursor_line_str = content.lines().nth(row).unwrap_or("");
+        if col > 0 && cursor_line_str.as_bytes().get(col - 1) == Some(&b'(') {
+            if let Some((macro_name, is_meta)) = check_macro_context_from_content(content, row, col) {
+                if is_meta {
+                    tracing::debug!("[Completion] Paren fast path: meta=(...) context");
+                    return Ok(json!(resolve_meta_specifiers()));
+                }
+                if let Some(res) = resolve_macro_specifiers(macro_name) {
+                    tracing::debug!("[Completion] Paren fast path: specifiers for '{}'", macro_name);
+                    return Ok(res);
+                }
+            }
+        }
+    }
+
     // Check if we are inside or near an ERROR node
     let mut target_node = None;
     if node_type == "ERROR" || node_type == "." || node_type == "->" || node_type == "::" {
@@ -264,6 +284,20 @@ pub fn process_completion(
         } else {
             tracing::debug!("Operator detected but no meaningful sibling found. Continuing to traverse up from parent.");
             curr_opt = node.parent(); // Move to parent and let Case 2 handle it
+        }
+    }
+
+    // Content-based fast path for UE macro specifiers.
+    // Tree-sitter may mis-identify the context when input is incomplete (e.g. right after the
+    // opening `(` in `UPROPERTY(`).  A raw string scan is more reliable in that case.
+    if let Some((macro_name, is_meta)) = check_macro_context_from_content(content, row, col) {
+        if is_meta {
+            tracing::debug!("[Completion] Macro fast path: meta=(...) context");
+            return Ok(json!(resolve_meta_specifiers()));
+        }
+        if let Some(res) = resolve_macro_specifiers(macro_name) {
+            tracing::debug!("[Completion] Macro fast path: specifiers for '{}'", macro_name);
+            return Ok(res);
         }
     }
 
@@ -1244,6 +1278,97 @@ fn resolve_meta_specifiers() -> Vec<Value> {
         spec_kv("MustImplement", "MustImplement=\"$1\"", "Interface that the selected class must implement."),
         spec("GetByRef", "Return a const reference instead of a copy when accessed from Blueprints."),
     ]
+}
+
+/// Scans the raw content before the cursor to detect if we are inside a UE macro argument list
+/// (e.g. UPROPERTY(...), UFUNCTION(...)).  This is more reliable than tree-sitter when the
+/// input is incomplete (e.g. right after the opening `(`).
+///
+/// Returns `Some((macro_name, is_meta))` where `is_meta` is true when the cursor is inside
+/// a nested `meta=(...)` argument.
+fn check_macro_context_from_content(content: &str, row: usize, col: usize) -> Option<(&'static str, bool)> {
+    // Build a text snippet that covers up to 6 lines ending at the cursor column.
+    // Multi-line macro invocations are common in Unreal (e.g. UPROPERTY on its own line,
+    // specifiers on the next line).
+    let lines: Vec<&str> = content.lines().collect();
+    let end_row = row.min(lines.len().saturating_sub(1));
+    let start_row = end_row.saturating_sub(6);
+
+    let mut combined = String::new();
+    for i in start_row..=end_row {
+        let line = lines[i];
+        if i < end_row {
+            combined.push_str(line);
+            combined.push('\n');
+        } else {
+            // Current line: only up to cursor column to avoid looking past the cursor.
+            let before = &line[..col.min(line.len())];
+            combined.push_str(before);
+        }
+    }
+
+    static UE_MACROS: &[(&str, &str)] = &[
+        ("UPROPERTY", "UPROPERTY"),
+        ("UFUNCTION", "UFUNCTION"),
+        ("UCLASS",    "UCLASS"),
+        ("USTRUCT",   "USTRUCT"),
+        ("UENUM",     "UENUM"),
+        ("UINTERFACE","UINTERFACE"),
+    ];
+
+    for &(pattern_name, return_name) in UE_MACROS {
+        let open_pattern = format!("{}(", pattern_name);
+        if let Some(open_pos) = combined.rfind(open_pattern.as_str()) {
+            let inside = &combined[open_pos + open_pattern.len()..];
+
+            // If a `)` closes the macro before the cursor, we are not inside this macro.
+            // Count parens to handle nested parentheses (e.g. meta=(...)).
+            let mut depth = 1i32;
+            let mut meta_depth_at_open: Option<usize> = None; // byte offset of 'meta=(' relative to `inside`
+            let mut i = 0;
+            let inside_bytes = inside.as_bytes();
+            while i < inside_bytes.len() {
+                match inside_bytes[i] {
+                    b'(' => {
+                        depth += 1;
+                        // Detect 'meta=(' by looking back
+                        if i >= 5 && &inside_bytes[i-5..=i] == b"meta=(" {
+                            meta_depth_at_open = Some(i + 1); // position right after '('
+                        }
+                        i += 1;
+                    }
+                    b')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            // Cursor is past the closing ')' — not inside this macro
+                            return None;
+                        }
+                        // If we closed the meta=(...) group
+                        if depth == 1 {
+                            meta_depth_at_open = None;
+                        }
+                        i += 1;
+                    }
+                    _ => i += 1,
+                }
+            }
+
+            // depth > 0: cursor is still inside the macro call
+            let is_meta = meta_depth_at_open.is_some();
+            // Safe to cast the string literal pointer
+            let macro_static: &'static str = match return_name {
+                "UPROPERTY"  => "UPROPERTY",
+                "UFUNCTION"  => "UFUNCTION",
+                "UCLASS"     => "UCLASS",
+                "USTRUCT"    => "USTRUCT",
+                "UENUM"      => "UENUM",
+                "UINTERFACE" => "UINTERFACE",
+                _ => return None,
+            };
+            return Some((macro_static, is_meta));
+        }
+    }
+    None
 }
 
 fn resolve_macro_specifiers(macro_name: &str) -> Option<Value> {
