@@ -247,6 +247,13 @@ pub fn process_completion(
         }
     }
 
+    // ─── TSubclassOf<T> / TSoftClassPtr<T> template arg fast path ─────────────────
+    if let Some(prefix) = check_template_class_arg_context(content, row, col) {
+        tracing::debug!("[Completion] TSubclassOf fast path, prefix='{}'", prefix);
+        let classes = fetch_uobject_subclasses(conn, &prefix)?;
+        return Ok(json!(classes));
+    }
+
     // Check if we are inside or near an ERROR node
     let mut target_node = None;
     if node_type == "ERROR" || node_type == "." || node_type == "->" || node_type == "::" {
@@ -1369,6 +1376,65 @@ fn check_macro_context_from_content(content: &str, row: usize, col: usize) -> Op
         }
     }
     None
+}
+
+/// カーソル直前のテキストをスキャンし、TSubclassOf<> / TSoftClassPtr<> などの
+/// テンプレート型引数の中にいるかどうかを検出する。
+/// 検出した場合は Some(prefix) を返す（prefix はユーザーがすでに入力した部分文字列）。
+fn check_template_class_arg_context(content: &str, row: usize, col: usize) -> Option<String> {
+    // テンプレート型引数を補完すべきラッパー
+    const CLASS_WRAPPERS: &[&str] = &["TSubclassOf", "TSoftClassPtr"];
+
+    let lines: Vec<&str> = content.lines().collect();
+    let current_line = lines.get(row)?;
+    let before = &current_line[..col.min(current_line.len())];
+
+    for wrapper in CLASS_WRAPPERS {
+        // "WrapperName<" が行内に存在し、以降に ">" が来ていなければ中にいる
+        if let Some(open_pos) = before.rfind(&format!("{}<", wrapper)) {
+            let after_open = &before[open_pos + wrapper.len() + 1..]; // "<" の後
+            // まだ ">" で閉じられていない
+            if !after_open.contains('>') {
+                let prefix = after_open.trim_start_matches(char::is_whitespace);
+                return Some(prefix.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// TSubclassOf<T> 補完用: UObject 派生クラス候補を返す。
+/// UE クラス命名規則 (U, A, F, I, E プレフィックス) と prefix でフィルタリングする。
+fn fetch_uobject_subclasses(conn: &Connection, prefix: &str) -> anyhow::Result<Vec<Value>> {
+    let like_pat = format!("{}%", prefix);
+    let mut stmt = conn.prepare(
+        "SELECT s.text, c.symbol_type \
+         FROM classes c \
+         JOIN strings s ON c.name_id = s.id \
+         WHERE c.symbol_type IN ('class', 'struct') \
+           AND s.text LIKE ? \
+           AND (s.text GLOB 'U*' OR s.text GLOB 'A*' OR s.text GLOB 'I*') \
+         ORDER BY s.text ASC \
+         LIMIT 200"
+    )?;
+    let rows = stmt.query_map([&like_pat], |row| {
+        let name: String = row.get(0)?;
+        let sym_type: String = row.get(1)?;
+        Ok((name, sym_type))
+    })?;
+    let mut results = Vec::new();
+    for r in rows {
+        let (name, sym_type) = r?;
+        let kind = if sym_type == "class" { 7 } else { 22 };
+        results.push(json!({
+            "label": name,
+            "kind": kind,
+            "detail": sym_type,
+            "insertText": name,
+            "documentation": format!("UObject-derived class: {}", name),
+        }));
+    }
+    Ok(results)
 }
 
 fn resolve_macro_specifiers(macro_name: &str) -> Option<Value> {
