@@ -619,7 +619,10 @@ fn resolve_expression_type(
                             return find_member_return_type(ctx, &cls, method);
                         }
                     }
-                    if let Some(current_class) = get_enclosing_class_name(&node, content) {
+                    let enclosing = get_enclosing_class_name(&node, content)
+                        .or_else(|| get_enclosing_class_from_db(ctx, absolute_line))
+                        .or_else(|| get_enclosing_class_from_content_scan(content));
+                    if let Some(current_class) = enclosing {
                         return find_member_return_type(ctx, &current_class, func_name);
                     }
                 }
@@ -756,7 +759,6 @@ fn find_member_return_type(ctx: &mut RequestContext, class_name: &str, member_na
     let resolved_class = resolve_typedef(ctx, &clean_class)?;
     
     let start_class_ids = ctx.get_class_ids_by_name(&resolved_class)?;
-    tracing::info!("find_member_return_type: class='{}' -> resolved='{}', ids={:?}, member='{}'", class_name, resolved_class, start_class_ids, member_name);
     if start_class_ids.is_empty() { return Ok(None); }
 
     let mut queue = start_class_ids;
@@ -764,7 +766,7 @@ fn find_member_return_type(ctx: &mut RequestContext, class_name: &str, member_na
     while let Some(cls_id) = queue.pop() {
         if visited.contains_key(&cls_id) { continue; }
         visited.insert(cls_id, true);
-        
+
         let mut stmt = ctx.conn.prepare("
             SELECT srt.text FROM members m 
             JOIN strings sm ON m.name_id = sm.id
@@ -776,6 +778,7 @@ fn find_member_return_type(ctx: &mut RequestContext, class_name: &str, member_na
         let mut rows = stmt.query(params![cls_id, member_name])?;
         if let Some(row) = rows.next()? {
             if let Some(rt) = row.get::<_, Option<String>>(0)? {
+                tracing::info!("find_member_return_type: FOUND in class_id={}, return_type='{}'", cls_id, rt);
                 return Ok(Some(extract_clean_type(&rt)));
             }
         }
@@ -787,11 +790,13 @@ fn find_member_return_type(ctx: &mut RequestContext, class_name: &str, member_na
         let p_rows = p_stmt.query_map([cls_id], |r| Ok((r.get::<_, Option<i64>>(0)?, r.get::<_, String>(1)?)))?;
         for p in p_rows { 
             let (p_id, p_name) = p?;
-            if let Some(id) = p_id {
+            // DBに同一クラス名で複数エントリが存在する場合（ヘッダー/ソースの重複等）を考慮し、
+            // 常に名前引きで全エントリを追加する。visitedチェックで再訪問は防ぐ。
+            let all_ids = ctx.get_class_ids_by_name(&p_name)?;
+            if !all_ids.is_empty() {
+                for id in all_ids { queue.push(id); }
+            } else if let Some(id) = p_id {
                 queue.push(id);
-            } else {
-                let ids = ctx.get_class_ids_by_name(&p_name)?;
-                for id in ids { queue.push(id); }
             }
         }
     }
