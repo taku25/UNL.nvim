@@ -1100,28 +1100,31 @@ fn fetch_members_recursive(
 
     // Phase 2: 全クラスIDのメンバを一括クエリ（N クエリ → 1 クエリに削減）
     let ids_sql = all_class_ids.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(",");
-    let member_sql = format!(
-        "{} SELECT smn.text, smt.text, srt.text, access, detail, m.line_number, dp.full_path || '/' || sn.text
-         FROM members m
-         JOIN strings smn ON m.name_id = smn.id
-         JOIN strings smt ON m.type_id = smt.id
-         LEFT JOIN strings srt ON m.return_type_id = srt.id
-         LEFT JOIN files f ON m.file_id = f.id
-         LEFT JOIN dir_paths dp ON f.directory_id = dp.id
-         LEFT JOIN strings sn ON f.filename_id = sn.id
-         WHERE m.class_id IN ({}) {}
-         AND (m.access IS NULL OR m.access != 'impl')
-         ORDER BY smn.text ASC LIMIT 2000",
-        crate::db::path::PATH_CTE,
-        ids_sql,
-        if prefix_search.is_some() { "AND smn.text LIKE ?" } else { "" }
-    );
 
     type MemberRow = (String, String, Option<String>, Option<String>, Option<String>, usize, Option<String>);
-    let member_data: Vec<MemberRow> = {
-        let mut mem_stmt = ctx.conn.prepare(&member_sql)?;
-        if let Some(p) = &prefix_search {
-            mem_stmt.query_map([p.as_str()], |row| Ok((
+
+    let run_member_query = |conn: &rusqlite::Connection, exclude_impl: bool, prefix_search: &Option<String>| -> anyhow::Result<Vec<MemberRow>> {
+        let impl_filter = if exclude_impl { "AND (m.access IS NULL OR m.access != 'impl')" } else { "" };
+        let sql = format!(
+            "{} SELECT smn.text, smt.text, srt.text, access, detail, m.line_number, dp.full_path || '/' || sn.text
+             FROM members m
+             JOIN strings smn ON m.name_id = smn.id
+             JOIN strings smt ON m.type_id = smt.id
+             LEFT JOIN strings srt ON m.return_type_id = srt.id
+             LEFT JOIN files f ON m.file_id = f.id
+             LEFT JOIN dir_paths dp ON f.directory_id = dp.id
+             LEFT JOIN strings sn ON f.filename_id = sn.id
+             WHERE m.class_id IN ({}) {}
+             {}
+             ORDER BY smn.text ASC LIMIT 2000",
+            crate::db::path::PATH_CTE,
+            ids_sql,
+            if prefix_search.is_some() { "AND smn.text LIKE ?" } else { "" },
+            impl_filter,
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = if let Some(p) = prefix_search {
+            stmt.query_map([p.as_str()], |row| Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, Option<String>>(2)?,
@@ -1131,7 +1134,7 @@ fn fetch_members_recursive(
                 row.get::<_, Option<String>>(6).ok().flatten(),
             )))?.filter_map(|r| r.ok()).collect()
         } else {
-            mem_stmt.query_map([], |row| Ok((
+            stmt.query_map([], |row| Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, Option<String>>(2)?,
@@ -1140,8 +1143,15 @@ fn fetch_members_recursive(
                 row.get::<_, Option<usize>>(5)?.unwrap_or(0),
                 row.get::<_, Option<String>>(6).ok().flatten(),
             )))?.filter_map(|r| r.ok()).collect()
-        }
+        };
+        Ok(rows)
     };
+
+    // implフィルタありで試し、0件なら implも含めてリトライ（エンジンクラス等がcppのみに登録の場合）
+    let mut member_data = run_member_query(ctx.conn, true, &prefix_search)?;
+    if member_data.is_empty() {
+        member_data = run_member_query(ctx.conn, false, &prefix_search)?;
+    }
 
     let mut result = Vec::new();
     let mut seen_members: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
