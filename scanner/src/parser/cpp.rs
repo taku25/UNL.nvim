@@ -219,15 +219,26 @@ pub fn parse_content_mmap(content_bytes: &[u8], _path: &str, language: &tree_sit
                             }
                             curr = parent;
                         }
-
                         let mut return_type = None;
                         if let Some(decl) = declarator_node {
                             let (start, end) = (node.start_byte(), decl.start_byte());
                             if end > start {
                                 let mut actual_prefix = &content_bytes[start..end];
                                 if let Some(idx) = actual_prefix.iter().rposition(|&b| b == b')') { actual_prefix = &actual_prefix[idx+1..]; }
-                                let cleaned = clean_type_string(std::str::from_utf8(actual_prefix).unwrap_or(""));
+                                let raw_prefix = std::str::from_utf8(actual_prefix).unwrap_or("");
+                                // static キーワードを flags に反映する（前置修飾子から検出）
+                                if raw_prefix.split_whitespace().any(|w| w == "static") {
+                                    flags.push("static");
+                                }
+                                let cleaned = clean_type_string(raw_prefix);
                                 if !cleaned.is_empty() { return_type = Some(cleaned); }
+                            }
+                        }
+                        // declarator_node がない場合（field_declaration 等）は
+                        // storage_class_specifier ノードを直接確認する
+                        if !flags.contains(&"static") {
+                            if has_static_specifier(node, content_bytes) {
+                                flags.push("static");
                             }
                         }
 
@@ -329,6 +340,17 @@ fn has_child_type(node: Node, type_name: &str) -> bool {
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         if child.kind() == type_name { return true; }
+    }
+    false
+}
+
+/// ノードの直接の子に `storage_class_specifier` として "static" があるか確認する。
+fn has_static_specifier(node: Node, source: &[u8]) -> bool {
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if child.kind() == "storage_class_specifier" && get_node_text(&child, source).trim() == "static" {
+            return true;
+        }
     }
     false
 }

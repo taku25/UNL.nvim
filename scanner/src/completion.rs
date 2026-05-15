@@ -259,6 +259,13 @@ pub fn process_completion(
     if node_type == "ERROR" || node_type == "." || node_type == "->" || node_type == "::" {
         if let Some(prev) = get_prev_meaningful_sibling(node) {
             tracing::info!("[Completion] Found meaningful sibling before ERROR/Operator: kind='{}', text='{}'", prev.kind(), get_node_text(&prev, content).chars().take(20).collect::<String>());
+            if node_type == "::" {
+                let scope_text = get_node_text(&prev, content).trim().to_string();
+                if scope_text != "Super" {
+                    // ClassName:: → static メンバのみ返す
+                    return resolve_qualified_members(&mut ctx, &scope_text, None, cache);
+                }
+            }
             target_node = Some(prev);
         } else if let Some(parent) = node.parent() {
             tracing::info!("[Completion] No prev sibling; parent kind='{}'", parent.kind());
@@ -287,6 +294,11 @@ pub fn process_completion(
 
         if let Some(prev) = get_prev_meaningful_sibling(op_node) {
             tracing::debug!("Operator detected (Case 1), target node: kind='{}', text='{}'", prev.kind(), get_node_text(&prev, content));
+            let scope_text = get_node_text(&prev, content).trim().to_string();
+            if (node_type == "::" || op_node.kind() == "::") && scope_text != "Super" {
+                // ClassName:: → static メンバのみ返す
+                return resolve_qualified_members(&mut ctx, &scope_text, None, cache);
+            }
             return resolve_node_and_fetch_members(&mut ctx, prev, &root, content, row, absolute_line, None, cache);
         } else {
             tracing::debug!("Operator detected but no meaningful sibling found. Continuing to traverse up from parent.");
@@ -390,7 +402,7 @@ pub fn process_completion(
                     if let Some(current_class) = current_class {
                         if let Some(parent_class) = get_parent_class_name(&mut ctx, &current_class)? {
                             tracing::info!("[Completion] Super:: current={}, parent={}", current_class, parent_class);
-                            let members = fetch_members_recursive(&mut ctx, &parent_class, field_prefix, cache, Some(&parent_class))?;
+                            let members = fetch_members_recursive(&mut ctx, &parent_class, field_prefix, cache, Some(&parent_class), false)?;
                             return Ok(json!(members));
                         }
                         tracing::info!("[Completion] Super:: no parent found for '{}'", current_class);
@@ -398,7 +410,8 @@ pub fn process_completion(
                     return Ok(json!([]));
                 }
 
-                return resolve_static_members(&mut ctx, scope_text, field_prefix, cache);
+                // ClassName:: 補完: staticメンバのみ返す
+                return resolve_qualified_members(&mut ctx, scope_text, field_prefix, cache);
             }
         } else if p_kind == "ERROR" {
             let count = curr.child_count();
@@ -407,8 +420,18 @@ pub fn process_completion(
                     let ck = child.kind();
                     if ck == "." || ck == "->" || ck == "::" {
                         if let Some(prev) = get_prev_meaningful_sibling(child) {
-                             tracing::debug!("Operator detected inside ERROR, resolving previous sibling...");
-                             return resolve_node_and_fetch_members(&mut ctx, prev, &root, content, row, absolute_line, None, cache);
+                            if ck == "::" {
+                                // ClassName:: → static メンバのみ
+                                // Super:: は resolve_expression_type 側で処理されるためここでは
+                                // クラス名として扱い static フィルタを適用する
+                                let scope_text = get_node_text(&prev, content).trim().to_string();
+                                tracing::debug!(":: operator inside ERROR, scope='{}', using static filter", scope_text);
+                                let field_prefix: Option<String> = None; // ERRORノード時点では prefix 未確定
+                                return resolve_qualified_members(&mut ctx, &scope_text, field_prefix, cache);
+                            } else {
+                                tracing::debug!("Operator {:?} detected inside ERROR, resolving previous sibling...", ck);
+                                return resolve_node_and_fetch_members(&mut ctx, prev, &root, content, row, absolute_line, None, cache);
+                            }
                         }
                     }
                 }
@@ -428,7 +451,7 @@ pub fn process_completion(
             .or_else(|| get_enclosing_class_from_db(&ctx, absolute_line));
 
         if let Some(current_class) = current_class {
-            if let Ok(members) = fetch_members_recursive(&mut ctx, &current_class, Some(prefix.to_string()), cache.as_ref().map(Arc::clone), Some(&current_class)) {
+            if let Ok(members) = fetch_members_recursive(&mut ctx, &current_class, Some(prefix.to_string()), cache.as_ref().map(Arc::clone), Some(&current_class), false) {
                 results.extend(members);
             }
         }
@@ -502,7 +525,7 @@ fn resolve_node_and_fetch_members(
         };
         tracing::debug!("Final type for member lookup: '{}', accessor_class: {:?}, prefix: {:?}", resolved, accessor_class_str, prefix);
         
-        let members = fetch_members_recursive(ctx, &resolved, prefix, cache, accessor_class_str.as_deref())?;
+        let members = fetch_members_recursive(ctx, &resolved, prefix, cache, accessor_class_str.as_deref(), false)?;
         return Ok(json!(members));
     }
     Ok(json!([]))
@@ -966,7 +989,8 @@ fn resolve_typedef(ctx: &mut RequestContext, type_name: &str) -> anyhow::Result<
     Ok(current)
 }
 
-fn resolve_static_members(
+/// `ClassName::` 補完: staticメンバのみ返す。
+fn resolve_qualified_members(
     ctx: &mut RequestContext,
     scope_name: &str,
     prefix: Option<String>,
@@ -974,7 +998,7 @@ fn resolve_static_members(
 ) -> anyhow::Result<Value> {
     let clean_scope = extract_clean_type(scope_name);
     let t_name = resolve_typedef(ctx, &clean_scope)?;
-    let members = fetch_members_recursive(ctx, &t_name, prefix, cache, None)?;
+    let members = fetch_members_recursive(ctx, &t_name, prefix, cache, None, true)?;
     Ok(json!(members))
 }
 
@@ -1024,10 +1048,11 @@ fn fetch_members_recursive(
     prefix: Option<String>, 
     cache: Option<Arc<Mutex<CompletionCache>>>,
     accessor_class: Option<&str>,
+    static_only: bool,
 ) -> anyhow::Result<Vec<Value>> {
     let prefix_val = prefix.as_deref().unwrap_or("");
     let accessor_val = accessor_class.unwrap_or("");
-    let cache_key = format!("{}:{}:{}", class_name, prefix_val, accessor_val);
+    let cache_key = format!("{}:{}:{}:{}", class_name, prefix_val, accessor_val, if static_only { "s" } else { "a" });
     
     // 1. Try Memory Cache
     if let Some(c_mutex) = &cache {
@@ -1105,6 +1130,7 @@ fn fetch_members_recursive(
 
     let run_member_query = |conn: &rusqlite::Connection, exclude_impl: bool, prefix_search: &Option<String>| -> anyhow::Result<Vec<MemberRow>> {
         let impl_filter = if exclude_impl { "AND (m.access IS NULL OR m.access != 'impl')" } else { "" };
+        let static_filter = if static_only { "AND m.is_static = 1" } else { "" };
         let sql = format!(
             "{} SELECT smn.text, smt.text, srt.text, access, detail, m.line_number, dp.full_path || '/' || sn.text
              FROM members m
@@ -1114,11 +1140,12 @@ fn fetch_members_recursive(
              LEFT JOIN files f ON m.file_id = f.id
              LEFT JOIN dir_paths dp ON f.directory_id = dp.id
              LEFT JOIN strings sn ON f.filename_id = sn.id
-             WHERE m.class_id IN ({}) {}
+             WHERE m.class_id IN ({}) {} {}
              {}
              ORDER BY smn.text ASC LIMIT 2000",
             crate::db::path::PATH_CTE,
             ids_sql,
+            static_filter,
             if prefix_search.is_some() { "AND smn.text LIKE ?" } else { "" },
             impl_filter,
         );
