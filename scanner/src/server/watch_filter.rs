@@ -80,7 +80,7 @@ pub fn should_ignore_fast(path: &Path) -> bool {
     path.components().any(|c| {
         c.as_os_str()
             .to_str()
-            .map_or(false, |s| HARDCODED_IGNORED.contains(&s.to_lowercase().as_str()))
+            .is_some_and(|s| HARDCODED_IGNORED.contains(&s.to_lowercase().as_str()))
     })
 }
 
