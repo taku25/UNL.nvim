@@ -1,11 +1,11 @@
-/// asset_db.rs — Persistent SQLite cache for the asset graph.
-///
-/// Stores parsed uasset/umap data with mtimes so subsequent scans can skip
-/// unchanged files.  The DB lives alongside the main symbol DB:
-///   <main_db>_asset_cache.db
-///
-/// Schema version is checked on every open; a mismatch drops and recreates all
-/// tables (safe — data is always re-parseable from source files).
+//! asset_db.rs — Persistent SQLite cache for the asset graph.
+//!
+//! Stores parsed uasset/umap data with mtimes so subsequent scans can skip
+//! unchanged files.  The DB lives alongside the main symbol DB:
+//!   <main_db>_asset_cache.db
+//!
+//! Schema version is checked on every open; a mismatch drops and recreates all
+//! tables (safe — data is always re-parseable from source files).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -36,8 +36,8 @@ pub struct AssetCacheRow {
 /// Derive the asset cache DB path from the main symbol DB path.
 /// Works with both unix-normalized and native path strings.
 pub fn asset_db_path(main_db_path: &str) -> String {
-    if main_db_path.ends_with(".db") {
-        format!("{}_asset_cache.db", &main_db_path[..main_db_path.len() - 3])
+    if let Some(stripped) = main_db_path.strip_suffix(".db") {
+        format!("{}_asset_cache.db", stripped)
     } else {
         format!("{}_asset_cache.db", main_db_path)
     }

@@ -521,8 +521,7 @@ fn db_version_matches(db_path: &str) -> bool {
             "SELECT value FROM project_meta WHERE key = 'db_version'",
             [], |r| r.get::<_, String>(0),
         ).ok())
-        .and_then(|v| v.parse::<i32>().ok())
-        .map_or(false, |v| v == db::DB_VERSION)
+        .and_then(|v| v.parse::<i32>().ok()) == Some(db::DB_VERSION)
 }
 
 /// Incremental game refresh: re-parse only files reported by VCS `changed_since`.

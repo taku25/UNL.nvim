@@ -1317,8 +1317,7 @@ fn check_macro_context_from_content(content: &str, row: usize, col: usize) -> Op
     let start_row = end_row.saturating_sub(6);
 
     let mut combined = String::new();
-    for i in start_row..=end_row {
-        let line = lines[i];
+    for (i, line) in lines.iter().enumerate().take(end_row + 1).skip(start_row) {
         if i < end_row {
             combined.push_str(line);
             combined.push('\n');
@@ -1650,7 +1649,7 @@ fn infer_variable_type(ctx: &mut RequestContext, target_name: &str, root: &Node,
     let raw_matches: Vec<RawMatch> = INFER_QUERY.with(|q| {
         let query = q.borrow();
         let mut qcursor = QueryCursor::new();
-        let mut iter = qcursor.matches(&*query, *root, content.as_bytes());
+        let mut iter = qcursor.matches(&query, *root, content.as_bytes());
         let mut collected = Vec::new();
         while let Some(m) = iter.next() {
             let mut type_node: Option<Node> = None;
@@ -1694,7 +1693,7 @@ fn infer_variable_type(ctx: &mut RequestContext, target_name: &str, root: &Node,
         if !find_identifier_in_decl(&d_node, target_name, content)? { continue; }
         let row = rm.decl_node_start_row;
         if row > cursor_row { continue; }
-        if !best_type.is_none() && row < best_row { continue; }
+        if best_type.is_some() && row < best_row { continue; }
 
         if rm.is_for_range {
             if let Some(range_type) = infer_for_range_element_type(ctx, d_node, root, content, cursor_row)? {
@@ -1795,7 +1794,7 @@ fn infer_from_assignment(ctx: &mut RequestContext, target_name: &str, root: &Nod
     let raw: Vec<AssignMatch> = ASSIGN_QUERY.with(|q| {
         let query = q.borrow();
         let mut qcursor = QueryCursor::new();
-        let mut iter = qcursor.matches(&*query, *root, content.as_bytes());
+        let mut iter = qcursor.matches(&query, *root, content.as_bytes());
         let mut collected = Vec::new();
         while let Some(m) = iter.next() {
             let (mut decl_node, mut value_node) = (None, None);
@@ -1836,10 +1835,9 @@ fn infer_from_assignment(ctx: &mut RequestContext, target_name: &str, root: &Nod
                 if let Ok(Some(t)) = resolve_expression_type(ctx, v_node, root, content, cursor_row, None) { return Ok(Some(t)); }
                 return infer_from_value_text(get_node_text(&v_node, content));
             }
-        } else if find_identifier_in_decl(&d_node, target_name, content)? {
-            if am.decl_start_row <= cursor_row {
-                if let Ok(Some(t)) = resolve_expression_type(ctx, v_node, root, content, cursor_row, None) { return Ok(Some(t)); }
-            }
+        } else if find_identifier_in_decl(&d_node, target_name, content)?
+            && am.decl_start_row <= cursor_row {
+            if let Ok(Some(t)) = resolve_expression_type(ctx, v_node, root, content, cursor_row, None) { return Ok(Some(t)); }
         }
     }
     Ok(None)

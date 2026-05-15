@@ -167,7 +167,7 @@ pub fn check_includes(
     // 5. 既存インクルードから「推移的に到達可能な全ファイルID」を求める
     //    (CoreMinimal.h が間接的にカバーしているものをすべて除外するため)
     let existing_base_names: Vec<String> = existing_includes.iter()
-        .map(|inc| inc.path.split('/').last().unwrap_or(&inc.path).to_string())
+        .map(|inc| inc.path.split('/').next_back().unwrap_or(&inc.path).to_string())
         .collect();
     let reachable_file_ids = get_transitive_reachable_file_ids(conn, &existing_base_names)?;
 
