@@ -120,9 +120,24 @@ pub fn get_files_in_modules(conn: &Connection, modules: Vec<String>, extensions:
 
 /// パスの一部（部分文字列）でファイルを検索する。
 pub fn search_files_by_path_part(conn: &Connection, part: &str) -> anyhow::Result<Value> {
-    let pattern = format!("%{}%", part);
-    
-    // 1. ファイル名 (sn.text) 優先検索 (インデックスが効くため高速)
+    // Split query into whitespace-separated tokens and build one LIKE condition per token.
+    // "ap room" → WHERE sn.text LIKE '%ap%' AND sn.text LIKE '%room%'
+    // This matches exactly what the Lua fuzzy.match does (contiguous substring per token).
+    let tokens: Vec<String> = part.split_whitespace()
+        .filter(|t| !t.is_empty())
+        .map(|t| format!("%{}%", t))
+        .collect();
+
+    if tokens.is_empty() {
+        return Ok(json!([]));
+    }
+
+    let where_clause = tokens.iter()
+        .map(|_| "sn.text LIKE ?")
+        .collect::<Vec<_>>()
+        .join(" AND ");
+
+    // ファイル名 (sn.text) 検索
     let sql = format!("
         {}
         SELECT sn.text as filename, dp.full_path || '/' || sn.text as path,
@@ -133,13 +148,13 @@ pub fn search_files_by_path_part(conn: &Connection, part: &str) -> anyhow::Resul
         LEFT JOIN modules m ON f.module_id = m.id
         LEFT JOIN strings sm ON m.name_id = sm.id
         LEFT JOIN dir_paths rd ON m.root_directory_id = rd.id
-        WHERE sn.text LIKE ?
+        WHERE {}
         LIMIT 500
-    ", PATH_CTE);
+    ", PATH_CTE, where_clause);
 
     let mut stmt = conn.prepare(&sql)?;
-    let mut rows = stmt.query([&pattern])?;
-    
+    let mut rows = stmt.query(rusqlite::params_from_iter(tokens.iter()))?;
+
     let mut results = Vec::new();
     while let Some(row) = rows.next()? {
         results.push(json!({
@@ -148,38 +163,6 @@ pub fn search_files_by_path_part(conn: &Connection, part: &str) -> anyhow::Resul
             "module_name": row.get::<_, Option<String>>(2)?,
             "module_root": row.get::<_, Option<String>>(3)?,
         }));
-    }
-    
-    // 2. 結果が少ない場合はフルパス検索 (低速だがフォールバック)
-    if results.len() < 50 {
-        let sql_full = format!("
-            {}
-            SELECT sn.text as filename, dp.full_path || '/' || sn.text as path,
-                   sm.text as module_name, rd.full_path as module_root
-            FROM files f
-            JOIN strings sn ON f.filename_id = sn.id
-            JOIN dir_paths dp ON f.directory_id = dp.id
-            LEFT JOIN modules m ON f.module_id = m.id
-            LEFT JOIN strings sm ON m.name_id = sm.id
-            LEFT JOIN dir_paths rd ON m.root_directory_id = rd.id
-            WHERE (dp.full_path || '/' || sn.text) LIKE ?
-            LIMIT 100
-        ", PATH_CTE);
-        
-        let mut stmt = conn.prepare(&sql_full)?;
-        let mut rows = stmt.query([&pattern])?;
-        while let Some(row) = rows.next()? {
-            let path: String = row.get(1)?;
-            if !results.iter().any(|r| r["path"] == path) {
-                results.push(json!({
-                    "filename": row.get::<_, String>(0)?,
-                    "path": path,
-                    "module_name": row.get::<_, Option<String>>(2)?,
-                    "module_root": row.get::<_, Option<String>>(3)?,
-                }));
-            }
-            if results.len() >= 500 { break; }
-        }
     }
 
     Ok(json!(results))
