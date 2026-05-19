@@ -85,7 +85,8 @@ pub fn process_file(input: &InputFile, language: &tree_sitter::Language, query: 
         // ヘッダーファイルのみ、高速フィルタリングを適用
         let has_important_keywords = 
             content_bytes.windows(7).any(|w| w == b"UCLASS(" || w == b"USTRUCT" || w == b"UENUM(" || w == b"DECLARE" || w == b"include") 
-            || content_bytes.windows(10).any(|w| w == b"UFUNCTION" || w == b"UPROPERTY");
+            || content_bytes.windows(10).any(|w| w == b"UFUNCTION" || w == b"UPROPERTY")
+            || content_bytes.windows(12).any(|w| w == b"GAMEPLAY_TAG");
 
         if !has_important_keywords {
             return Ok(ParseResult {
@@ -303,6 +304,12 @@ pub fn parse_content_mmap(content_bytes: &[u8], _path: &str, language: &tree_sit
                     classes[idx].members.push(member);
                 }
             }
+
+            // UE_DEFINE_GAMEPLAY_TAG_COMMENT / UE_DEFINE_GAMEPLAY_TAG /
+            // UE_DECLARE_GAMEPLAY_TAG_EXTERN が含まれる namespace を ClassInfo として登録する。
+            // これにより BS2GameplayTags::E000100:: 形式の補完が機能するようになる。
+            scan_gameplay_tag_namespaces(root, content_bytes, &mut classes);
+
             Ok((classes, calls, includes))
         })
     })
@@ -383,3 +390,225 @@ fn clean_type_string(s: &str) -> String {
     if clean.contains('<') && clean.contains('>') { return clean; }
     clean.split_whitespace().last().unwrap_or("").to_string()
 }
+
+// ─── UE Gameplay Tag namespace scanning ────────────────────────────────────────
+
+/// `namespace_definition` ノードを再帰的に探し、`UE_DEFINE_GAMEPLAY_TAG_COMMENT` /
+/// `UE_DEFINE_GAMEPLAY_TAG` / `UE_DECLARE_GAMEPLAY_TAG_EXTERN` マクロ呼び出しを含む
+/// namespaceを `ClassInfo { symbol_type: "namespace" }` として登録する。
+/// これにより `BS2GameplayTags::E000100::` の補完が機能する。
+fn scan_gameplay_tag_namespaces(root: Node, content_bytes: &[u8], classes: &mut Vec<ClassInfo>) {
+    // 再帰ではなく明示的なスタックで反復処理する。
+    // C++ では namespace_definition は translation_unit か別の namespace の直接の子にしか現れないため、
+    // namespace_definition ノードだけを追いかければ十分。
+    let mut stack: Vec<Node> = vec![root];
+    while let Some(node) = stack.pop() {
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if child.kind() != "namespace_definition" {
+                continue;
+            }
+            // このnamespaceのメンバーを収集
+            if let Some(body) = child.child_by_field_name("body") {
+                let members = collect_direct_tag_members(body, content_bytes);
+                if !members.is_empty() {
+                    if let Some(name_node) = child.child_by_field_name("name") {
+                        let name_text = get_node_text(&name_node, content_bytes).trim().to_string();
+                        let parts: Vec<&str> = name_text.split("::").collect();
+                        let local_class_name = parts.last().copied().unwrap_or(&name_text).to_string();
+                        let local_ns_prefix: Option<String> = if parts.len() > 1 {
+                            Some(parts[..parts.len() - 1].join("::"))
+                        } else {
+                            None
+                        };
+                        let ancestor_ns = get_ancestor_namespace(&child, content_bytes);
+                        let namespace = match (ancestor_ns, local_ns_prefix) {
+                            (Some(a), Some(l)) => Some(format!("{}::{}", a, l)),
+                            (Some(a), None)    => Some(a),
+                            (None,    Some(l)) => Some(l),
+                            (None,    None)    => None,
+                        };
+                        classes.push(ClassInfo {
+                            class_name: local_class_name,
+                            namespace,
+                            base_classes: vec![],
+                            symbol_type: "namespace".to_string(),
+                            line: child.start_position().row + 1,
+                            end_line: child.end_position().row + 1,
+                            range_start: child.start_byte(),
+                            range_end: child.end_byte(),
+                            members,
+                            is_final: false,
+                            is_interface: false,
+                        });
+                    }
+                }
+                // ネストした namespace を処理するためにボディをスタックに積む
+                stack.push(body);
+            }
+        }
+    }
+}
+
+/// namespace body の直接の子ノードのみから GameplayTag 関連シンボルを収集する。
+/// 子 `namespace_definition` ノードには入らない（`scan_namespace_node` が別途処理する）。
+///
+/// 以下の２パターンを処理する：
+/// 1. マクロ呼び出し:
+///      UE_DEFINE_GAMEPLAY_TAG_COMMENT(VarName, "tag.string", "comment")
+///      UE_DEFINE_GAMEPLAY_TAG(VarName, "tag.string")
+///      UE_DECLARE_GAMEPLAY_TAG_EXTERN(VarName)
+/// 2. extern 変数宣言 (ヘッダーの FNativeGameplayTag 形式):
+///      extern FNativeGameplayTag VarName;
+///      extern FGameplayTag VarName;
+fn collect_direct_tag_members(body: Node, content_bytes: &[u8]) -> Vec<MemberInfo> {
+    let mut members = Vec::new();
+    let mut cursor = body.walk();
+    for child in body.children(&mut cursor) {
+        // 子 namespace には入らない
+        if child.kind() == "namespace_definition" {
+            continue;
+        }
+        // パターン 1: UE_DEFINE_GAMEPLAY_TAG_COMMENT / UE_DEFINE_GAMEPLAY_TAG / UE_DECLARE_GAMEPLAY_TAG_EXTERN
+        if let Some(call_node) = find_direct_call(child) {
+            if let Some((var_name, detail)) = extract_tag_from_call(call_node, content_bytes) {
+                members.push(MemberInfo {
+                    name: var_name,
+                    mem_type: "property".to_string(),
+                    // "static" フラグで is_static=1 として DB に登録される。
+                    // namespace スコープの変数は :: でアクセスするため static メンバと同扱いにする。
+                    flags: "static".to_string(),
+                    access: "public".to_string(),
+                    line: call_node.start_position().row + 1,
+                    end_line: call_node.end_position().row + 1,
+                    detail: if detail.is_empty() { None } else { Some(detail) },
+                    return_type: Some("FGameplayTag".to_string()),
+                });
+                continue;
+            }
+        }
+        // パターン 2: extern FNativeGameplayTag / FGameplayTag VarName;
+        if let Some((var_name, type_name)) = extract_extern_tag_decl(child, content_bytes) {
+            members.push(MemberInfo {
+                name: var_name,
+                mem_type: "property".to_string(),
+                flags: "static".to_string(),
+                access: "public".to_string(),
+                line: child.start_position().row + 1,
+                end_line: child.end_position().row + 1,
+                detail: None,
+                return_type: Some(type_name),
+            });
+        }
+    }
+    members
+}
+
+/// ノード自身が call_expression か、直接の子に call_expression を持つ場合に返す。
+fn find_direct_call(node: Node) -> Option<Node> {
+    if node.kind() == "call_expression" {
+        return Some(node);
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if child.kind() == "call_expression" {
+            return Some(child);
+        }
+    }
+    None
+}
+
+/// call_expression が GameplayTag マクロ呼び出しであれば
+/// `(変数名, タグ文字列)` を返す。
+/// - UE_DEFINE_GAMEPLAY_TAG_COMMENT(VarName, "tag.string", "comment") → 3 args
+/// - UE_DEFINE_GAMEPLAY_TAG(VarName, "tag.string")                    → 2 args
+/// - UE_DECLARE_GAMEPLAY_TAG_EXTERN(VarName)                          → 1 arg
+fn extract_tag_from_call<'a>(call: Node<'a>, content_bytes: &'a [u8]) -> Option<(String, String)> {
+    let func_node = call.child_by_field_name("function")?;
+    let func_name = get_node_text(&func_node, content_bytes).trim();
+    if !func_name.starts_with("UE_DEFINE_GAMEPLAY_TAG") && !func_name.starts_with("UE_DECLARE_GAMEPLAY_TAG") {
+        return None;
+    }
+
+    let args_node = call.child_by_field_name("arguments")?;
+    let mut cursor = args_node.walk();
+    let mut arg_count = 0usize;
+    let mut var_name = String::new();
+    let mut tag_string = String::new();
+    let mut comment = String::new();
+
+    for child in args_node.children(&mut cursor) {
+        let k = child.kind();
+        if k == "(" || k == ")" || k == "," {
+            continue;
+        }
+        match arg_count {
+            0 => var_name  = get_node_text(&child, content_bytes).trim().to_string(),
+            1 => tag_string = get_node_text(&child, content_bytes).trim().trim_matches('"').to_string(),
+            2 => comment   = get_node_text(&child, content_bytes).trim().trim_matches('"').to_string(),
+            _ => {}
+        }
+        arg_count += 1;
+        if arg_count >= 3 { break; }
+    }
+
+    if var_name.is_empty() { return None; }
+
+    // detail = "tag.string" または "tag.string — comment"
+    let detail = if !comment.is_empty() {
+        format!("{} — {}", tag_string, comment)
+    } else {
+        tag_string
+    };
+    Some((var_name, detail))
+}
+
+/// 祖先の `namespace_definition` ノードの名前を `::` 結合で返す。
+/// `get_namespace` と同様だが `namespace_definition` のみを対象とする。
+fn get_ancestor_namespace(node: &Node, source: &[u8]) -> Option<String> {
+    let mut parts = Vec::new();
+    let mut curr = node.parent();
+    while let Some(n) = curr {
+        if n.kind() == "namespace_definition" {
+            if let Some(name) = n.child_by_field_name("name") {
+                parts.push(get_node_text(&name, source).trim().to_string());
+            }
+        }
+        curr = n.parent();
+    }
+    if parts.is_empty() { None } else { parts.reverse(); Some(parts.join("::")) }
+}
+
+/// `extern FNativeGameplayTag VarName;` / `extern FGameplayTag VarName;` 形式の宣言から
+/// (変数名, 型名) を抽出する。GameplayTag 型以外の extern 宣言はスキップする。
+fn extract_extern_tag_decl(node: Node, content_bytes: &[u8]) -> Option<(String, String)> {
+    if node.kind() != "declaration" {
+        return None;
+    }
+    // storage class specifier "extern" を持つかチェック
+    let has_extern = {
+        let mut cursor = node.walk();
+        let result = node.children(&mut cursor).any(|c| {
+            c.kind() == "storage_class_specifier" && get_node_text(&c, content_bytes) == "extern"
+        });
+        result
+    };
+    if !has_extern {
+        return None;
+    }
+    // type フィールドが GameplayTag 関連型かチェック
+    let type_node = node.child_by_field_name("type")?;
+    let type_text = get_node_text(&type_node, content_bytes).trim().to_string();
+    // FNativeGameplayTag, FGameplayTag, FNativeGameplayTagComment などを受け入れる
+    if !type_text.contains("GameplayTag") {
+        return None;
+    }
+    // declarator フィールドから変数名を取得
+    let declarator = node.child_by_field_name("declarator")?;
+    let var_name = get_node_text(&declarator, content_bytes).trim().to_string();
+    if var_name.is_empty() {
+        return None;
+    }
+    Some((var_name, type_text))
+}
+

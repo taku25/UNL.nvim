@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use rusqlite::{params, Connection, OptionalExtension};
 use crate::types::{ParseResult, ProgressReporter};
 
-pub const DB_VERSION: i32 = 22;
+pub const DB_VERSION: i32 = 23;
 
 pub fn ensure_correct_version(db_path: &str) -> anyhow::Result<bool> {
     let mut version_match = false;
