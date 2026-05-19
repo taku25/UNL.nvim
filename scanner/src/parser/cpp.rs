@@ -121,7 +121,7 @@ pub fn parse_content_mmap(content_bytes: &[u8], _path: &str, language: &tree_sit
             let mut classes: Vec<ClassInfo> = Vec::new();
             let mut calls: Vec<crate::types::CallInfo> = Vec::new();
             let mut includes: Vec<String> = Vec::new();
-            let mut members: Vec<(MemberInfo, usize, usize)> = Vec::new();
+            let mut members: Vec<(MemberInfo, usize, usize, bool)> = Vec::new();
 
             // インクルード解析 (渡された include_query を使用)
             let mut include_matches = cursor.matches(include_query, root, content_bytes);
@@ -255,7 +255,10 @@ pub fn parse_content_mmap(content_bytes: &[u8], _path: &str, language: &tree_sit
                                 });
                                 member.access = "impl".to_string();
                                 classes[idx].members.push(member);
-                            } else { members.push((member, node.start_byte(), node.end_byte())); }
+                            } else {
+                                let in_compound = is_inside_compound_statement(node);
+                                members.push((member, node.start_byte(), node.end_byte(), in_compound));
+                            }
                         }
                     }
                 } else if *capture_name == "alias_node" {
@@ -292,16 +295,38 @@ pub fn parse_content_mmap(content_bytes: &[u8], _path: &str, language: &tree_sit
                                 detail: if alias_type.is_empty() { None } else { Some(alias_type.clone()) },
                                 return_type: if alias_type.is_empty() { None } else { Some(alias_type) },
                             };
-                            members.push((member, node.start_byte(), node.end_byte()));
+                            members.push((member, node.start_byte(), node.end_byte(), is_inside_compound_statement(node)));
                         }
                     }
                 } else if *capture_name == "enum_val_name" {
-                    members.push((MemberInfo { name: get_node_text(&node, content_bytes).to_string(), mem_type: "enum_item".to_string(), flags: "".to_string(), access: "public".to_string(), line: node.start_position().row + 1, end_line: node.end_position().row + 1, detail: None, return_type: None }, node.start_byte(), node.end_byte()));
+                    members.push((MemberInfo { name: get_node_text(&node, content_bytes).to_string(), mem_type: "enum_item".to_string(), flags: "".to_string(), access: "public".to_string(), line: node.start_position().row + 1, end_line: node.end_position().row + 1, detail: None, return_type: None }, node.start_byte(), node.end_byte(), false));
                 }
             }
-            for (member, m_start, m_end) in members {
+            for (member, m_start, m_end, in_compound) in members {
                 if let Some(idx) = classes.iter().enumerate().filter(|(_, c)| m_start >= c.range_start && m_end <= c.range_end).min_by_key(|(_, c)| c.range_end - c.range_start).map(|(i, _)| i) {
                     classes[idx].members.push(member);
+                } else if !in_compound {
+                    // クラス・構造体の外でかつ関数ボディの外 → グローバルシンボルとして登録
+                    let symbol_type = match member.mem_type.as_str() {
+                        "function"   => "global_function",
+                        "type_alias" => "type_alias",
+                        _            => "global_var",
+                    };
+                    if !member.name.is_empty() {
+                        classes.push(ClassInfo {
+                            class_name: member.name.clone(),
+                            namespace: None,
+                            base_classes: vec![],
+                            symbol_type: symbol_type.to_string(),
+                            line: member.line,
+                            end_line: member.end_line,
+                            range_start: m_start,
+                            range_end: m_end,
+                            members: vec![],
+                            is_final: false,
+                            is_interface: false,
+                        });
+                    }
                 }
             }
 
@@ -309,10 +334,8 @@ pub fn parse_content_mmap(content_bytes: &[u8], _path: &str, language: &tree_sit
             // UE_DECLARE_GAMEPLAY_TAG_EXTERN が含まれる namespace を ClassInfo として登録する。
             // これにより BS2GameplayTags::E000100:: 形式の補完が機能するようになる。
             scan_gameplay_tag_namespaces(root, content_bytes, &mut classes);
-
-            // #define マクロを global シンボルとして登録する。
-            // translation_unit の直接の子のみを対象にする（#if 内は対象外）。
             scan_preproc_defines(root, content_bytes, &mut classes);
+            scan_delegate_and_log_macros(root, content_bytes, &mut classes);
 
             Ok((classes, calls, includes))
         })
@@ -395,8 +418,24 @@ fn clean_type_string(s: &str) -> String {
     clean.split_whitespace().last().unwrap_or("").to_string()
 }
 
-// ─── #define macro scanning ─────────────────────────────────────────────────
+// ─── Global scope helpers ────────────────────────────────────────────────────
 
+/// ノードが `compound_statement`（関数ボディ等）の内側にあるか判定する。
+/// これが true のとき、そのノードはローカルスコープにある。
+fn is_inside_compound_statement(node: Node) -> bool {
+    let mut curr = node;
+    while let Some(parent) = curr.parent() {
+        match parent.kind() {
+            "compound_statement" => return true,
+            "translation_unit"   => return false,
+            _ => {}
+        }
+        curr = parent;
+    }
+    false
+}
+
+// ─── #define macro scanning ─────────────────────────────────────────────────
 /// `translation_unit` の直接の子 `preproc_def` / `preproc_function_def` ノードから
 /// マクロ名を抽出し、`ClassInfo { symbol_type: "define" }` としてグローバルシンボルに登録する。
 /// 中身の値は格納しない（名前のみ）。
@@ -650,3 +689,122 @@ fn extract_extern_tag_decl(node: Node, content_bytes: &[u8]) -> Option<(String, 
     Some((var_name, type_text))
 }
 
+// ─── Delegate / Log category macro scanning ─────────────────────────────────
+
+/// デリゲート宣言マクロ (`DECLARE_DELEGATE_*`, `DECLARE_EVENT_*` 等) と
+/// ログカテゴリ宣言マクロ (`DECLARE_LOG_CATEGORY_EXTERN`, `DEFINE_LOG_CATEGORY*`) を
+/// `translation_unit` の直接の子から収集する。
+fn scan_delegate_and_log_macros(root: Node, content_bytes: &[u8], classes: &mut Vec<ClassInfo>) {
+    let mut cursor = root.walk();
+    for child in root.children(&mut cursor) {
+        match child.kind() {
+            "unreal_declaration_macro" => {
+                if let Some((name, sym_type)) = extract_unreal_decl_macro(child, content_bytes) {
+                    classes.push(ClassInfo {
+                        class_name:   name,
+                        namespace:    None,
+                        base_classes: vec![],
+                        symbol_type:  sym_type,
+                        line:         child.start_position().row + 1,
+                        end_line:     child.end_position().row + 1,
+                        range_start:  child.start_byte(),
+                        range_end:    child.end_byte(),
+                        members:      vec![],
+                        is_final:     false,
+                        is_interface: false,
+                    });
+                }
+            }
+            "expression_statement" | "declaration" => {
+                if let Some((name, sym_type)) = extract_log_category_node(child, content_bytes) {
+                    classes.push(ClassInfo {
+                        class_name:   name,
+                        namespace:    None,
+                        base_classes: vec![],
+                        symbol_type:  sym_type,
+                        line:         child.start_position().row + 1,
+                        end_line:     child.end_position().row + 1,
+                        range_start:  child.start_byte(),
+                        range_end:    child.end_byte(),
+                        members:      vec![],
+                        is_final:     false,
+                        is_interface: false,
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn extract_unreal_decl_macro(node: Node, content_bytes: &[u8]) -> Option<(String, String)> {
+    let macro_name_node = node.child_by_field_name("name")?;
+    let macro_name = get_node_text(&macro_name_node, content_bytes).trim().to_string();
+
+    let is_delegate = macro_name.starts_with("DECLARE_DELEGATE")
+        || macro_name.starts_with("DECLARE_DYNAMIC_DELEGATE")
+        || macro_name.starts_with("DECLARE_MULTICAST_DELEGATE")
+        || macro_name.starts_with("DECLARE_DYNAMIC_MULTICAST_DELEGATE")
+        || macro_name.starts_with("DECLARE_SPARSE_DYNAMIC_DELEGATE")
+        || macro_name.starts_with("DECLARE_TS_MULTICAST_DELEGATE");
+    let is_event = macro_name.starts_with("DECLARE_EVENT");
+
+    if !is_delegate && !is_event {
+        return None;
+    }
+
+    // RetVal 系 / Event 系はデリゲート名が引数 1 番目
+    let name_arg_idx: usize = if macro_name.contains("RetVal") || is_event { 1 } else { 0 };
+
+    let args_node = node.child_by_field_name("arguments")?;
+    let delegate_name = get_nth_specifier_identifier(args_node, name_arg_idx, content_bytes)?;
+
+    Some((delegate_name, "delegate".to_string()))
+}
+
+fn get_nth_specifier_identifier(args: Node, n: usize, content_bytes: &[u8]) -> Option<String> {
+    let mut cursor = args.walk();
+    let mut idx = 0usize;
+    for child in args.children(&mut cursor) {
+        let k = child.kind();
+        if k == "(" || k == ")" || k == "," {
+            continue;
+        }
+        if idx == n {
+            let text = get_leaf_identifier_text(child, content_bytes);
+            if !text.is_empty() { return Some(text); }
+            let raw = get_node_text(&child, content_bytes).trim().to_string();
+            if !raw.is_empty() { return Some(raw); }
+            return None;
+        }
+        idx += 1;
+    }
+    None
+}
+
+fn get_leaf_identifier_text(node: Node, content_bytes: &[u8]) -> String {
+    if node.child_count() == 0 {
+        return get_node_text(&node, content_bytes).trim().to_string();
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        let text = get_leaf_identifier_text(child, content_bytes);
+        if !text.is_empty() { return text; }
+    }
+    String::new()
+}
+
+fn extract_log_category_node(node: Node, content_bytes: &[u8]) -> Option<(String, String)> {
+    let call = find_direct_call(node)?;
+    let func_node = call.child_by_field_name("function")?;
+    let func_name = get_node_text(&func_node, content_bytes).trim().to_string();
+    if func_name != "DECLARE_LOG_CATEGORY_EXTERN"
+        && func_name != "DEFINE_LOG_CATEGORY"
+        && func_name != "DEFINE_LOG_CATEGORY_STATIC"
+    {
+        return None;
+    }
+    let args_node = call.child_by_field_name("arguments")?;
+    let log_name = get_nth_specifier_identifier(args_node, 0, content_bytes)?;
+    Some((log_name, "log_category".to_string()))
+}

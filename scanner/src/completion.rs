@@ -1255,20 +1255,25 @@ fn fetch_members_recursive(
 
 fn fetch_global_symbols(conn: &Connection, prefix: &str) -> anyhow::Result<Value> {
     let mut results = Vec::new();
-    // class/struct/enum と define を別クエリで取得することで、
-    // どちらか一方が LIMIT を埋めてもう一方が消えないようにする。
+    // Query 1: class/struct/enum/UCLASS/USTRUCT/UENUM
     let mut stmt = conn.prepare(
         "SELECT DISTINCT s.text, symbol_type FROM classes c JOIN strings s ON c.name_id = s.id \
-         WHERE s.text LIKE ? AND symbol_type IN ('class', 'struct', 'enum') LIMIT 80"
+         WHERE s.text LIKE ? AND symbol_type IN ('class', 'struct', 'enum', 'namespace') LIMIT 80"
     )?;
     let rows = stmt.query_map([format!("{}%", prefix)], |row| {
         let name: String = row.get(0)?;
         let sym_type: String = row.get(1)?;
-        let kind = match sym_type.as_str() { "class" | "struct" => 7, "enum" => 13, _ => 1 };
+        let kind = match sym_type.as_str() {
+            "class" | "struct" => 7,
+            "enum"             => 13,
+            "namespace"        => 9,
+            _                  => 1,
+        };
         Ok(json!({ "label": name, "kind": kind, "detail": sym_type, "insertText": name }))
     })?;
     for r in rows { results.push(r?); }
 
+    // Query 2: #define macros
     let mut stmt_def = conn.prepare(
         "SELECT DISTINCT s.text FROM classes c JOIN strings s ON c.name_id = s.id \
          WHERE s.text LIKE ? AND symbol_type = 'define' LIMIT 80"
@@ -1278,6 +1283,26 @@ fn fetch_global_symbols(conn: &Connection, prefix: &str) -> anyhow::Result<Value
         Ok(json!({ "label": name, "kind": 15, "detail": "define", "insertText": name }))
     })?;
     for r in def_rows { results.push(r?); }
+
+    // Query 3: global functions, global vars, type aliases, delegates, log categories
+    let mut stmt_global = conn.prepare(
+        "SELECT DISTINCT s.text, symbol_type FROM classes c JOIN strings s ON c.name_id = s.id \
+         WHERE s.text LIKE ? AND symbol_type IN ('global_function','global_var','type_alias','delegate','log_category') LIMIT 80"
+    )?;
+    let global_rows = stmt_global.query_map([format!("{}%", prefix)], |row| {
+        let name: String = row.get(0)?;
+        let sym_type: String = row.get(1)?;
+        let kind = match sym_type.as_str() {
+            "global_function" => 3,
+            "global_var"      => 6,
+            "type_alias"      => 25,
+            "delegate"        => 7,
+            "log_category"    => 6,
+            _                 => 1,
+        };
+        Ok(json!({ "label": name, "kind": kind, "detail": sym_type, "insertText": name }))
+    })?;
+    for r in global_rows { results.push(r?); }
 
     Ok(json!(results))
 }
