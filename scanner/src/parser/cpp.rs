@@ -84,7 +84,7 @@ pub fn process_file(input: &InputFile, language: &tree_sitter::Language, query: 
     if is_header {
         // ヘッダーファイルのみ、高速フィルタリングを適用
         let has_important_keywords = 
-            content_bytes.windows(7).any(|w| w == b"UCLASS(" || w == b"USTRUCT" || w == b"UENUM(" || w == b"DECLARE" || w == b"include") 
+            content_bytes.windows(7).any(|w| w == b"UCLASS(" || w == b"USTRUCT" || w == b"UENUM(" || w == b"DECLARE" || w == b"include" || w == b"#define")
             || content_bytes.windows(10).any(|w| w == b"UFUNCTION" || w == b"UPROPERTY")
             || content_bytes.windows(12).any(|w| w == b"GAMEPLAY_TAG");
 
@@ -310,6 +310,10 @@ pub fn parse_content_mmap(content_bytes: &[u8], _path: &str, language: &tree_sit
             // これにより BS2GameplayTags::E000100:: 形式の補完が機能するようになる。
             scan_gameplay_tag_namespaces(root, content_bytes, &mut classes);
 
+            // #define マクロを global シンボルとして登録する。
+            // translation_unit の直接の子のみを対象にする（#if 内は対象外）。
+            scan_preproc_defines(root, content_bytes, &mut classes);
+
             Ok((classes, calls, includes))
         })
     })
@@ -389,6 +393,40 @@ fn clean_type_string(s: &str) -> String {
     clean = clean.replace(";", "").replace(":", " : ").replace("  ", " ").trim().to_string();
     if clean.contains('<') && clean.contains('>') { return clean; }
     clean.split_whitespace().last().unwrap_or("").to_string()
+}
+
+// ─── #define macro scanning ─────────────────────────────────────────────────
+
+/// `translation_unit` の直接の子 `preproc_def` / `preproc_function_def` ノードから
+/// マクロ名を抽出し、`ClassInfo { symbol_type: "define" }` としてグローバルシンボルに登録する。
+/// 中身の値は格納しない（名前のみ）。
+fn scan_preproc_defines(root: Node, content_bytes: &[u8], classes: &mut Vec<ClassInfo>) {
+    let mut cursor = root.walk();
+    for child in root.children(&mut cursor) {
+        let kind = child.kind();
+        if kind != "preproc_def" && kind != "preproc_function_def" {
+            continue;
+        }
+        if let Some(name_node) = child.child_by_field_name("name") {
+            let macro_name = get_node_text(&name_node, content_bytes).trim().to_string();
+            if macro_name.is_empty() {
+                continue;
+            }
+            classes.push(ClassInfo {
+                class_name: macro_name,
+                namespace: None,
+                base_classes: vec![],
+                symbol_type: "define".to_string(),
+                line: child.start_position().row + 1,
+                end_line: child.end_position().row + 1,
+                range_start: child.start_byte(),
+                range_end: child.end_byte(),
+                members: vec![],
+                is_final: false,
+                is_interface: false,
+            });
+        }
+    }
 }
 
 // ─── UE Gameplay Tag namespace scanning ────────────────────────────────────────

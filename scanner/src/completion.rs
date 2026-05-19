@@ -1255,7 +1255,12 @@ fn fetch_members_recursive(
 
 fn fetch_global_symbols(conn: &Connection, prefix: &str) -> anyhow::Result<Value> {
     let mut results = Vec::new();
-    let mut stmt = conn.prepare("SELECT s.text, symbol_type FROM classes c JOIN strings s ON c.name_id = s.id WHERE s.text LIKE ? AND symbol_type IN ('class', 'struct', 'enum') LIMIT 50")?;
+    // class/struct/enum と define を別クエリで取得することで、
+    // どちらか一方が LIMIT を埋めてもう一方が消えないようにする。
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT s.text, symbol_type FROM classes c JOIN strings s ON c.name_id = s.id \
+         WHERE s.text LIKE ? AND symbol_type IN ('class', 'struct', 'enum') LIMIT 80"
+    )?;
     let rows = stmt.query_map([format!("{}%", prefix)], |row| {
         let name: String = row.get(0)?;
         let sym_type: String = row.get(1)?;
@@ -1263,6 +1268,17 @@ fn fetch_global_symbols(conn: &Connection, prefix: &str) -> anyhow::Result<Value
         Ok(json!({ "label": name, "kind": kind, "detail": sym_type, "insertText": name }))
     })?;
     for r in rows { results.push(r?); }
+
+    let mut stmt_def = conn.prepare(
+        "SELECT DISTINCT s.text FROM classes c JOIN strings s ON c.name_id = s.id \
+         WHERE s.text LIKE ? AND symbol_type = 'define' LIMIT 80"
+    )?;
+    let def_rows = stmt_def.query_map([format!("{}%", prefix)], |row| {
+        let name: String = row.get(0)?;
+        Ok(json!({ "label": name, "kind": 15, "detail": "define", "insertText": name }))
+    })?;
+    for r in def_rows { results.push(r?); }
+
     Ok(json!(results))
 }
 
