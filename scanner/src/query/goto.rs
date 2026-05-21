@@ -538,9 +538,12 @@ fn search_decl_in_node(node: tree_sitter::Node, src: &[u8], symbol: &str) -> Opt
         }
         "class_specifier" | "struct_specifier" | "enum_specifier"
         | "unreal_class_declaration" | "unreal_struct_declaration" => {
-            if let Some(name_node) = node.child_by_field_name("name") {
-                if node_text(&name_node, src) == symbol {
-                    return Some(name_node.start_position());
+            // 前方宣言 (body なし) は無視する
+            if node.child_by_field_name("body").is_some() {
+                if let Some(name_node) = node.child_by_field_name("name") {
+                    if node_text(&name_node, src) == symbol {
+                        return Some(name_node.start_position());
+                    }
                 }
             }
         }
