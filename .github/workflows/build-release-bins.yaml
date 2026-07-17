@@ -1,7 +1,7 @@
 # .github/workflows/release-scanner.yml
 #
 # Builds unl-scanner and unl-server for Windows, Linux, and macOS on every
-# version tag (v1.2.3), attaches the binaries to a GitHub Release, and -
+# tag push, attaches the binaries to a GitHub Release, and -
 # because asset names are stable - scripts can always fetch the newest build:
 #
 #   https://github.com/taku25/UNL.nvim/releases/latest/download/unl-scanner-<target>[.exe]
@@ -13,10 +13,10 @@ on:
   push:
     tags:
       - "*"
-  workflow_dispatch: {}   # allow manual runs for testing
+  workflow_dispatch: {}
 
 permissions:
-  contents: write         # required to create/update releases
+  contents: write
 
 jobs:
   build:
@@ -44,7 +44,7 @@ jobs:
             ext: ""
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -84,7 +84,7 @@ jobs:
           done
 
       - name: Upload build artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: binaries-${{ matrix.target }}
           path: dist/*
@@ -96,7 +96,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v6
         with:
           path: dist
           merge-multiple: true
@@ -112,5 +112,4 @@ jobs:
         with:
           files: dist/*
           generate_release_notes: true
-          # For workflow_dispatch runs (no tag), mark as prerelease draft:
           draft: ${{ github.ref_type != 'tag' }}
