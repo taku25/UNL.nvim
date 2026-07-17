@@ -39,9 +39,10 @@ jobs:
           - os: macos-latest
             target: aarch64-apple-darwin
             ext: ""
-          - os: macos-13
-            target: x86_64-apple-darwin
-            ext: ""
+          # We're gonna have to see if this even works - it's not getting picked up by any github runners...
+          # - os: macos-13
+          #   target: x86_64-apple-darwin
+          #   ext: ""
 
     steps:
       - uses: actions/checkout@v5
