@@ -337,9 +337,9 @@ pub fn run_refresh(req: RefreshRequest, reporter: Arc<dyn ProgressReporter>) -> 
     // FK ON 状態での module_id チェックを回避するため、削除前に files.module_id を NULL にしておく。
     match (engine_rev_same, engine_name.as_ref()) {
         (true, Some(en)) => {
-            tx.execute("UPDATE files SET module_id = NULL WHERE module_id IN (SELECT id FROM modules WHERE owner_name != ?)", params![en])?;
-            tx.execute("DELETE FROM components WHERE owner_name != ?", params![en])?;
-            tx.execute("DELETE FROM modules WHERE owner_name != ?", params![en])?;
+            tx.execute("UPDATE files SET module_id = NULL WHERE module_id IN (SELECT id FROM modules WHERE owner_name != ? OR owner_name IS NULL)", params![en])?;
+            tx.execute("DELETE FROM components WHERE owner_name != ? OR owner_name IS NULL", params![en])?;
+            tx.execute("DELETE FROM modules WHERE owner_name != ? OR owner_name IS NULL", params![en])?;
         }
         _ => {
             tx.execute("UPDATE files SET module_id = NULL", [])?;
