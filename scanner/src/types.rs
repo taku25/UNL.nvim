@@ -191,6 +191,7 @@ pub struct ConfigPlatform {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ConfigSection {
     pub name: String,
+    pub category: String,
     pub parameters: Vec<ConfigParameter>,
 }
 

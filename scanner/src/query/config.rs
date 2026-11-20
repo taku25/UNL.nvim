@@ -129,6 +129,7 @@ fn format_value(val: &Value) -> String {
 struct ConfigSource {
     path: PathBuf,
     name: String,
+    category: String,
 }
 
 pub fn get_config_data_with_cache(state: &AppState, project_root_str: &str, engine_root_opt: Option<&str>) -> Result<Vec<ConfigPlatform>> {
@@ -237,7 +238,9 @@ fn get_available_platforms(project_root: &Path, engine_root: Option<&Path>) -> V
 fn resolve_platform(name: &str, platform: &str, is_profile: bool, project_root: &Path, engine_root: Option<&Path>) -> Result<ConfigPlatform> {
     let stack = get_config_stack(project_root, engine_root, platform);
     
-    let mut resolved_sections: BTreeMap<String, BTreeMap<String, (Value, Vec<ConfigHistory>)>> = BTreeMap::new();
+    // let mut resolved_sections: BTreeMap<String, BTreeMap<String, (Value, Vec<ConfigHistory>)>> = BTreeMap::new();
+    type ParameterMap = BTreeMap<String, (Value, Vec<ConfigHistory>)>;
+    let mut resolved_sections: BTreeMap<(String, String), ParameterMap> = BTreeMap::new();
     
     for source in stack {
         if let Ok(parsed) = parse_ini(&source.path) {
@@ -245,7 +248,10 @@ fn resolve_platform(name: &str, platform: &str, is_profile: bool, project_root: 
             let full_path = source.path.to_string_lossy().into_owned();
             
             for (section_name, items) in parsed.sections {
-                let section = resolved_sections.entry(section_name).or_default();
+                // let section = resolved_sections.entry(section_name).or_default();
+                let section = resolved_sections
+                    .entry((source.category.clone(), section_name))
+                    .or_default();
                 for item in items {
                     let entry = section.entry(item.key.clone()).or_insert_with(|| (Value::Null, Vec::new()));
                     entry.0 = apply_op(if entry.0.is_null() { None } else { Some(entry.0.clone()) }, &item.op, &item.value);
@@ -263,7 +269,8 @@ fn resolve_platform(name: &str, platform: &str, is_profile: bool, project_root: 
     }
     
     let mut sections = Vec::new();
-    for (s_name, params_map) in resolved_sections {
+    // for (s_name, params_map) in resolved_sections {
+    for ((category, s_name), params_map) in resolved_sections {
         let mut parameters = Vec::new();
         for (p_key, (final_val, history)) in params_map {
             parameters.push(ConfigParameter {
@@ -274,6 +281,7 @@ fn resolve_platform(name: &str, platform: &str, is_profile: bool, project_root: 
         }
         sections.push(ConfigSection {
             name: s_name,
+            category,
             parameters,
         });
     }
@@ -286,58 +294,179 @@ fn resolve_platform(name: &str, platform: &str, is_profile: bool, project_root: 
     })
 }
 
-fn get_config_stack(project_root: &Path, engine_root: Option<&Path>, platform: &str) -> Vec<ConfigSource> {
-    let mut stack = Vec::new();
-    
-    fn push_if_exists(stack: &mut Vec<ConfigSource>, p: PathBuf) {
-        if p.is_file() {
-            let mut name = p.file_name().unwrap().to_string_lossy().into_owned();
-            let parent = p.parent().unwrap();
-            if parent.file_name().map(|n| n != "Config").unwrap_or(false) {
-                name = format!("{}/{}", parent.file_name().unwrap().to_string_lossy(), name);
+// fn get_config_stack(project_root: &Path, engine_root: Option<&Path>, platform: &str) -> Vec<ConfigSource> {
+//     let mut stack = Vec::new();
+//
+//     fn push_if_exists(stack: &mut Vec<ConfigSource>, p: PathBuf) {
+//         if p.is_file() {
+//             let mut name = p.file_name().unwrap().to_string_lossy().into_owned();
+//             let parent = p.parent().unwrap();
+//             if parent.file_name().map(|n| n != "Config").unwrap_or(false) {
+//                 name = format!("{}/{}", parent.file_name().unwrap().to_string_lossy(), name);
+//             }
+//             stack.push(ConfigSource { path: p, name });
+//         }
+//     }
+//
+//     fn push_all_in_dir(stack: &mut Vec<ConfigSource>, dir: PathBuf) {
+//         if dir.is_dir() {
+//             if let Ok(entries) = fs::read_dir(dir) {
+//                 let mut files: Vec<_> = entries.flatten().collect();
+//                 files.sort_by_key(|e| e.file_name());
+//                 for entry in files {
+//                     if entry.path().extension().map(|ext| ext == "ini").unwrap_or(false) {
+//                         push_if_exists(stack, entry.path());
+//                     }
+//                 }
+//             }
+//         }
+//     }
+//
+//     if let Some(er) = engine_root {
+//         push_if_exists(&mut stack, er.join("Engine/Config/Base.ini"));
+//         push_if_exists(&mut stack, er.join("Engine/Config/BaseEngine.ini"));
+//
+//         if platform == "Mac" || platform == "IOS" || platform == "TVOS" || platform == "Apple" {
+//             push_if_exists(&mut stack, er.join("Engine/Config/Apple/AppleEngine.ini"));
+//         }
+//         if platform == "Linux" || platform == "Unix" {
+//             push_if_exists(&mut stack, er.join("Engine/Config/Unix/UnixEngine.ini"));
+//         }
+//
+//         if platform != "Default" {
+//             push_if_exists(&mut stack, er.join("Engine/Config").join(platform).join(format!("{}Engine.ini", platform)));
+//             push_all_in_dir(&mut stack, er.join("Engine/Platforms").join(platform).join("Config"));
+//         }
+//     }
+//
+//     push_if_exists(&mut stack, project_root.join("Config/DefaultEngine.ini"));
+//     push_all_in_dir(&mut stack, project_root.join("Platforms/Config"));
+//
+//     if platform != "Default" {
+//         push_if_exists(&mut stack, project_root.join("Config").join(platform).join(format!("{}Engine.ini", platform)));
+//         push_all_in_dir(&mut stack, project_root.join("Platforms").join(platform).join("Config"));
+//     }
+//
+//     stack
+// }
+fn get_config_stack(
+    project_root: &Path,
+    engine_root: Option<&Path>,
+    platform: &str,
+) -> Vec<ConfigSource> {
+    fn push_file(stack: &mut Vec<ConfigSource>, path: PathBuf, category: &str) {
+        if !path.is_file() {
+            return;
+        }
+
+        let Some(filename) = path.file_name() else {
+            return;
+        };
+        let filename = filename.to_string_lossy();
+
+        // Preserve the labels already shown in parameter history.
+        let name = match path.parent().and_then(Path::file_name) {
+            Some(parent) if parent != "Config" => {
+                format!("{}/{}", parent.to_string_lossy(), filename)
             }
-            stack.push(ConfigSource { path: p, name });
+            _ => filename.into_owned(),
+        };
+
+        stack.push(ConfigSource {
+            path,
+            name,
+            category: category.to_owned(),
+        });
+    }
+
+    fn push_layer(
+        stack: &mut Vec<ConfigSource>,
+        dir: PathBuf,
+        prefix: &str,
+        include_standalone: bool,
+    ) {
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
+
+        let mut paths: Vec<PathBuf> = entries
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .collect();
+        paths.sort();
+
+        for path in paths {
+            if path.extension().and_then(|ext| ext.to_str()) != Some("ini") {
+                continue;
+            }
+            let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+                continue;
+            };
+
+            let category = match stem.strip_prefix(prefix) {
+                Some("") => continue,
+                Some(category) => category,
+                None if include_standalone => stem,
+                None => continue,
+            };
+
+            // `category` borrows `path`, so borrow for the lookup and
+            // give the source its own path.
+            push_file(stack, path.to_path_buf(), category);
         }
     }
 
-    fn push_all_in_dir(stack: &mut Vec<ConfigSource>, dir: PathBuf) {
-        if dir.is_dir() {
-            if let Ok(entries) = fs::read_dir(dir) {
-                let mut files: Vec<_> = entries.flatten().collect();
-                files.sort_by_key(|e| e.file_name());
-                for entry in files {
-                    if entry.path().extension().map(|ext| ext == "ini").unwrap_or(false) {
-                        push_if_exists(stack, entry.path());
-                    }
-                }
-            }
-        }
-    }
+    let mut stack = Vec::new();
 
     if let Some(er) = engine_root {
-        push_if_exists(&mut stack, er.join("Engine/Config/Base.ini"));
-        push_if_exists(&mut stack, er.join("Engine/Config/BaseEngine.ini"));
-        
-        if platform == "Mac" || platform == "IOS" || platform == "TVOS" || platform == "Apple" {
-            push_if_exists(&mut stack, er.join("Engine/Config/Apple/AppleEngine.ini"));
+        let config = er.join("Engine/Config");
+
+        push_file(&mut stack, config.join("Base.ini"), "Engine");
+        push_layer(&mut stack, config.clone(), "Base", false);
+
+        // Load the shared parent platform before the specific platform.
+        let parent = match platform {
+            "Mac" | "IOS" | "TVOS" => Some("Apple"),
+            "Linux" => Some("Unix"),
+            _ => None,
+        };
+        if let Some(parent) = parent {
+            push_layer(&mut stack, config.join(parent), parent, false);
         }
-        if platform == "Linux" || platform == "Unix" {
-            push_if_exists(&mut stack, er.join("Engine/Config/Unix/UnixEngine.ini"));
-        }
-        
+
         if platform != "Default" {
-            push_if_exists(&mut stack, er.join("Engine/Config").join(platform).join(format!("{}Engine.ini", platform)));
-            push_all_in_dir(&mut stack, er.join("Engine/Platforms").join(platform).join("Config"));
+            push_layer(&mut stack, config.join(platform), platform, false);
+            push_layer(
+                &mut stack,
+                er.join("Engine/Platforms").join(platform).join("Config"),
+                platform,
+                true,
+            );
         }
     }
-    
-    push_if_exists(&mut stack, project_root.join("Config/DefaultEngine.ini"));
-    push_all_in_dir(&mut stack, project_root.join("Platforms/Config"));
-    
+
+    // DefaultEngine.ini, DefaultGame.ini, DefaultP1Expedition.ini, etc.
+    let project_config = project_root.join("Config");
+    push_layer(&mut stack, project_config.clone(), "Default", false);
+
+    // Keep the additional directory supported by the existing scanner.
+    push_layer(
+        &mut stack,
+        project_root.join("Platforms/Config"),
+        "Default",
+        true,
+    );
+
     if platform != "Default" {
-        push_if_exists(&mut stack, project_root.join("Config").join(platform).join(format!("{}Engine.ini", platform)));
-        push_all_in_dir(&mut stack, project_root.join("Platforms").join(platform).join("Config"));
+        // e.g. Config/Linux/LinuxP1Expedition.ini
+        push_layer(&mut stack, project_config.join(platform), platform, false);
+        push_layer(
+            &mut stack,
+            project_root.join("Platforms").join(platform).join("Config"),
+            platform,
+            true,
+        );
     }
-    
+
     stack
 }
